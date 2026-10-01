@@ -53,8 +53,15 @@ class CensusSnapshot(models.Model):
 
 
 class BedStatus(models.Model):
-    """Live bed board - refreshed via REST polling, not Channels."""
+    """Live bed board - refreshed via REST polling, not Channels.
+
+    Carries tenant_id even though it is reachable through Bed: architecture doc
+    section 13 requires the bed board to be tenant- and facility-scoped, and an
+    RLS policy cannot reach a tenant through a foreign key.
+    """
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     bed_id = models.UUIDField(db_index=True)
     ward_id = models.UUIDField(db_index=True)
     occupied = models.BooleanField(default=False)
@@ -63,3 +70,4 @@ class BedStatus(models.Model):
 
     class Meta:
         db_table = "ipd.bed_status"
+        indexes = [models.Index(fields=["tenant_id", "ward_id", "occupied"])]

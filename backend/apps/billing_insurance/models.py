@@ -30,6 +30,7 @@ class Invoice(models.Model):
 
 class Payment(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     invoice_id = models.UUIDField(db_index=True)
     amount = models.DecimalField(max_digits=12, decimal_places=2)
     method = models.CharField(max_length=32)
@@ -38,10 +39,12 @@ class Payment(models.Model):
 
     class Meta:
         db_table = "billing.payment"
+        indexes = [models.Index(fields=["tenant_id", "invoice_id", "paid_at"])]
 
 
 class Claim(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     invoice_id = models.UUIDField(db_index=True)
     payer = models.CharField(max_length=64)
     pre_auth_no = models.CharField(max_length=64, null=True)
@@ -49,3 +52,4 @@ class Claim(models.Model):
 
     class Meta:
         db_table = "billing.claim"
+        indexes = [models.Index(fields=["tenant_id", "status", "invoice_id"])]

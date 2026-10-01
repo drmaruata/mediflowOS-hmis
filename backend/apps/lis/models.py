@@ -20,6 +20,7 @@ class LabOrder(models.Model):
 
 class LabResult(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     order_id = models.UUIDField(db_index=True)
     result = models.JSONField()
     critical = models.BooleanField(default=False)
@@ -30,3 +31,9 @@ class LabResult(models.Model):
 
     class Meta:
         db_table = "lis.result"
+        # Critical-result acknowledgement is an indicator input, and version
+        # supports append-only amendment rather than destructive correction.
+        indexes = [
+            models.Index(fields=["tenant_id", "order_id", "critical"]),
+            models.Index(fields=["tenant_id", "order_id", "version"]),
+        ]

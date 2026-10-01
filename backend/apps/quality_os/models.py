@@ -1,4 +1,16 @@
-"""Quality OS models (QOS-001 to QOS-074)."""
+"""Quality OS models (QOS-001 to QOS-074).
+
+The catalogue models - Framework, FrameworkEdition, IndicatorSourceDocument and
+IndicatorDef - are deliberately **global**, not tenant-owned. They carry the
+source-aligned NQAS and NABH indicator definitions, which architecture doc
+section 9.2 describes as a versioned source catalogue loaded once and shared,
+not per hospital. Tenant applicability is expressed on Tenant
+(accreditation_profile) and applied through IndicatorValue, which is
+tenant-scoped.
+
+Everything that records a tenant's own measurement - IndicatorValue, CAPA and
+QualityFact - does carry tenant_id and is protected by RLS.
+"""
 from django.db import models
 import uuid
 

@@ -15,6 +15,7 @@ middleware outside a transaction therefore silently disables isolation.
 and ``ATOMIC_REQUESTS`` keeps the view inside that same transaction.
 """
 from django.db import connection, transaction
+from rest_framework.exceptions import PermissionDenied
 
 TENANT_HEADER = "X-Tenant-Id"
 FACILITY_HEADER = "X-Facility-Id"
@@ -66,6 +67,46 @@ def resolve_tenant(request) -> tuple[str | None, str | None]:
     tenant_id = request.headers.get(TENANT_HEADER) or request.GET.get("tenant_id")
     facility_id = request.headers.get(FACILITY_HEADER)
     return (str(tenant_id) if tenant_id else None, str(facility_id) if facility_id else None)
+
+
+class TenantScopedQuerysetMixin:
+    """Scope a DRF viewset's queryset to the request's tenant.
+
+    Applied through ``get_queryset`` rather than per-method overrides, so every
+    verb - including the ones DRF generates for detail routes and ``get_object``
+    - is covered by one rule.
+
+    This is a second line of defence, not the primary control. Row level
+    security in PostgreSQL is what actually enforces isolation; this mixin
+    stops unscoped rows being selected in the first place, so a missing policy
+    surfaces as an empty queryset rather than a cross-tenant read.
+
+    When no tenant is resolved the queryset is empty rather than unfiltered. An
+    unfiltered queryset would be the dangerous failure mode: it would look like
+    a working endpoint while returning every tenant's rows.
+    """
+
+    #: Field on the model holding the tenant identifier.
+    tenant_field = "tenant_id"
+
+    def get_tenant_id(self):
+        return getattr(self.request, REQUEST_TENANT_ATTR, None)
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        tenant_id = self.get_tenant_id()
+        if not tenant_id:
+            return queryset.none()
+        return queryset.filter(**{self.tenant_field: tenant_id})
+
+    def perform_create(self, serializer):
+        """Stamp the tenant from the request; never trust a client-supplied one."""
+        tenant_id = self.get_tenant_id()
+        if not tenant_id:
+            raise PermissionDenied(
+                "A tenant must be resolved before tenant-owned data can be written."
+            )
+        serializer.save(**{self.tenant_field: tenant_id})
 
 
 class TenantMiddleware:

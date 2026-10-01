@@ -4,6 +4,13 @@ import uuid
 
 
 class Tenant(models.Model):
+    """The tenant root.
+
+    This is the one domain model that has no ``tenant_id``: it *is* the
+    tenancy. Every other tenant-owned model carries one, including models that
+    are otherwise reachable from here by a foreign key chain.
+    """
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     name = models.CharField(max_length=200)
     slug = models.SlugField(unique=True)
@@ -48,7 +55,17 @@ class Department(models.Model):
 
 
 class Ward(models.Model):
+    """Tenancy is denormalised onto every tenant-owned row.
+
+    Ward is reachable from Tenant through Department and Facility, but RLS
+    policies cannot join: a policy may only reference columns of its own table
+    plus expressions, and a subquery into another RLS-protected table would be
+    subject to that table's own policies. Carrying tenant_id directly is what
+    makes `tenant_id = current_setting('app.tenant_id')::uuid` expressible.
+    """
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name="wards", db_index=True)
     name = models.CharField(max_length=120)
     type_tag = models.CharField(max_length=64)  # Medical, Surgical, Maternity, Paediatric, ICU, SNCU, NRC
@@ -56,10 +73,12 @@ class Ward(models.Model):
 
     class Meta:
         db_table = "identity.ward"
+        indexes = [models.Index(fields=["tenant_id", "department", "active"])]
 
 
 class Bed(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     ward = models.ForeignKey(Ward, on_delete=models.CASCADE, related_name="beds", db_index=True)
     bed_number = models.CharField(max_length=32)
     functional = models.BooleanField(default=True)
@@ -67,20 +86,24 @@ class Bed(models.Model):
 
     class Meta:
         db_table = "identity.bed"
+        indexes = [models.Index(fields=["tenant_id", "ward", "functional"])]
 
 
 class ServiceUnit(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     facility = models.ForeignKey(Facility, on_delete=models.CASCADE, related_name="service_units", db_index=True)
     name = models.CharField(max_length=120)
     type_tag = models.CharField(max_length=64)  # OT, Labour Room, Laboratory, Radiology, Pharmacy, Blood Bank, Mortuary, CSSD
 
     class Meta:
         db_table = "identity.service_unit"
+        indexes = [models.Index(fields=["tenant_id", "facility", "type_tag"])]
 
 
 class StaffPosition(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     department = models.ForeignKey(Department, on_delete=models.CASCADE, related_name="staff_positions", db_index=True)
     designation = models.CharField(max_length=120)
     specialty = models.CharField(max_length=120, null=True, blank=True)
@@ -89,3 +112,4 @@ class StaffPosition(models.Model):
 
     class Meta:
         db_table = "identity.staff_position"
+        indexes = [models.Index(fields=["tenant_id", "department", "designation"])]

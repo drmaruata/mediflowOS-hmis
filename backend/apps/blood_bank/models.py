@@ -16,6 +16,7 @@ class Donor(models.Model):
 
 class Donation(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     donor_id = models.UUIDField(db_index=True)
     collection_time = models.DateTimeField(auto_now_add=True)
     testing_status = models.CharField(max_length=32, default="pending")  # pending | passed | failed
@@ -23,6 +24,7 @@ class Donation(models.Model):
 
     class Meta:
         db_table = "bbk.donation"
+        indexes = [models.Index(fields=["tenant_id", "donor_id", "testing_status"])]
 
 
 class BloodComponent(models.Model):
@@ -54,16 +56,19 @@ class Requisition(models.Model):
 
 class CrossMatch(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     requisition_id = models.UUIDField(db_index=True)
     result = models.CharField(max_length=32)  # compatible | incompatible | pending
     recorded_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         db_table = "bbk.crossmatch"
+        indexes = [models.Index(fields=["tenant_id", "requisition_id", "result"])]
 
 
 class TransfusionReaction(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     requisition_id = models.UUIDField(db_index=True)
     component_id = models.UUIDField(db_index=True)
     patient_id = models.UUIDField(db_index=True)
@@ -72,3 +77,4 @@ class TransfusionReaction(models.Model):
 
     class Meta:
         db_table = "bbk.reaction"
+        indexes = [models.Index(fields=["tenant_id", "patient_id", "recorded_at"])]

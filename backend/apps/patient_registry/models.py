@@ -7,7 +7,7 @@ class Patient(models.Model):
     """Single patient record per tenant (UHID-based)."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant_id = models.UUIDField(db_index=True)
-    uhid = models.CharField(max_length=32, unique=True, db_index=True)
+    uhid = models.CharField(max_length=32, db_index=True)
     abha_address = models.CharField(max_length=128, null=True, blank=True)
     abha_number = models.CharField(max_length=14, null=True, blank=True, db_index=True)
     verification_status = models.CharField(max_length=16, default="provisional")  # provisional | verified
@@ -24,11 +24,17 @@ class Patient(models.Model):
             models.Index(fields=["tenant_id", "abha_number"]),
             models.Index(fields=["tenant_id", "uhid"]),
         ]
+        # UHID is unique *within a tenant*, not globally: the class docstring
+        # promises one record per tenant. A bare unique=True would stop two
+        # hospitals from both issuing UH0001.
+        unique_together = [["tenant_id", "uhid"]]
 
 
 class IntakePoint(models.Model):
     """Generic intake point model for Scan and Share extensibility."""
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     facility = models.ForeignKey("identity_tenancy.Facility", on_delete=models.CASCADE, related_name="intake_points", db_index=True)
     type = models.CharField(max_length=32)  # opd|pharmacy|lab|billing
     counter_id = models.CharField(max_length=32, null=True, blank=True)
@@ -36,11 +42,14 @@ class IntakePoint(models.Model):
 
     class Meta:
         db_table = "registry.intake_point"
+        indexes = [models.Index(fields=["tenant_id", "facility", "type"])]
 
 
 class QRCode(models.Model):
     """Facility/counter/department QR codes for ABDM Scan and Share."""
+
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     facility = models.ForeignKey("identity_tenancy.Facility", on_delete=models.CASCADE, related_name="qr_codes", db_index=True)
     intake_point = models.ForeignKey(IntakePoint, on_delete=models.SET_NULL, null=True, blank=True, related_name="qr_codes")
     encode_data = models.TextField()  # ABDM HIP ID + intake code
@@ -50,6 +59,7 @@ class QRCode(models.Model):
 
     class Meta:
         db_table = "registry.qr_code"
+        indexes = [models.Index(fields=["tenant_id", "facility", "active"])]
 
 
 class ABHACallbackLog(models.Model):

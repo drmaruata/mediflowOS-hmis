@@ -20,6 +20,7 @@ class OperationSchedule(models.Model):
 
 class SurgeryRecord(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     schedule_id = models.UUIDField(db_index=True)
     pre_op_checklist = models.JSONField(null=True)
     anaesthesia_record = models.JSONField(null=True)
@@ -30,3 +31,6 @@ class SurgeryRecord(models.Model):
 
     class Meta:
         db_table = "ot.record"
+        indexes = [
+            models.Index(fields=["tenant_id", "schedule_id", "incision_time"]),
+        ]

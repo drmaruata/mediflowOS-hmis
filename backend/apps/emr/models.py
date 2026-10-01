@@ -20,6 +20,7 @@ class ClinicalDocument(models.Model):
 
 class ProblemList(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     patient_id = models.UUIDField(db_index=True)
     code = models.CharField(max_length=64)
     name = models.CharField(max_length=200)
@@ -28,6 +29,7 @@ class ProblemList(models.Model):
 
     class Meta:
         db_table = "emr.problem"
+        indexes = [models.Index(fields=["tenant_id", "patient_id", "resolved"])]
 
 
 class SafetyEvent(models.Model):

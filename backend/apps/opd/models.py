@@ -23,6 +23,7 @@ class Token(models.Model):
 
 class OPDEncounter(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     patient_id = models.UUIDField(db_index=True)
     department_id = models.UUIDField(db_index=True)
     visit_type = models.CharField(max_length=16)  # new | follow-up
@@ -34,3 +35,9 @@ class OPDEncounter(models.Model):
 
     class Meta:
         db_table = "opd.encounter"
+        # registration_time and consultation_start are the structured fields
+        # OPD wait-time indicators are computed from (architecture doc
+        # section 10, "quality by design").
+        indexes = [
+            models.Index(fields=["tenant_id", "department_id", "registration_time"]),
+        ]

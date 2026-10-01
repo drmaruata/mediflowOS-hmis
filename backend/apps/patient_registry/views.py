@@ -1,35 +1,53 @@
 """Patient registry views."""
+from django.db.models import Q
+from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.permissions import AllowAny
 from rest_framework.response import Response
-from django.utils import timezone
+
+from common.tenant import TenantScopedQuerysetMixin
 from common.throttling import AbdmHipThrottle
 from .models import Patient, IntakePoint, QRCode
 from .serializers import PatientSerializer, IntakePointSerializer, QRCodeSerializer, ABHACallbackSerializer
 
 
-class PatientViewSet(viewsets.ModelViewSet):
+class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
     serializer_class = PatientSerializer
     queryset = Patient.objects.all()
 
     @action(detail=False, methods=["get"])
     def search(self, request):
-        q = request.query_params.get("q", "")
-        qs = self.queryset.filter(tenant_id=request.headers.get("X-Tenant-Id"))
-        if q:
-            qs = qs.filter(uhid__icontains=q) | self.queryset.filter(
-                tenant_id=request.headers.get("X-Tenant-Id"), abha_number__icontains=q
+        """UHID / ABHA lookup for the registration counter (P-REG-1).
+
+        One queryset with OR-ed predicates. The previous version combined two
+        separately-filtered querysets with ``|``, which reintroduced the
+        unfiltered base queryset and silently dropped the tenant scope.
+
+        The tenant comes from ``TenantScopedQuerysetMixin``, so a request with
+        no resolved tenant searches nothing rather than every tenant.
+        """
+        term = (request.query_params.get("q") or "").strip()
+        queryset = self.get_queryset()
+        if term:
+            queryset = queryset.filter(
+                Q(uhid__icontains=term) | Q(abha_number__icontains=term)
             )
-        return Response(PatientSerializer(qs[:20], many=True).data)
+        return Response(PatientSerializer(queryset[:20], many=True).data)
 
 
-class IntakePointViewSet(viewsets.ModelViewSet):
+class IntakePointViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
     serializer_class = IntakePointSerializer
     queryset = IntakePoint.objects.all()
 
 
-class QRCodeViewSet(viewsets.ModelViewSet):
+class QRCodeViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
+    """Facility and counter QR codes for ABDM Scan and Share.
+
+    ``encode_data`` carries the facility's HIP ID, which is tenant-identifying,
+    so this resource is tenant-scoped like any other patient-registry row.
+    """
+
     serializer_class = QRCodeSerializer
     queryset = QRCode.objects.all()
 
@@ -37,7 +55,7 @@ class QRCodeViewSet(viewsets.ModelViewSet):
     def regenerate(self, request, pk=None):
         qr = self.get_object()
         qr.regenerated_at = timezone.now()
-        qr.save()
+        qr.save(update_fields=["regenerated_at"])
         return Response({"status": "regenerated"})
 
 
@@ -82,7 +100,8 @@ class ABHACallbackViewSet(viewsets.ViewSet):
        This endpoint is intentionally anonymous, because a gateway carries no
        user credentials. That is the only reason it opts out of the
        deny-by-default permissions; it must stay non-functional until the
-       authentication above exists.
+       authentication above exists. It is deliberately **not** tenant-scoped,
+       because there is no tenant to scope it to until step 2 is implemented.
     """
 
     authentication_classes: list = []

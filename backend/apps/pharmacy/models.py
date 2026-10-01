@@ -18,6 +18,7 @@ class Formulary(models.Model):
 
 class StockBatch(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     formulary_id = models.UUIDField(db_index=True)
     batch_no = models.CharField(max_length=64)
     expiry = models.DateField()
@@ -26,10 +27,14 @@ class StockBatch(models.Model):
 
     class Meta:
         db_table = "pharmacy.stock_batch"
+        # Stock-out days by essential item are a pharmacy indicator input
+        # (architecture doc section 10).
+        indexes = [models.Index(fields=["tenant_id", "formulary_id", "stock_out_day"])]
 
 
 class Dispense(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     patient_id = models.UUIDField(db_index=True)
     formulary_id = models.UUIDField(db_index=True)
     substituted = models.BooleanField(default=False)
@@ -37,3 +42,4 @@ class Dispense(models.Model):
 
     class Meta:
         db_table = "pharmacy.dispense"
+        indexes = [models.Index(fields=["tenant_id", "patient_id", "dispensed_at"])]

@@ -20,6 +20,7 @@ class VitalsFlowsheet(models.Model):
 
 class Device(models.Model):
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
     admission_id = models.UUIDField(db_index=True)
     device_type = models.CharField(max_length=64)  # ventilator, catheter, etc.
     inserted_at = models.DateTimeField()
@@ -27,3 +28,5 @@ class Device(models.Model):
 
     class Meta:
         db_table = "icu.device"
+        # Device days are an ICU indicator input (architecture doc section 10).
+        indexes = [models.Index(fields=["tenant_id", "admission_id", "device_type"])]
