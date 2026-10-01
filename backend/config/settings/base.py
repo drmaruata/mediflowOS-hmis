@@ -63,12 +63,23 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 DATABASES = {
     "default": {
-        "ENGINE": os.getenv("DB_ENGINE", "django.db.backends.postgresql"),
+        # common.postgres subclasses the stock PostgreSQL backend so that dotted
+        # db_table values ("registry.patient") become real schema qualifiers
+        # rather than single identifiers named "registry.patient". See
+        # common/postgres.py and architecture doc section 6.
+        "ENGINE": os.getenv("DB_ENGINE", "common.postgres"),
         "NAME": os.getenv("PGDATABASE", "mediflow"),
         "USER": os.getenv("PGUSER", "postgres"),
         "PASSWORD": os.getenv("PGPASSWORD", "postgres"),
         "HOST": os.getenv("PGHOST", "localhost"),
         "PORT": os.getenv("PGPORT", "5432"),
+        # One transaction per request. TenantMiddleware sets app.tenant_id with
+        # set_config(..., is_local=true), which PostgreSQL discards at the end
+        # of the enclosing transaction. Without a transaction spanning the
+        # request the setting is thrown away by the implicit autocommit
+        # transaction before any tenant-owned query runs, so queries execute
+        # with no tenant context at all.
+        "ATOMIC_REQUESTS": True,
     }
 }
 
