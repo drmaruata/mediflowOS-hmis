@@ -1,0 +1,436 @@
+# Mediflow OS HMIS
+
+Mediflow OS HMIS is a multi-tenant healthcare management information system designed for hospitals and clinics. The project combines a Django-based backend API with a Vite + React frontend to deliver modules for patient administration, operations, billing, pharmacy, reporting, quality indicators, and integration workflows.
+
+This repository is organized as a modular monolith, with the backend split into domain apps and the frontend built as a single-page application.
+
+## Project overview
+
+The application is built around the following principles:
+
+- Multi-tenant healthcare workflows and tenant-aware data access
+- Modular domain structure for clinical and operational areas
+- REST API-first backend using Django REST Framework
+- Realtime features using Django Channels and Redis
+- Background jobs and scheduling through Celery and Redis
+- PostgreSQL as the primary data store
+- React frontend with Ant Design and Vite for a modern admin interface
+
+## Tech stack
+
+### Backend
+- Python 3.11+
+- Django 5.2 LTS
+- Django REST Framework
+- PostgreSQL
+- Redis
+- Celery + django-celery-beat
+- Django Channels
+- JWT authentication
+- OpenAPI schema generation via drf-spectacular
+- OTP support via django-otp
+
+### Frontend
+- React 18
+- TypeScript
+- Vite
+- Ant Design
+- React Query
+- Zustand
+- Zod + React Hook Form
+
+### Infrastructure / platform
+- Redis for caching, broker, and channel layer
+- PostgreSQL for application persistence
+- ASGI application server support via Django Channels
+- Modular app layout under `backend/apps/`
+
+## Dependency version guidance
+
+Versions below were checked against npm and PyPI on 2026-10-01. Prefer the newest patch release within the currently tested major; do not use `npm audit fix --force` or blanket major upgrades as a routine update. Coordinate major upgrades with the compatibility checks in this README.
+
+### Frontend dependencies
+
+| Dependency | Installed | Latest | Recommendation |
+| --- | --- | --- | --- |
+| `react`, `react-dom` | 18.3.1 | 19.3.0 | Keep React 18 until React 19 is tested with Ant Design and the full UI. |
+| `@types/react`, `@types/react-dom` | 18.3.31, 18.3.7 | 19.3.0 | Keep aligned with React 18; upgrade with React, not independently. |
+| `antd` | 5.29.3 | 6.6.5 | Stay on v5 for now; v6 is a coordinated major migration. |
+| `@ant-design/icons` | 5.6.1 | 6.3.4 | Keep on v5 with Ant Design v5; upgrade alongside Ant Design. |
+| `@ant-design/charts` | 2.6.7 | 2.6.7 | Current latest; currently unused, so remove if charts are not planned. |
+| `@tanstack/react-query` | 5.104.0 | 5.104.0 | Current latest and used by the app. |
+| `zustand` | 4.5.7 | 5.0.15 | Defer v5 until state-store usage is added and tested; currently unused. |
+| `react-hook-form` | 7.89.0 | 7.89.0 | Current latest; currently unused, so remove if no forms are planned. |
+| `zod` | 3.25.76 | 4.6.5 | Defer the v4 schema migration; currently unused. |
+| `vite` | 6.4.3 | 8.3.2 | Current patched v6 is clean; plan an upgrade to v8 and verify plugins and aliases. |
+| `@vitejs/plugin-react` | 4.7.0 | 6.1.1 | Keep compatible with Vite 6 now; upgrade with Vite when moving to v8. |
+| `typescript` | 5.9.3 | 7.0.2 | Keep v5 for now; current typescript-eslint does not support TypeScript 7 yet. |
+
+React Router was removed because the app does not currently use it. `@ant-design/charts`, `zustand`, `react-hook-form`, and `zod` are also not imported by the current frontend source; retain them only if their features are planned.
+
+### Backend dependencies
+
+| Dependency | Installed | Latest | Recommendation |
+| --- | --- | --- | --- |
+| Django | 5.2.17 | 6.1.1 | Stay on the 5.2 LTS line; plan and test a Django 6 migration separately. |
+| Django REST Framework | 3.18.1 | 3.18.1 | Current latest. |
+| django-cors-headers | 4.9.0 | 4.9.0 | Current latest. |
+| djangorestframework-simplejwt | 5.5.1 | 5.5.1 | Current latest. |
+| django-otp | 1.7.3 | 1.7.3 | Current latest. |
+| drf-spectacular | 0.30.0 | 0.30.0 | Current latest. |
+| psycopg | 3.3.6 | 3.3.6 | Current latest; use psycopg 3, not psycopg2. |
+| redis | 8.1.0 | 8.1.0 | Current latest. |
+| celery | 5.6.3 | 5.6.3 | Current latest. |
+| django-celery-beat | 2.9.0 | 2.9.0 | Current latest. |
+| channels, channels-redis | 4.3.2, 4.3.0 | 4.3.2, 4.3.0 | Current latest; keep the pair aligned. |
+| python-jose | 3.5.0 | 3.5.0 | Current latest. |
+| python-dotenv | 1.2.4 | 1.2.4 | Current latest. |
+| Pillow | 12.3.0 | 12.3.0 | Current latest. |
+| openpyxl | 3.1.5 | 3.1.5 | Current latest in the supported 3.1 line. |
+| reportlab | 5.0.1 | 5.0.1 | Current latest. |
+| httpx | 0.28.1 | 0.28.1 | Current latest in the supported 0.28 line. |
+| pydantic | 2.13.5 | 2.13.5 | Current latest in v2; keep the major cap. |
+| opentelemetry-sdk | 1.45.0 | 1.45.0 | Current latest; keep aligned with instrumentation. |
+| opentelemetry-instrumentation-django | 0.66b0 | 0.66b0 | Prerelease; keep exactly pinned and upgrade with matching OTel packages. |
+| sentry-sdk | 2.71.0 | 2.71.0 | Current latest in v2. |
+
+The backend environment also reported newer transitive `pydantic-core` and `cron-descriptor` releases. Let the parent packages resolve compatible updates; `django-celery-beat` currently constrains `cron-descriptor` below v2. Keep runtime constraints in `backend/requirements.txt` and `backend/pyproject.toml` synchronized.
+
+## Repository structure
+
+```text
+mediflowOS-hmis/
+├── backend/
+│   ├── apps/
+│   ├── common/
+│   ├── config/
+│   │   └── settings/test.py
+│   ├── workers/
+│   ├── manage.py
+│   ├── requirements.txt
+│   ├── requirements-dev.txt
+│   └── pyproject.toml
+├── frontend/
+│   ├── src/
+│   ├── public/
+│   ├── package.json
+│   ├── vite.config.ts
+│   └── tsconfig.json
+├── docs/
+│   ├── SaaS HMIS Architecture v0.6.md
+│   ├── SaaS HMIS PRD v0.5.md
+│   └── ...
+├── tests/
+│   ├── unit/
+│   └── integration/
+├── docker/
+├── terraform/
+├── .gitignore
+└── README.md
+```
+
+## Prerequisites
+
+Before setting up the project locally, install the following:
+
+- Python 3.11 or newer
+- Node.js 22.22.2+ or 24.15+ and npm (required by the frontend test environment)
+- PostgreSQL 14+ or 15+
+- Redis
+- Git
+- A terminal such as PowerShell, Bash, or zsh
+
+Optional but helpful:
+
+- Docker Desktop (for container-based local development)
+- pgAdmin or a SQL client for database inspection
+- VS Code with Python and TypeScript extensions
+
+## Backend setup
+
+### 1. Create and activate a virtual environment
+
+From the repository root:
+
+```bash
+cd backend
+python -m venv venv
+```
+
+On Windows PowerShell:
+
+```powershell
+cd backend
+.\venv\Scripts\Activate.ps1
+```
+
+On macOS/Linux:
+
+```bash
+source venv/bin/activate
+```
+
+### 2. Install Python dependencies
+
+```bash
+pip install --upgrade pip
+pip install -r requirements-dev.txt
+```
+
+`requirements-dev.txt` includes runtime dependencies plus pytest, coverage, and Ruff. For a runtime-only installation, use `pip install -r requirements.txt`.
+
+### 3. Configure PostgreSQL and Redis
+
+The project defaults to PostgreSQL and Redis values in the Django settings. For local development, ensure PostgreSQL is running and a database exists, for example:
+
+```sql
+CREATE DATABASE mediflow_dev;
+```
+
+Set the environment variables you want your app to use before starting Django. Example:
+
+```powershell
+$env:DJANGO_SETTINGS_MODULE = "config.settings.dev"
+$env:DJANGO_SECRET_KEY = "local-dev-secret-key"
+$env:DJANGO_DEBUG = "true"
+$env:PGDATABASE = "mediflow_dev"
+$env:PGUSER = "postgres"
+$env:PGPASSWORD = "postgres"
+$env:PGHOST = "localhost"
+$env:PGPORT = "5432"
+$env:REDIS_URL = "redis://localhost:6379/0"
+$env:CELERY_BROKER_URL = "redis://localhost:6379/0"
+```
+
+> The project defaults to PostgreSQL on `localhost` and Redis at `redis://redis:6379/0` in many settings. If you are using local services instead of containers, update these values accordingly.
+
+### 4. Run database migrations
+
+```bash
+cd backend
+python manage.py migrate
+```
+
+### 5. Create a superuser
+
+```bash
+python manage.py createsuperuser
+```
+
+### 6. Start the backend development server
+
+```bash
+python manage.py runserver 0.0.0.0:8000
+```
+
+The API should be available at:
+
+- http://localhost:8000/admin/
+- http://localhost:8000/api/schema/
+- http://localhost:8000/api/docs/
+
+## Frontend setup
+
+### 1. Install dependencies
+
+From the repository root:
+
+```bash
+cd frontend
+npm ci
+```
+
+### 2. Start the frontend dev server
+
+```bash
+npm run dev
+```
+
+By default, Vite will start a development server and print the local URL, typically:
+
+- http://localhost:5173/
+
+### 3. Build the frontend for production
+
+```bash
+npm run build
+```
+
+### 4. Preview the production build
+
+```bash
+npm run preview
+```
+
+## Running background workers
+
+The project includes Celery support for asynchronous work such as indicator computations and integration tasks.
+
+Start a Celery worker:
+
+```bash
+cd backend
+celery -A workers.celery worker --loglevel=info
+```
+
+Start Celery Beat for scheduled tasks:
+
+```bash
+cd backend
+celery -A workers.celery beat --loglevel=info
+```
+
+## Common Django commands
+
+From the `backend` folder, these are the most useful commands:
+
+```bash
+# Show project status and configuration
+python manage.py check
+
+# Run migrations after model changes
+python manage.py makemigrations
+python manage.py migrate
+
+# Collect static files for deployment
+python manage.py collectstatic --noinput
+
+# Run all backend tests (isolated SQLite settings; no PostgreSQL/Redis needed)
+python -m pytest
+
+# Run test tiers separately
+python -m pytest -m unit
+python -m pytest -m integration
+
+# Run tests with coverage
+python -m pytest --cov=apps --cov=common --cov=config --cov-report=term-missing
+
+# Run backend lint and Django configuration checks
+python -m ruff check . ../tests
+python manage.py check --settings=config.settings.test
+
+# Run a Django shell
+python manage.py shell
+```
+
+## Common frontend commands
+
+From the `frontend` folder:
+
+```bash
+# Start Vite dev server
+npm run dev
+
+# Run lint, type-check, and all frontend tests
+npm run check
+
+# Run individual checks
+npm run lint
+npm run typecheck
+npm run test:unit
+npm run test:integration
+npm run test:coverage
+
+# Build the project
+npm run build
+
+# Preview the production build locally
+npm run preview
+```
+
+## Suggested local workflow
+
+For standard development, use this flow:
+
+1. Start PostgreSQL and Redis locally.
+2. Activate the backend virtual environment.
+3. Run `python manage.py migrate`.
+4. Start the Django server with `python manage.py runserver 0.0.0.0:8000`.
+5. Start Celery worker(s) if background jobs are needed.
+6. Start the frontend with `npm run dev`.
+7. Open the frontend in the browser and verify API calls through the Django backend.
+
+For local validation, run `npm run check` from `frontend/`, and run `python -m pytest` plus `python -m ruff check . ../tests` from `backend/`. Pytest uses `config.settings.test` with in-memory SQLite and does not need external services.
+
+## Notes on architecture
+
+This repository follows a modular monolith design:
+
+- Domain logic is grouped under `backend/apps/`
+- Shared policies live in `backend/common/`
+- Tenant-aware middleware and utilities handle cross-cutting concerns
+- API schema is generated from DRF endpoints with `drf-spectacular`
+- Realtime and cache concerns rely on Redis
+- Clinical and operational services are organized by module like `patient_registry`, `opd`, `ipd`, `pharmacy`, `lab`, `billing`, and `quality_os`
+
+## Troubleshooting
+
+### Database connection errors
+
+Verify that PostgreSQL is running and your environment variables match your local database credentials.
+
+### Redis connection errors
+
+Check that Redis is installed and running locally, and confirm the `REDIS_URL` / `CELERY_BROKER_URL` values.
+
+### Frontend cannot reach the backend
+
+Make sure the frontend API base URL matches the backend. If your frontend is configured to call a different host, update the relevant configuration or proxy settings.
+
+### Missing dependencies
+
+If Python or npm packages are missing, reinstall them using:
+
+```bash
+pip install -r backend/requirements-dev.txt
+npm ci --prefix frontend
+```
+
+## Production and deployment notes
+
+This project is not yet a full production deployment template in the repository. For deployment, you should typically:
+
+- Replace local environment variables with secure production values
+- Configure a managed PostgreSQL database
+- Configure a managed Redis instance
+- Set `DJANGO_DEBUG=false`
+- Use a production WSGI/ASGI deployment strategy
+- Run `python manage.py collectstatic` for static asset serving
+- Configure Celery workers and beat in a process manager or container orchestration layer
+- Restrict CORS and trusted origins via environment settings
+
+## Further reading
+
+The project documentation in the `docs/` folder contains deeper product and architecture notes:
+
+- `docs/SaaS HMIS Architecture v0.6.md`
+- `docs/SaaS HMIS PRD v0.5.md`
+- `docs/SaaS HMIS SRS v0.5.md`
+- `docs/SaaS HMIS Quality OS Indicator Catalog v0.2.json`
+
+## License
+
+This project does not currently declare a license in the repository root. If this is intended for public distribution, add a license file and define the legal terms before publishing it externally.
+
+## Summary
+
+To start working on the project locally:
+
+```bash
+cd backend
+python -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt
+python manage.py migrate
+python manage.py runserver 0.0.0.0:8000
+```
+
+In a second terminal:
+
+```bash
+cd frontend
+npm ci
+npm run dev
+```
+
+This will give you a working local backend and frontend for the Mediflow OS HMIS application.

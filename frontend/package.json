@@ -1,0 +1,49 @@
+{
+  "name": "mediflow-os-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "npm run typecheck && vite build",
+    "preview": "vite preview",
+    "lint": "eslint .",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:unit": "vitest run src/lib/health.unit.test.ts",
+    "test:integration": "vitest run src/App.integration.test.tsx",
+    "test:coverage": "vitest run --coverage",
+    "check": "npm run lint && npm run typecheck && npm test"
+  },
+  "dependencies": {
+    "react": "^18.3",
+    "react-dom": "^18.3",
+    "@ant-design/icons": "^5.3",
+    "antd": "^5.19",
+    "@ant-design/charts": "^2.1",
+    "@tanstack/react-query": "^5.17",
+    "zustand": "^4.5",
+    "react-hook-form": "^7.50",
+    "zod": "^3.23"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@testing-library/jest-dom": "^7.0.1",
+    "@testing-library/react": "^16.3.3",
+    "@testing-library/user-event": "^14.6.7",
+    "@types/react": "^18.3",
+    "@types/react-dom": "^18.3",
+    "@vitejs/plugin-react": "^4.7.0",
+    "@vitest/coverage-v8": "^5.0.3",
+    "eslint": "^10.11.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "eslint-plugin-react-refresh": "^0.5.7",
+    "globals": "^17.13.0",
+    "jsdom": "^30.1.1",
+    "typescript-eslint": "^8.71.0",
+    "typescript": "^5.5",
+    "vite": "^6.4.3",
+    "vitest": "^5.0.3"
+  }
+}

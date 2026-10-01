@@ -1,0 +1,51 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.Python
+build/
+dist/
+
+# Virtual environments
+backend/venv/
+venv/
+.env
+.venv/
+
+# Django
+backend/staticfiles/
+*.sqlite3
+*.sqlite
+db.sqlite3
+media/
+local_settings.py
+
+# Test / lint / coverage artefacts
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.tox/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/.vite/
+frontend/coverage/
+frontend/tsconfig.tsbuildinfo
+*.tsbuildinfo
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.swp
+
+# Local secrets and environment overrides
+.env
+.env.*
+!.env.example

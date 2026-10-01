@@ -1,0 +1,53 @@
+@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap');
+
+:root {
+  color: #16302d;
+  background: #f4f7f5;
+  font-family: 'DM Sans', 'Segoe UI', sans-serif;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 320px; background: #f4f7f5; }
+button, input { font: inherit; }
+.app-shell { min-height: 100vh; background: #f4f7f5; }
+.app-sider { background: #123b38 !important; }
+.brand-lockup { display: flex; align-items: center; gap: 12px; height: 88px; padding: 20px; color: #f4fbf7; }
+.brand-mark { display: grid; place-items: center; width: 38px; height: 38px; border-radius: 10px; background: #b6e6c8; color: #123b38; font-family: 'Space Grotesk', sans-serif; font-weight: 700; font-size: 20px; }
+.brand-name { font-family: 'Space Grotesk', sans-serif; font-weight: 700; letter-spacing: .01em; }
+.brand-caption { margin-top: 2px; color: #9bb9b0; font-size: 12px; }
+.app-sider .ant-menu { background: transparent; border-inline-end: 0; color: #c1d6cf; }
+.app-sider .ant-menu-item { margin: 5px 12px; width: calc(100% - 24px); border-radius: 6px; }
+.app-sider .ant-menu-item-selected { background: #2c6c62; color: #fff; }
+.sider-footer { display: flex; align-items: center; justify-content: space-between; position: absolute; bottom: 18px; left: 18px; right: 18px; color: #9bb9b0; }
+.sider-footer .ant-btn { color: #c1d6cf; }
+.app-header { display: flex; align-items: center; justify-content: space-between; height: 72px; padding: 0 32px; background: rgba(255,255,255,.88); border-bottom: 1px solid #dfe9e4; }
+.header-context { display: flex; flex-direction: column; line-height: 1.25; }
+.user-avatar { background: #d7eee0; color: #216258; font-weight: 600; }
+.app-content { padding: 36px 40px 56px; max-width: 1500px; width: 100%; margin: 0 auto; }
+.page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 28px; }
+.page-heading h2 { margin: 7px 0 5px; font-family: 'Space Grotesk', sans-serif; color: #16302d; }
+.eyebrow { color: #0f766e; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; }
+.search-strip { display: flex; align-items: center; gap: 18px; margin-bottom: 20px; }
+.search-strip .ant-input-affix-wrapper { max-width: 520px; border-color: #cbded5; background: #fff; }
+.ant-card { border-color: #dfe9e4; box-shadow: 0 3px 14px rgba(31, 69, 61, .04); }
+.ant-card-head-title { font-family: 'Space Grotesk', sans-serif; }
+.stat-delta { color: #0f766e; font-size: 12px; font-weight: 600; }
+.dashboard-grid { margin-top: 22px; }
+.queue-row, .attention-item { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 17px 0; border-bottom: 1px solid #edf2ef; }
+.queue-row:last-child { border-bottom: 0; }
+.attention-item { justify-content: flex-start; }
+.priority-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; }
+.priority-dot.critical { background: #dc5a55; }
+.priority-dot.warning { background: #d69b35; }
+.attention-icon { color: #d97706; }
+.attention-button { margin-top: 18px; }
+
+@media (max-width: 760px) {
+  .app-content { padding: 24px 16px 40px; }
+  .app-header { padding: 0 16px; }
+  .page-heading, .search-strip { align-items: stretch; flex-direction: column; }
+  .page-heading .ant-space { justify-content: space-between; }
+  .search-strip .ant-input-affix-wrapper { max-width: none; }
+}
