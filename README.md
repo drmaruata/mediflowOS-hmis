@@ -83,18 +83,70 @@ React Router was removed because the app does not currently use it. `@ant-design
 | celery | 5.6.3 | 5.6.3 | Current latest. |
 | django-celery-beat | 2.9.0 | 2.9.0 | Current latest. |
 | channels, channels-redis | 4.3.2, 4.3.0 | 4.3.2, 4.3.0 | Current latest; keep the pair aligned. |
-| python-jose | 3.5.0 | 3.5.0 | Current latest. |
-| python-dotenv | 1.2.4 | 1.2.4 | Current latest. |
-| Pillow | 12.3.0 | 12.3.0 | Current latest. |
-| openpyxl | 3.1.5 | 3.1.5 | Current latest in the supported 3.1 line. |
-| reportlab | 5.0.1 | 5.0.1 | Current latest. |
-| httpx | 0.28.1 | 0.28.1 | Current latest in the supported 0.28 line. |
-| pydantic | 2.13.5 | 2.13.5 | Current latest in v2; keep the major cap. |
-| opentelemetry-sdk | 1.45.0 | 1.45.0 | Current latest; keep aligned with instrumentation. |
-| opentelemetry-instrumentation-django | 0.66b0 | 0.66b0 | Prerelease; keep exactly pinned and upgrade with matching OTel packages. |
-| sentry-sdk | 2.71.0 | 2.71.0 | Current latest in v2. |
+| daphne | 4.2.3 | 4.2.3 | ASGI server; required because the project serves Channels WebSocket consumers. See below. |
+| openpyxl | 3.1.5 | 3.1.5 | Current latest in the supported 3.1 line; currently unused — see below. |
+| Pillow | 12.3.0 | 12.3.0 | Current latest; currently unused — see below. |
+| reportlab | 5.0.1 | 5.0.1 | Current latest; currently unused — see below. |
+| httpx | 0.28.1 | 0.28.1 | Current latest in the supported 0.28 line; currently unused — see below. |
+| opentelemetry-sdk | 1.45.0 | 1.45.0 | Current latest; keep aligned with instrumentation. Currently unwired. |
+| opentelemetry-instrumentation-django | 0.66b0 | 0.66b0 | Prerelease; keep exactly pinned and upgrade with matching OTel packages. Currently unwired. |
+| sentry-sdk | 2.71.0 | 2.71.0 | Current latest in v2. Currently unwired. |
 
-The backend environment also reported newer transitive `pydantic-core` and `cron-descriptor` releases. Let the parent packages resolve compatible updates; `django-celery-beat` currently constrains `cron-descriptor` below v2. Keep runtime constraints in `backend/requirements.txt` and `backend/pyproject.toml` synchronized.
+The backend environment also reported newer transitive `cron-descriptor` releases. Let the parent package resolve compatible updates; `django-celery-beat` currently constrains `cron-descriptor` below v2. Keep runtime constraints in `backend/requirements.txt` and `backend/pyproject.toml` synchronized.
+
+### daphne (added during the tenancy and security hardening pass)
+
+`daphne` is the ASGI server the application runs behind, and it is declared in
+both `backend/requirements.txt` and `backend/pyproject.toml` as `>=4.2,<5`,
+resolving to 4.2.3.
+
+It was previously missing entirely: the project declares `ASGI_APPLICATION` and
+serves Django Channels consumers for notifications and live vitals
+(architecture doc section 13), but no ASGI server was installed or declared. A
+WSGI server cannot serve a WebSocket consumer, so the image had no valid way to
+start. `docker/Dockerfile.backend` uses it as the entrypoint.
+
+If you run the application locally, start it with daphne rather than
+`runserver`:
+
+```bash
+# From backend/, with the virtualenv active:
+daphne -b 0.0.0.0 -p 8000 config.asgi:application
+```
+
+`python manage.py runserver` still works for ordinary HTTP development through
+Django's ASGI handler, but it is not what the container uses.
+
+### Dependencies that are declared but not yet used
+
+`Pillow`, `openpyxl`, `reportlab`, `httpx`, `opentelemetry-sdk`,
+`opentelemetry-instrumentation-django` and `sentry-sdk` are declared but not
+imported anywhere in `backend/`. Each backs a documented requirement that is not
+implemented yet:
+
+| Package | Backs |
+| --- | --- |
+| `Pillow` | printable facility/counter QR codes (architecture doc 8.4) |
+| `openpyxl`, `reportlab` | Quality OS regulatory exports (9.9) |
+| `httpx` | ABDM gateway, HL7 v2 bridge and payer adapters (12) |
+| `opentelemetry-*`, `sentry-sdk` | observability (16) — entirely unimplemented |
+
+They are kept pinned rather than removed so the versions are not re-resolved
+later. `tests/unit/test_dependency_wiring.py` fails if a declared dependency is
+neither imported, deliberately run as a process, nor listed in that test's
+`UNIMPLEMENTED` map with the requirement it serves — so this section cannot go
+stale without a test failing.
+
+### Dependencies removed during the hardening pass
+
+`python-jose`, `python-dotenv` and `pydantic` were removed:
+
+- `python-jose` was redundant — SimpleJWT signs and verifies with PyJWT — and
+  carries known published CVEs.
+- `python-dotenv` was never loaded; settings read `os.getenv` directly.
+- `pydantic` had no consumer; Django and DRF do not use it.
+
+`react-router` had already been removed from the frontend before this work.
 
 ## Repository structure
 
@@ -102,14 +154,16 @@ The backend environment also reported newer transitive `pydantic-core` and `cron
 mediflowOS-hmis/
 ├── backend/
 │   ├── apps/
-│   ├── common/
+│   ├── common/                    # tenant, rls, authentication, throttling
+│   │   └── postgres/              # schema-qualified table support
 │   ├── config/
-│   │   └── settings/test.py
+│   │   └── settings/              # base, dev, production, test
 │   ├── workers/
 │   ├── manage.py
 │   ├── requirements.txt
 │   ├── requirements-dev.txt
-│   └── pyproject.toml
+│   ├── pyproject.toml
+│   └── scripts/                   # migration and traceability generators
 ├── frontend/
 │   ├── src/
 │   ├── public/
@@ -119,12 +173,17 @@ mediflowOS-hmis/
 ├── docs/
 │   ├── SaaS HMIS Architecture v0.6.md
 │   ├── SaaS HMIS PRD v0.5.md
+│   ├── traceability.md            # generated; do not edit by hand
 │   └── ...
 ├── tests/
 │   ├── unit/
 │   └── integration/
 ├── docker/
-├── terraform/
+│   ├── Dockerfile.backend
+│   ├── compose.yaml
+│   └── .env.example
+├── terraform/                     # empty; IaC not yet in scope
+├── .github/workflows/ci.yml
 ├── .gitignore
 └── README.md
 ```
@@ -219,8 +278,17 @@ python manage.py createsuperuser
 
 ### 6. Start the backend development server
 
+For ordinary HTTP development, `runserver` is enough:
+
 ```bash
 python manage.py runserver 0.0.0.0:8000
+```
+
+To exercise the Channels WebSocket consumers (notifications and live vitals),
+run the ASGI server instead — that is what the container uses:
+
+```bash
+daphne -b 0.0.0.0 -p 8000 config.asgi:application
 ```
 
 The API should be available at:
@@ -228,6 +296,9 @@ The API should be available at:
 - http://localhost:8000/admin/
 - http://localhost:8000/api/schema/
 - http://localhost:8000/api/docs/
+- http://localhost:8000/api/v1/health/ — liveness, anonymous, no database needed
+- http://localhost:8000/api/v1/health/ready/ — readiness, `503` if the database
+  is unreachable
 
 ## Frontend setup
 
@@ -345,7 +416,8 @@ For standard development, use this flow:
 1. Start PostgreSQL and Redis locally.
 2. Activate the backend virtual environment.
 3. Run `python manage.py migrate`.
-4. Start the Django server with `python manage.py runserver 0.0.0.0:8000`.
+4. Start the Django server with `python manage.py runserver 0.0.0.0:8000`
+   (or `daphne -b 0.0.0.0 -p 8000 config.asgi:application` for WebSockets).
 5. Start Celery worker(s) if background jobs are needed.
 6. Start the frontend with `npm run dev`.
 7. Open the frontend in the browser and verify API calls through the Django backend.

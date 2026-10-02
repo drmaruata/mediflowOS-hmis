@@ -156,8 +156,8 @@ be honoured):
 ## 3. Tech stack (pinned — do not drift)
 
 **Backend:** Python 3.11+, Django 5.2 LTS, DRF 3.18, PostgreSQL (psycopg 3),
-Redis, Celery 5.6 + django-celery-beat, Channels 4.3, SimpleJWT, django-otp,
-drf-spectacular, OpenTelemetry + Sentry.
+Redis, Celery 5.6 + django-celery-beat, Channels 4.3, **daphne 4.2** (ASGI
+server), SimpleJWT, django-otp, drf-spectacular, OpenTelemetry + Sentry.
 
 **Frontend:** React 18.3, TypeScript 5.9, Vite 6.4, Ant Design 5.29,
 TanStack Query 5.104, Zustand, React Hook Form, Zod.
@@ -171,11 +171,24 @@ TanStack Query 5.104, Zustand, React Hook Form, Zod.
 - `opentelemetry-instrumentation-django` is pinned exactly (`==0.66b0`). It is a
   prerelease; upgrade it only in lockstep with the OTel packages.
 - Channels and channels-redis stay on the same version.
+- `daphne` is the ASGI server and is **not optional**. The project serves
+  Channels WebSocket consumers, which a WSGI server cannot handle. Start the
+  application with `daphne -b 0.0.0.0 -p 8000 config.asgi:application`, as
+  `docker/Dockerfile.backend` does.
 - Before adding any dependency, check `README.md` §"Dependency version
   guidance", then verify via Context7, then justify it in your report.
-- Unused dependencies (`@ant-design/charts`, `zustand`, `react-hook-form`,
-  `zod`) are present but not imported. Do not build features on them silently —
-  flag that they are unwired.
+- Unused **backend** dependencies (`Pillow`, `openpyxl`, `reportlab`, `httpx`,
+  `opentelemetry-sdk`, `opentelemetry-instrumentation-django`, `sentry-sdk`) are
+  declared but not imported; each backs a documented requirement that is not
+  implemented. Unused **frontend** dependencies (`@ant-design/charts`,
+  `zustand`, `react-hook-form`, `zod`) are the same situation. Do not build
+  features on them silently — flag that they are unwired. `tests/unit/test_dependency_wiring.py`
+  enforces this for the backend: a declared dependency that is neither
+  imported, run as a process, nor listed in that test's `UNIMPLEMENTED` map
+  fails the suite.
+- `python-jose`, `python-dotenv` and `pydantic` were removed. Do not reintroduce
+  them: SimpleJWT signs with PyJWT, and settings read `os.getenv` directly.
+  `python-jose` in particular carries published CVEs.
 
 ---
 
