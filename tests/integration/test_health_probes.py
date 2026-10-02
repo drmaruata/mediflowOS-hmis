@@ -58,6 +58,10 @@ class TestLiveness:
 
 
 class TestReadiness:
+    # Readiness genuinely queries the database, so unlike liveness it needs
+    # database access.
+    pytestmark = pytest.mark.django_db
+
     def test_reports_ready_when_the_database_answers(self):
         response = Client().get(READINESS)
 
@@ -93,23 +97,31 @@ class TestReadiness:
 class TestLivenessAndReadinessDiffer:
     def test_readiness_is_a_separate_route(self):
         """Guards against collapsing the two back into one handler."""
-        assert resolve(LIVENESS).func.view_class.__name__ == "HealthCheckView"
-        assert resolve(READINESS).func.view_class.__name__ == "ReadinessCheckView"
+        from apps.common.urls import HealthCheckView, ReadinessCheckView
 
-    def test_only_liveness_is_exempt_from_the_request_transaction(self):
-        """The exemption is scoped, not global.
+        assert HealthCheckView is not ReadinessCheckView
+        assert resolve(LIVENESS).url_name == "health"
+        assert resolve(READINESS).url_name == "ready"
 
-        Removing ATOMIC_REQUESTS project-wide would break tenant isolation; the
-        whole point is that exactly one non-tenant view opts out.
+    def test_only_the_probes_are_exempt_from_the_request_transaction(self):
+        """The exemption is scoped to the two probes, not applied globally.
+
+        Removing ATOMIC_REQUESTS project-wide would break tenant isolation, so
+        the point is that only these non-tenant views opt out. The flag is
+        checked on the *routed* view, which is where Django looks.
         """
-        from django.db.transaction import non_atomic_requests
+        liveness = resolve(LIVENESS).func
+        readiness = resolve(READINESS).func
 
-        import apps.common.urls as health_urls
+        assert getattr(liveness, "_non_atomic_requests", set()) == {"default"}
+        # Readiness is exempt for a different reason - see its docstring - but
+        # it must still not be treated as a tenant-scoped view.
+        assert getattr(readiness, "_non_atomic_requests", set()) == {"default"}
 
-        assert getattr(health_urls.HealthCheckView.dispatch, "__wrapped__", None) is not None
-        assert issubclass(health_urls.ReadinessCheckView, object)
-        # Readiness keeps the transaction because it does query the database.
-        assert not hasattr(
-            health_urls.ReadinessCheckView, "_non_atomic_requests_marker"
-        )
-        assert non_atomic_requests is not None
+    def test_tenant_endpoints_keep_the_transaction(self):
+        """The exemption must not have spread to tenant-scoped views."""
+        from apps.patient_registry.views import PatientViewSet
+
+        patients = resolve("/api/v1/patients/").func.cls
+        assert getattr(patients, "_non_atomic_requests", set()) == set()
+        assert PatientViewSet is not None

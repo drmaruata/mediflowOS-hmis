@@ -154,6 +154,19 @@ class TenantMiddleware:
         tenant_id, facility_id = resolve_tenant(request)
         bind_tenant(request, tenant_id, facility_id)
 
+        if not tenant_id and not facility_id:
+            # Nothing to bind, so no transaction is needed to scope anything.
+            #
+            # The row level security policy fails closed when app.tenant_id is
+            # unset, so skipping the binding here cannot leak rows: an
+            # unresolved tenant sees none. Skipping matters because opening a
+            # transaction forces a database connection, and doing that on every
+            # request would make the anonymous liveness probe fail whenever
+            # PostgreSQL is down - which is precisely when a container
+            # healthcheck must not report a failure, or the orchestrator will
+            # restart a perfectly healthy application.
+            return self.get_response(request)
+
         if not supports_tenant_guc():
             # The backend has no session settings to bind, so there is nothing
             # for a transaction to scope. Skip it rather than opening a

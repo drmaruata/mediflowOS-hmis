@@ -80,7 +80,16 @@ class TestMiddlewareBinding:
             ("clear",),
         ]
 
-    def test_clears_when_no_tenant_is_supplied(self, monkeypatch):
+    def test_no_transaction_opens_when_there_is_no_tenant_to_bind(self, monkeypatch):
+        """An unresolved tenant must not force a database connection.
+
+        Binding a tenant is the only reason this middleware opens a
+        transaction. With nothing to bind it opens none, which is what lets the
+        anonymous liveness probe answer while PostgreSQL is down. The row level
+        security policy fails closed when app.tenant_id is unset, so an
+        unresolved tenant still sees no rows - the connection is not what
+        protects the data.
+        """
         calls = []
         monkeypatch.setattr(
             tenant, "set_tenant_context", lambda *a, **k: calls.append(("set",))
@@ -88,11 +97,22 @@ class TestMiddlewareBinding:
         monkeypatch.setattr(
             tenant, "clear_tenant_context", lambda: calls.append(("clear",))
         )
+
+        def explode(*args, **kwargs):
+            raise AssertionError(
+                "TenantMiddleware must not open a transaction when there is no "
+                "tenant to bind; it would force a database connection on every "
+                "request including the liveness probe"
+            )
+
+        monkeypatch.setattr(tenant.transaction, "atomic", explode)
+
         middleware = tenant.TenantMiddleware(lambda request: HttpResponse("ok"))
 
-        middleware(_request())
+        response = middleware(_request())
 
-        assert calls == [("clear",), ("clear",)]
+        assert response.status_code == 200
+        assert calls == []
 
     def test_context_is_cleared_even_when_the_view_raises(self, monkeypatch):
         """A failing request must not leak tenant context to the next one."""
