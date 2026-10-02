@@ -1,6 +1,8 @@
 """Identity, tenancy and administration models (TEN-001 to TEN-011)."""
-from django.db import models
 import uuid
+
+from django.conf import settings
+from django.db import models
 
 
 class Tenant(models.Model):
@@ -113,3 +115,87 @@ class StaffPosition(models.Model):
     class Meta:
         db_table = "identity.staff_position"
         indexes = [models.Index(fields=["tenant_id", "department", "designation"])]
+
+
+class Role(models.Model):
+    """A named bundle of permissions (TEN-004).
+
+    ``tenant`` is null for platform-wide roles, which apply across tenants -
+    used by the platform administrator who onboards tenants (TEN-010). A tenant
+    role belongs to exactly one hospital.
+
+    Roles are data rather than Django groups because permissions here are
+    facility- and department-scoped (TEN-005), which a flat group cannot express.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant = models.ForeignKey(
+        Tenant, on_delete=models.CASCADE, null=True, blank=True, related_name="roles",
+        db_index=True,
+    )
+    name = models.CharField(max_length=64)
+    #: IRI-style permission strings, e.g. "patient_registry.view_patient".
+    permissions = models.JSONField(default=list)
+    #: TEN-006: privileged roles must present a second factor.
+    require_mfa = models.BooleanField(default=False)
+    #: TEN-007: this role may be used to reach records outside its own scope,
+    #: but only with a recorded reason.
+    allows_break_glass = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        db_table = "identity.role"
+        unique_together = [["tenant", "name"]]
+        indexes = [models.Index(fields=["tenant", "name"])]
+
+
+class UserMembership(models.Model):
+    """Links an account to a tenant with a role (TEN-004).
+
+    Django's own ``auth.User`` is deliberately reused rather than replaced: it
+    keeps the admin site, ``django-otp`` devices and the permission framework
+    working. Tenancy lives here instead.
+
+    A user may belong to more than one tenant - a consultant covering several
+    hospitals - which is why this is a join model and not a column on the user.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL, on_delete=models.CASCADE, related_name="memberships",
+        db_index=True,
+    )
+    tenant = models.ForeignKey(Tenant, on_delete=models.CASCADE, related_name="memberships", db_index=True)
+    role = models.ForeignKey(Role, on_delete=models.PROTECT, related_name="memberships", db_index=True)
+    #: Optional narrowing of the membership to one facility.
+    facility_id = models.UUIDField(null=True, blank=True, db_index=True)
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "identity.user_membership"
+        unique_together = [["user", "tenant"]]
+        indexes = [models.Index(fields=["tenant", "active"])]
+
+
+class BreakGlassAccess(models.Model):
+    """Recorded break-glass use, requiring a reason (TEN-007).
+
+    An append-only record. The audit trail is what makes an emergency read
+    reviewable after the fact, so the reason is mandatory rather than optional
+    metadata.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
+    user_id = models.UUIDField(db_index=True)
+    resource_type = models.CharField(max_length=64)
+    resource_id = models.CharField(max_length=64)
+    #: Never blank: the view rejects an empty reason.
+    reason = models.TextField()
+    granted_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    expires_at = models.DateTimeField(null=True, blank=True)
+    revoked_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = "identity.break_glass_access"
+        indexes = [models.Index(fields=["tenant_id", "granted_at"])]

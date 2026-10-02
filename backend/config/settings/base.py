@@ -1,5 +1,6 @@
 """Shared Django settings."""
 import os
+from datetime import timedelta
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
@@ -17,6 +18,10 @@ INSTALLED_APPS = [
     "rest_framework",
     "corsheaders",
     "django_otp",
+    # The TOTP plugin carries the device model used for second-factor
+    # enrolment (TEN-006). It must be an installed app in its own right; the
+    # django_otp entry alone does not bring its migrations or tables along.
+    "django_otp.plugins.otp_totp",
     "drf_spectacular",
     "django_celery_beat",
     "apps.identity_tenancy",
@@ -108,7 +113,10 @@ REST_FRAMEWORK = {
         "rest_framework.permissions.IsAuthenticated",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework_simplejwt.authentication.JWTAuthentication",
+        # Binds the tenant from the token's signed claims, overriding the
+        # X-Tenant-Id header the middleware resolved. See
+        # common/authentication.py for why these are separate steps.
+        "common.authentication.TenantBoundJWTAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
     "DEFAULT_THROTTLE_CLASSES": [
@@ -134,6 +142,20 @@ SPECTACULAR = {
     # make the API documentation itself unreachable.
     "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
     "SERVE_AUTHENTICATION": None,
+}
+
+# Token issuance embeds tenant_id, facility_id, role and permissions, so the
+# tenant a request acts for comes from a signed credential rather than a
+# client-supplied header. See apps/identity_tenancy/tokens.py.
+SIMPLE_JWT = {
+    "TOKEN_OBTAIN_SERIALIZER": "apps.identity_tenancy.tokens.TenantAwareTokenSerializer",
+    "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
+    "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
+    # Tenants hold clinical records, so a leaked refresh token should not stay
+    # usable for long. Rotation makes a replayed refresh token detectable.
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "UPDATE_LAST_LOGIN": True,
 }
 
 CHANNEL_LAYERS = {

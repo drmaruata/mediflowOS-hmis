@@ -15,6 +15,9 @@ dependencies = [
     "django-celery-beat>=2.9,<3",
     "channels>=4.3,<4.4",
     "channels-redis>=4.3,<4.4",
+    # ASGI server required to serve the Channels consumers; a WSGI server
+    # cannot run this project. Kept in step with requirements.txt.
+    "daphne>=4.2,<5",
     "python-jose>=3.5,<4",
     "python-dotenv>=1.2,<2",
     "Pillow>=12.3,<13",

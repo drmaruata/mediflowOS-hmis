@@ -40,6 +40,21 @@ TENANT_PREDICATE = """
 
 POLICY_NAME = "tenant_isolation"
 
+#: Predicate for tables that mix tenant-owned rows with platform-wide ones.
+#:
+#: ``identity.role`` holds both a hospital's own roles (``tenant`` set) and the
+#: platform roles that are global (``tenant`` null, so the platform
+#: administrator can onboard tenants per TEN-010). A plain tenant equality
+#: predicate would hide the platform roles from everyone, including the
+#: administrator who needs them.
+PLATFORM_PREDICATE = """
+    NULLIF(current_setting('app.tenant_id', true), '') IS NOT NULL
+    AND (
+        {column} IS NULL
+        OR {column} = NULLIF(current_setting('app.tenant_id', true), '')::uuid
+    )
+""".strip()
+
 
 def _split(db_table: str) -> tuple[str, str]:
     schema, _, table = db_table.partition(".")
@@ -51,10 +66,10 @@ def _split(db_table: str) -> tuple[str, str]:
     return schema, table
 
 
-def enable_table(db_table: str, quote) -> str:
+def enable_table(db_table: str, quote, *, predicate_template: str = TENANT_PREDICATE) -> str:
     """DDL to enable RLS and attach the tenant isolation policy to one table."""
     schema, table = _split(db_table)
-    predicate = TENANT_PREDICATE.format(column="tenant_id")
+    predicate = predicate_template.format(column="tenant_id")
 
     return f"""
         ALTER TABLE {quote(db_table)} ENABLE ROW LEVEL SECURITY;
@@ -66,6 +81,11 @@ def enable_table(db_table: str, quote) -> str:
             USING ({predicate})
             WITH CHECK ({predicate});
     """
+
+
+def enable_platform_scoped(db_table: str, quote) -> str:
+    """Enable RLS on a table holding both tenant-owned and global rows."""
+    return enable_table(db_table, quote, predicate_template=PLATFORM_PREDICATE)
 
 
 def disable_table(db_table: str, quote) -> str:

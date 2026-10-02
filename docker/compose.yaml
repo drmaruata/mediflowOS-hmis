@@ -1,0 +1,96 @@
+# Local development stack for the Mediflow OS HMIS API.
+#
+# Mirrors the deployment shape described in the architecture doc section 15:
+# a stateless ASGI application, a separate Celery worker, a separate Celery
+# Beat scheduler, PostgreSQL for persistence, and Redis for cache, Celery
+# transport and the Django Channels layer.
+#
+# The application role deliberately lacks BYPASSRLS, because a role with it
+# would ignore every tenant isolation policy - see common/rls.py.
+
+name: mediflow
+
+x-backend: &backend
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile.backend
+  env_file:
+    - .env
+  environment:
+    # The compose service name, matching the default in
+    # config/settings/dev.py.
+    PGHOST: db
+    REDIS_URL: redis://redis:6379/0
+    CELERY_BROKER_URL: redis://redis:6379/0
+  depends_on:
+    db:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: mediflow_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # The application waits for this, so migrate never races the database.
+      test: ["CMD-SHELL", "pg_isready -U postgres -d mediflow_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    # Cache only: Celery task results and channel-layer fan-out are
+    # reconstructible, so persistence is deliberately not enabled.
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  web:
+    <<: *backend
+    ports:
+      - "8000:8000"
+
+  worker:
+    <<: *backend
+    command: ["celery", "-A", "workers.celery", "worker", "--loglevel=info"]
+    # The application image's default CMD is daphne; this service overrides it.
+
+  beat:
+    <<: *backend
+    command: ["celery", "-A", "workers.celery", "beat", "--loglevel=info"]
+
+  migrate:
+    <<: *backend
+    # One-shot. Runs migrations to completion and exits. Not given
+    # `restart: unless-stopped` on purpose - a migration that fails should stay
+    # failed so it is visible, not be retried in a loop.
+    restart: "no"
+    command: ["python", "manage.py", "migrate", "--noinput"]
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    profiles:
+      # Opt-in: docker compose --profile tools up migrate
+      - tools
+
+volumes:
+  pgdata:

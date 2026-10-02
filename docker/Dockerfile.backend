@@ -1,0 +1,61 @@
+# Backend image for the Mediflow OS HMIS API.
+#
+# Multi-stage so the runtime image carries no build toolchain and no pip cache.
+# Layered so that dependency installation - the slow part - is cached
+# independently of application source changes.
+
+# --- dependencies -----------------------------------------------------------
+FROM python:3.12-slim AS deps
+
+ENV PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+WORKDIR /app
+
+# libpq is not needed because psycopg is installed with the binary extra, but
+# build-essential is still required by any source-only dependency.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt requirements-dev.txt ./
+RUN python -m venv /opt/venv \
+    && /opt/venv/bin/pip install --upgrade pip \
+    && /opt/venv/bin/pip install -r requirements.txt
+
+# --- runtime ----------------------------------------------------------------
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PATH="/opt/venv/bin:$PATH" \
+    DJANGO_SETTINGS_MODULE=config.settings.production
+
+# curl is used by the container healthcheck below.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=deps /opt/venv /opt/venv
+
+# The application runs as an unprivileged user. A container that can write to
+# its own code is a weaker boundary, and this process holds database
+# credentials and PHI-adjacent access.
+RUN groupadd --system mediflow \
+    && useradd --system --gid mediflow --home /app --shell /usr/sbin/nologin mediflow
+
+WORKDIR /app
+COPY --chown=mediflow:mediflow . .
+
+USER mediflow
+
+EXPOSE 8000
+
+# Hits the anonymous liveness probe, which is the one endpoint that answers
+# without a tenant or a token.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:8000/api/v1/health/ || exit 1
+
+# Daphne rather than gunicorn's WSGI workers: the project serves WebSocket
+# consumers for notifications and live vitals, which WSGI workers cannot do.
+CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "config.asgi:application"]

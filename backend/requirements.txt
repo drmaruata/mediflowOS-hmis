@@ -10,6 +10,11 @@ celery>=5.6,<5.7
 django-celery-beat>=2.9,<3
 channels>=4.3,<4.4
 channels-redis>=4.3,<4.4
+# ASGI server. The project serves WebSocket consumers (notifications and live
+# vitals) and is deployed behind Channels, so a WSGI server cannot run it.
+# Daphne is the reference server for Channels 4 and is maintained by the Django
+# Software Foundation.
+daphne>=4.2,<5
 python-jose>=3.5,<4
 python-dotenv>=1.2,<2
 Pillow>=12.3,<13

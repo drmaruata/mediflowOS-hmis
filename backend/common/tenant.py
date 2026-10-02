@@ -20,6 +20,13 @@ from rest_framework.exceptions import PermissionDenied
 TENANT_HEADER = "X-Tenant-Id"
 FACILITY_HEADER = "X-Facility-Id"
 
+#: Claim names on the access token. Kept as literals here rather than imported
+#: from apps.identity_tenancy.tokens so that common/ stays free of app imports -
+#: the middleware runs for every request, including ones that never touch a
+#: domain app, and an import cycle would be easy to reintroduce.
+TENANT_CLAIM = "tenant_id"
+FACILITY_CLAIM = "facility_id"
+
 TENANT_SETTING = "app.tenant_id"
 FACILITY_SETTING = "app.facility_id"
 
@@ -58,15 +65,43 @@ def clear_tenant_context() -> None:
 
 
 def resolve_tenant(request) -> tuple[str | None, str | None]:
-    """Read tenant and facility identifiers from headers.
+    """Tenant and facility as claimed by the request's own headers.
 
-    ``tenant_id`` is also accepted as a query parameter because ABDM gateway
-    callbacks are constructed by external software that cannot always set
-    custom headers.
+    Used by :class:`TenantMiddleware`, which runs before DRF has authenticated
+    anything and therefore cannot see the access token. The signed tenant claims
+    are bound later by
+    :class:`common.authentication.TenantBoundJWTAuthentication`, which runs
+    inside the view and overrides this value.
+
+    Both call sites use :func:`set_tenant_context`, so there is still only one
+    mechanism for writing the session setting.
     """
     tenant_id = request.headers.get(TENANT_HEADER) or request.GET.get("tenant_id")
     facility_id = request.headers.get(FACILITY_HEADER)
     return (str(tenant_id) if tenant_id else None, str(facility_id) if facility_id else None)
+
+
+def bind_tenant(request, tenant_id, facility_id=None) -> None:
+    """Record the resolved tenant on the request.
+
+    Called from both entry points so views, mixins and serializers all read the
+    same attributes regardless of how the tenant was established.
+    """
+    setattr(request, REQUEST_TENANT_ATTR, tenant_id)
+    setattr(request, REQUEST_FACILITY_ATTR, facility_id)
+
+
+def bind_tenant_session(tenant_id, facility_id=None) -> None:
+    """Bind (or clear) the PostgreSQL tenant session setting.
+
+    Requires the caller to be inside a transaction; see the module docstring.
+    """
+    if not supports_tenant_guc():
+        return
+    if tenant_id:
+        set_tenant_context(tenant_id, facility_id)
+    else:
+        clear_tenant_context()
 
 
 class TenantScopedQuerysetMixin:
@@ -117,9 +152,7 @@ class TenantMiddleware:
 
     def __call__(self, request):
         tenant_id, facility_id = resolve_tenant(request)
-
-        setattr(request, REQUEST_TENANT_ATTR, tenant_id)
-        setattr(request, REQUEST_FACILITY_ATTR, facility_id)
+        bind_tenant(request, tenant_id, facility_id)
 
         if not supports_tenant_guc():
             # The backend has no session settings to bind, so there is nothing
@@ -130,10 +163,7 @@ class TenantMiddleware:
 
         with transaction.atomic():
             try:
-                if tenant_id:
-                    set_tenant_context(tenant_id, facility_id)
-                else:
-                    clear_tenant_context()
+                bind_tenant_session(tenant_id, facility_id)
                 response = self.get_response(request)
             finally:
                 # Defence in depth. The transaction-scoped settings are already

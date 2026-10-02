@@ -56,8 +56,15 @@ def _tenant_owned_tables():
 
     Discovered rather than listed so that adding a model with ``tenant_id``
     automatically brings it under test.
+
+    Selection is by *column presence*, not by app label. A label allow-list
+    goes stale the moment another installed app contributes tables - it missed
+    django-otp's device table when the TOTP plugin was added, and that table has
+    no tenant to isolate. Filtering on the column is both simpler and correct:
+    a table without ``tenant_id`` cannot be tenant-scoped.
     """
     import os
+
     import django
 
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.base")
@@ -65,24 +72,12 @@ def _tenant_owned_tables():
 
     from django.apps import apps as registry
 
-    # Global tables: the tenant root and the Quality OS source catalogue.
-    excluded = {
-        "identity.tenant",
-        "quality.framework",
-        "quality.framework_edition",
-        "quality.source_document",
-        "quality.indicator_def",
-    }
-    django_apps = {"admin", "auth", "contenttypes", "sessions", "django_celery_beat"}
-
     tables = []
     for config in registry.get_app_configs():
-        if config.label in django_apps:
-            continue
         for model in config.get_models():
-            if model._meta.db_table in excluded:
-                continue
-            tables.append(model._meta.db_table)
+            columns = {field.column for field in model._meta.concrete_fields}
+            if "tenant_id" in columns:
+                tables.append(model._meta.db_table)
     return sorted(set(tables))
 
 
@@ -231,6 +226,10 @@ _FK_PARENTS = {
         "source_document_id": "quality.source_document",
     },
     "quality.indicator_value": {"indicator_id": "quality.indicator_def"},
+    # Added in step 7. identity.role and identity.user_membership both carry
+    # tenant_id as a real foreign key to identity.tenant, which the seeder
+    # already satisfies because tenant_id is passed as the row's own tenant.
+    "identity.user_membership": {"user_id": "auth.user", "role_id": "identity.role"},
 }
 
 #: Supporting rows that must exist before a tenant-owned table can be probed, in
@@ -249,6 +248,8 @@ TENANT_SPINE = (
     "identity.department",
     "identity.ward",
     "registry.intake_point",
+    "identity.role",
+    "identity.user_membership",
 )
 
 
@@ -287,6 +288,19 @@ def spine(admin_connection):
 
     created = {}
     stamp = "2026-01-01 00:00:00+00"
+
+    # Django auth has no tenant_id of its own, but identity.user_membership
+    # points at it, so a real account row is needed for the FK to hold.
+    with admin_connection.cursor() as cursor:
+        cursor.execute(
+            "INSERT INTO public.auth_user "
+            "(id, password, is_superuser, is_staff, is_active, date_joined, "
+            " username, first_name, last_name, email) "
+            "VALUES (1, '!', false, false, true, %s, %s, '', '', '') "
+            "ON CONFLICT (id) DO NOTHING",
+            (stamp, f"probe-{uuid.uuid4().hex[:10]}"),
+        )
+    probe_user_id = 1
 
     # Global Quality catalogue spine. indicator_value is tenant-owned but points
     # at the global indicator_def, so this row is shared by both tenants.
@@ -354,21 +368,38 @@ def spine(admin_connection):
                 "registry.intake_point",
                 {"type": "opd", "active": True},
             ),
+            # A role per tenant, so identity.user_membership has a tenant-owned
+            # role to point at rather than only the platform-wide one.
+            (
+                "identity.role",
+                {"name": f"role-{token}", "permissions": [], "require_mfa": False,
+                 "allows_break_glass": False, "created_at": stamp},
+            ),
+            (
+                "identity.user_membership",
+                {"active": True},
+            ),
         ):
             row_id = uuid.uuid4()
             values = {"id": row_id, "tenant_id": tenant_id, **extras}
             for column, parent in _FK_PARENTS.get(table, {}).items():
-                values[column] = ids[parent]
+                values[column] = _spine_id(
+                    {"global": global_ids, "tenants": {tenant_id: ids}, "user": probe_user_id},
+                    parent,
+                    tenant_id,
+                )
             _insert(admin_connection, table, values)
             ids[table] = row_id
         created[tenant_id] = ids
-    return {"global": global_ids, "tenants": created}
+    return {"global": global_ids, "tenants": created, "user": probe_user_id}
 
 
 def _spine_id(spine: dict, parent: str, tenant_id) -> uuid.UUID:
     """Resolve a parent row id from whichever scope owns it."""
     if parent in spine["global"]:
         return spine["global"][parent]
+    if parent == "auth.user":
+        return spine["user"]
     return spine["tenants"][tenant_id][parent]
 
 
