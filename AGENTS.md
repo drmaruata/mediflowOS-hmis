@@ -177,6 +177,52 @@ TanStack Query 5.104, Zustand, React Hook Form, Zod.
   `zod`) are present but not imported. Do not build features on them silently —
   flag that they are unwired.
 
+### Documentation of tech & dependency changes (mandatory)
+
+Any change to backend or frontend **technology, framework, library, tool, or
+dependency** — including adds, removals, upgrades (even patch), pins, and
+configuration changes (e.g. `vite.config.ts`, `tsconfig.json`,
+`pyproject.toml`, `requirements*.txt`, `package.json`, `package-lock.json`,
+Dockerfile base images, CI images) — is a **documentation-bearing change**.
+For every such change the agent MUST update **all relevant documents** in the
+same commit/PR. There is no "code-only" tech change.
+
+**Authoritative documents that must be kept in sync:**
+
+- `AGENTS.md` §3 — the pinned stack summary (`Backend:` / `Frontend:` lines).
+- `README.md` — `## Tech stack` and `## Dependency version guidance` (tables,
+  version numbers, and compatibility notes).
+- `docs/SaaS HMIS Architecture v0.6.md` — §15 deployment, §14 frontend,
+  and any technology table or diagram that names the changed component.
+- `frontend/package.json` / `frontend/package-lock.json` and
+  `backend/requirements.txt` / `backend/pyproject.toml` / `backend/requirements-dev.txt`
+  — the source of truth; docs must match them.
+- `docker/` and `terraform/` — base images, build args, or provider versions
+  if the change touches the runtime or infra.
+- `docs/` ADRs or decision logs — add or update an ADR when the change is
+  architectural (new framework, major version, or pattern shift).
+
+**Minimum required updates per change:**
+
+1. Bump the version / name in `AGENTS.md` §3 **and** `README.md` dependency
+   tables in the same commit that changes the manifest/lockfile.
+2. If the change adds or removes a dependency, update the prose lists in both
+   files and note whether the dependency is wired or currently unused (see the
+   "Unused dependencies" rule above and `tests/unit/test_dependency_wiring.py`).
+3. If the change alters setup, build, or run steps, update `README.md`
+   prerequisites/setup and `AGENTS.md` §8 Commands.
+4. If the change affects deployment, observability, or the PWA/offline plan,
+   update the corresponding Architecture doc section.
+5. Record the rationale, alternatives considered, and rollback plan in the PR
+   description and — for non-trivial changes — in a short ADR under `docs/`.
+6. Extend `Definition of done` (§9) and `Report format` (§10) evidence: the
+   report MUST list every doc file touched for the tech/dependency change and
+   the exact sections updated.
+
+Failure to update the docs is a **process failure** even when the code and
+tests are green. Reviewers must reject a PR that changes tech or dependencies
+without the companion doc updates.
+
 ---
 
 ## 4. Backend rules (Django / DRF)
@@ -499,7 +545,12 @@ results:
    deny-by-default.
 8. `/api/schema/` still generates without warnings.
 9. No secrets, PHI, or debug statements were introduced.
-10. Unfinished work is stated plainly — never report a partial implementation
+10. **Docs are in sync for any tech/dependency change** — `AGENTS.md` §3,
+    `README.md` (Tech stack + Dependency version guidance), the relevant
+    `docs/*.md` sections, and manifests/lockfiles all agree on versions and
+    wiring status. See §3 "Documentation of tech & dependency changes" for
+    the full checklist. A green test suite does not excuse stale docs.
+11. Unfinished work is stated plainly — never report a partial implementation
     as complete. If something is blocked, say which requirement ID and what is
     missing.
 
@@ -512,6 +563,11 @@ End every task with:
   claim a command passed without running it.
 - **Context7** — library IDs queried.
 - **Skills** — skill IDs loaded.
+- **Docs updated** — for any backend/frontend tech or dependency change, list
+  every document and section updated (`AGENTS.md` §3, `README.md` Tech stack /
+  Dependency version guidance, `docs/...` §, manifests/lockfiles). If no tech
+  or dependency changed, state "No tech/dependency change — no doc sync
+  required." This item is mandatory.
 - **Not done** — anything incomplete, blocked, or deliberately deferred, with
   the requirement ID.
 - **Notes** — dependency changes, doc updates, or risks worth the reviewer's
@@ -520,6 +576,10 @@ End every task with:
 ## 11. Prohibited
 
 - Silently upgrading a dependency or breaking a version pin.
+- Changing backend or frontend tech / dependencies (add, remove, upgrade, pin,
+  or config) without updating **all relevant documents and `README.md`** per
+  §3 "Documentation of tech & dependency changes" — stale docs are a
+  process failure even when tests pass.
 - Adding `AllowAny`, a second tenant context mechanism, or an unauthenticated
   tenant-owned endpoint.
 - Returning `200` from the ABDM callback before its seven §8.4 requirements are
