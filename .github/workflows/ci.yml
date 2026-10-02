@@ -40,6 +40,15 @@ jobs:
 
       - run: pip install -r requirements-dev.txt
 
+      - name: Check backend dependency sync (requirements vs pyproject)
+        run: python -c "import sys; sys.path.insert(0,'../'); from tests.unit.test_dependency_wiring import test_requirements_and_pyproject_are_synchronized; test_requirements_and_pyproject_are_synchronized()"
+
+      - name: Verify lockfiles match direct deps
+        run: |
+          pip install pip-tools==7.6.1
+          pip-compile --no-header --strip-extras --output-file /tmp/req_check.lock requirements.txt >/tmp/req_check.out 2>&1 && diff -u requirements.lock /tmp/req_check.lock
+          pip-compile --no-header --strip-extras --output-file /tmp/reqdev_check.lock requirements-dev.txt >/tmp/reqdev_check.out 2>&1 && diff -u requirements-dev.lock /tmp/reqdev_check.lock
+
       - name: Ruff
         run: python -m ruff check . ../tests
 
@@ -157,6 +166,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       - run: npm ci
+
+      - name: Verify frontend lockfile matches package.json
+        run: npm ci --ignore-scripts --no-audit --no-fund --dry-run 2>&1 | tail -15
 
       - name: Lint, typecheck and test
         run: npm run check

@@ -50,7 +50,7 @@ The application is built around the following principles:
 
 ## Dependency version guidance
 
-Versions below were checked against npm and PyPI on 2026-10-01. Prefer the newest patch release within the currently tested major; do not use `npm audit fix --force` or blanket major upgrades as a routine update. Coordinate major upgrades with the compatibility checks in this README.
+Versions below were checked against npm and PyPI on 2026-10-02 and re-verified against the current lockfiles/manifests (frontend/package-lock.json lockVersion 3, 188,202 B; backend/requirements.txt ↔ backend/pyproject.toml synchronized). Prefer the newest patch release within the currently tested major; do not use `npm audit fix --force` or blanket major upgrades as a routine update. Coordinate major upgrades with the compatibility checks in this README.
 
 ### Frontend dependencies
 
