@@ -142,6 +142,53 @@ class TenantScopedQuerysetMixin:
                 "A tenant must be resolved before tenant-owned data can be written."
             )
         serializer.save(**{self.tenant_field: tenant_id})
+        
+        # Write an audit trail event (AUD-001)
+        self._write_audit_log(serializer.instance, "create")
+
+    def perform_update(self, serializer):
+        super().perform_update(serializer)
+        self._write_audit_log(serializer.instance, "update")
+
+    def perform_destroy(self, instance):
+        self._write_audit_log(instance, "delete")
+        super().perform_destroy(instance)
+
+    def _write_audit_log(self, instance, action):
+        """Helper to write audit log entries for DRF writes."""
+        tenant_id = self.get_tenant_id()
+        if not tenant_id:
+            return
+            
+        try:
+            from apps.audit.models import AuditEvent
+        except ImportError:
+            return
+            
+        user_id = self.request.user.pk if self.request.user.is_authenticated else None
+        
+        # Entity type is the table name, entity ID is the stringified PK.
+        entity_type = instance._meta.db_table
+        entity_id = str(instance.pk)
+        
+        ip = self.request.META.get("REMOTE_ADDR")
+        
+        AuditEvent.objects.create(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            action=action,
+            entity_type=entity_type,
+            entity_id=entity_id,
+            source_ip=ip,
+            reason=self.request.headers.get("X-Break-Glass-Reason"),
+        )
+
+    #: Serializers for tenant-owned models must list ``tenant_id`` in
+    #: ``read_only_fields``. ``perform_create`` above is what supplies the
+    #: value; if the field stays writable it is a *required* input, so every
+    #: create 400s before this hook is ever reached, and if a caller manages to
+    #: pass it the value is silently overwritten anyway. Two ways to get this
+    #: wrong, so it is stated here rather than left to each app to rediscover.
 
 
 class TenantMiddleware:

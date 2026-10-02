@@ -82,9 +82,12 @@ PLAN = {
         "0003_alter_bed_tenant_id_alter_serviceunit_tenant_id_and_more",
     ),
     "patient_registry": (
-        ["registry.patient", "registry.intake_point", "registry.qr_code",
-         "registry.abdm_callback_log"],
+        ["registry.patient", "registry.intake_point", "registry.qr_code"],
         "0003_alter_intakepoint_tenant_id_alter_qrcode_tenant_id",
+    ),
+    "abdm_gateway": (
+        ["abdm.callback_log"],
+        "0001_initial",
     ),
     "opd": (["opd.token", "opd.encounter"], "0003_alter_opdencounter_tenant_id"),
     "ipd": (

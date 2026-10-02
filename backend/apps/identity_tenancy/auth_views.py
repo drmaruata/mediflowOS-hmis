@@ -5,7 +5,7 @@ to record a reason. Both live here because both are authentication concerns
 rather than domain logic.
 """
 from django.utils import timezone
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers, status, viewsets
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.response import Response
@@ -40,6 +40,125 @@ class TOTPDeviceSerializer(serializers.Serializer):
     config_url = serializers.CharField(read_only=True, help_text="otpauth:// URI for QR enrolment")
 
 
+_MeSerializer = inline_serializer(
+    "Me",
+    fields={
+        "username": serializers.CharField(),
+        "tenant_id": serializers.UUIDField(allow_null=True),
+        "facility_id": serializers.UUIDField(allow_null=True),
+        "role": serializers.CharField(allow_null=True),
+        "permissions": serializers.ListField(child=serializers.CharField()),
+        "allows_break_glass": serializers.BooleanField(),
+        "requires_mfa": serializers.BooleanField(),
+    },
+)
+
+
+@extend_schema(tags=["auth"])
+class MeView(APIView):
+    """The caller's identity and tenant context.
+
+    The frontend needs this on load to decide what to render. Returning the
+    tenant the server *resolved*, rather than the one the client asked for, makes
+    a mismatch visible instead of silent.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(responses=_MeSerializer)
+    def get(self, request):
+        membership = active_membership(request.user)
+        claims = claims_from(request)
+        return Response(
+            {
+                "username": request.user.get_username(),
+                "tenant_id": getattr(request, "tenant_id", None),
+                "facility_id": getattr(request, "facility_id", None),
+                "role": claims.get(ROLE_CLAIM),
+                "permissions": claims.get(PERMISSIONS_CLAIM, []),
+                "allows_break_glass": claims.get(BREAK_GLASS_CLAIM, False),
+                "requires_mfa": bool(membership.role.require_mfa) if membership else False,
+            }
+        )
+
+
+_BreakGlassResponseSerializer = inline_serializer(
+    "BreakGlassResponse",
+    fields={
+        "access_id": serializers.UUIDField(),
+        "granted_at": serializers.DateTimeField(),
+    },
+)
+
+
+@extend_schema(
+    tags=["auth"],
+    request=inline_serializer(
+        "BreakGlassRequest",
+        fields={
+            "resource_type": serializers.CharField(),
+            "resource_id": serializers.CharField(),
+        },
+    ),
+    responses={201: _BreakGlassResponseSerializer},
+)
+class BreakGlassView(APIView):
+    """Grants recorded emergency access to a record outside normal scope (TEN-007).
+
+    Requires a non-empty reason, and the grant is written before access is
+    allowed, so there is no path to an unlogged emergency read.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        claims = claims_from(request)
+        if not claims.get(BREAK_GLASS_CLAIM):
+            return Response(
+                {"detail": "This role does not hold break-glass access."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        tenant_id = getattr(request, "tenant_id", None)
+        if not tenant_id:
+            return Response(
+                {"detail": "No tenant context for this request."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        reason = (request.headers.get(BREAK_GLASS_REASON_HEADER) or "").strip()
+        if not reason:
+            return Response(
+                {
+                    "detail": (
+                        "Break-glass access requires a reason. Send it in the "
+                        f"{BREAK_GLASS_REASON_HEADER} header."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        resource_type = request.data.get("resource_type")
+        resource_id = request.data.get("resource_id")
+        if not resource_type or not resource_id:
+            raise serializers.ValidationError(
+                {"resource_type": "Required.", "resource_id": "Required."}
+            )
+
+        access = BreakGlassAccess.objects.create(
+            tenant_id=tenant_id,
+            user_id=request.user.pk,
+            resource_type=str(resource_type)[:64],
+            resource_id=str(resource_id)[:64],
+            reason=reason,
+            granted_at=timezone.now(),
+        )
+        return Response(
+            {"access_id": str(access.id), "granted_at": access.granted_at},
+            status=status.HTTP_201_CREATED,
+        )
+
+
 class TOTPEnrolViewSet(viewsets.ViewSet):
     """Second-factor enrolment for privileged roles (TEN-006).
 
@@ -53,7 +172,9 @@ class TOTPEnrolViewSet(viewsets.ViewSet):
     """
 
     permission_classes = [IsAuthenticated]
+    serializer_class = TOTPDeviceSerializer
 
+    @extend_schema(responses=TOTPDeviceSerializer(many=True))
     def list(self, request):
         from django_otp import devices_for_user
 
@@ -72,7 +193,7 @@ class TOTPEnrolViewSet(viewsets.ViewSet):
         ]
         return Response(devices)
 
-    @extend_schema(request=None)
+    @extend_schema(request=None, responses={201: TOTPDeviceSerializer})
     def create(self, request):
         from django_otp.plugins.otp_totp.models import TOTPDevice
 
@@ -139,86 +260,3 @@ class TOTPEnrolViewSet(viewsets.ViewSet):
                 device.delete()
                 return Response(status=status.HTTP_204_NO_CONTENT)
         return Response(status=status.HTTP_404_NOT_FOUND)
-
-
-class MeView(APIView):
-    """The caller's identity and tenant context.
-
-    The frontend needs this on load to decide what to render. Returning the
-    tenant the server *resolved*, rather than the one the client asked for, makes
-    a mismatch visible instead of silent.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def get(self, request):
-        membership = active_membership(request.user)
-        claims = claims_from(request)
-        return Response(
-            {
-                "username": request.user.get_username(),
-                "tenant_id": getattr(request, "tenant_id", None),
-                "facility_id": getattr(request, "facility_id", None),
-                "role": claims.get(ROLE_CLAIM),
-                "permissions": claims.get(PERMISSIONS_CLAIM, []),
-                "allows_break_glass": claims.get(BREAK_GLASS_CLAIM, False),
-                "requires_mfa": bool(membership.role.require_mfa) if membership else False,
-            }
-        )
-
-
-class BreakGlassView(APIView):
-    """Grants recorded emergency access to a record outside normal scope (TEN-007).
-
-    Requires a non-empty reason, and the grant is written before access is
-    allowed, so there is no path to an unlogged emergency read.
-    """
-
-    permission_classes = [IsAuthenticated]
-
-    def post(self, request):
-        claims = claims_from(request)
-        if not claims.get(BREAK_GLASS_CLAIM):
-            return Response(
-                {"detail": "This role does not hold break-glass access."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        tenant_id = getattr(request, "tenant_id", None)
-        if not tenant_id:
-            return Response(
-                {"detail": "No tenant context for this request."},
-                status=status.HTTP_403_FORBIDDEN,
-            )
-
-        reason = (request.headers.get(BREAK_GLASS_REASON_HEADER) or "").strip()
-        if not reason:
-            return Response(
-                {
-                    "detail": (
-                        "Break-glass access requires a reason. Send it in the "
-                        f"{BREAK_GLASS_REASON_HEADER} header."
-                    )
-                },
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        resource_type = request.data.get("resource_type")
-        resource_id = request.data.get("resource_id")
-        if not resource_type or not resource_id:
-            raise serializers.ValidationError(
-                {"resource_type": "Required.", "resource_id": "Required."}
-            )
-
-        access = BreakGlassAccess.objects.create(
-            tenant_id=tenant_id,
-            user_id=request.user.pk,
-            resource_type=str(resource_type)[:64],
-            resource_id=str(resource_id)[:64],
-            reason=reason,
-            granted_at=timezone.now(),
-        )
-        return Response(
-            {"access_id": str(access.id), "granted_at": access.granted_at},
-            status=status.HTTP_201_CREATED,
-        )

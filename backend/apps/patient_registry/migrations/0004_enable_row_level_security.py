@@ -17,7 +17,6 @@ TABLES = (
     "registry.patient",
     "registry.intake_point",
     "registry.qr_code",
-    "registry.abdm_callback_log",
 )
 
 

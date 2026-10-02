@@ -1,8 +1,13 @@
-"""Realtime URLs - WebSocket endpoints only."""
-from django.urls import path
-from . import consumers
+"""Realtime URLs."""
+from rest_framework.routers import DefaultRouter
+
+from . import views
+
+app_name = "realtime"
+
+router = DefaultRouter()
+router.register(r"realtime-status", views.RealtimeStatusViewSet, basename="realtimestatus")
 
 urlpatterns = [
-    path("ws/notifications/", consumers.NotificationConsumer.as_asgi()),
-    path("ws/vitals/", consumers.VitalsConsumer.as_asgi()),
+    *router.urls,
 ]

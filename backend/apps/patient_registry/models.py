@@ -10,7 +10,8 @@ class Patient(models.Model):
     uhid = models.CharField(max_length=32, db_index=True)
     abha_address = models.CharField(max_length=128, null=True, blank=True)
     abha_number = models.CharField(max_length=14, null=True, blank=True, db_index=True)
-    verification_status = models.CharField(max_length=16, default="provisional")  # provisional | verified
+    verification_status = models.CharField(max_length=16, default="pending")  # pending | verified
+    verified_at = models.DateTimeField(null=True, blank=True)
     demographics = models.JSONField()
     contact = models.JSONField(null=True)
     address = models.JSONField(null=True)

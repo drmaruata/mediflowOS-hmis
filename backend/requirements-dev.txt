@@ -3,3 +3,7 @@ pytest>=9.1,<10
 pytest-django>=4.14,<5
 pytest-cov>=7.1,<8
 ruff>=0.16.9,<0.17
+djangorestframework-stubs==3.18.1
+django-stubs==6.1.1
+django-stubs-ext==6.1.1
+types-pyyaml==6.0.12.20260906
