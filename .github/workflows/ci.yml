@@ -167,6 +167,9 @@ jobs:
 
       - run: npm ci
 
+      - name: Verify frontend lockfile matches package.json
+        run: npm ci --ignore-scripts --no-audit --no-fund --dry-run 2>&1 | tail -15
+
       - name: Lint, typecheck and test
         run: npm run check
 
