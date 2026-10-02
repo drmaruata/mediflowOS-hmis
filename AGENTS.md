@@ -35,8 +35,10 @@ blacklist settings", "useQuery retry and refetchInterval options".
 | DRF (website docs) | `/websites/django-rest-framework` |
 | drf-spectacular | `/tfranzel/drf-spectacular` |
 | React 18 | `/reactjs/react.dev/__branch__v18` |
-| Ant Design 5 | `/ant-design/ant-design/5.26.2` |
+| Shadcn UI / Tailwind | `/websites/ui_shadcn` (verified) |
+| Radix UI primitives | `/websites/ui_shadcn` (composition layer) |
 | Vite 6 | `/websites/v6_vite_dev` |
+| React Router 7 | `/remix-run/react-router` (docs mirror: `/websites/reactrouter`) |
 | TanStack Query 5 | `/tanstack/query` |
 | TypeScript | `/microsoft/typescript` |
 | Vitest | `/vitest-dev/vitest` |
@@ -53,9 +55,9 @@ Anything not in this table: call `resolve-library-id` first, then `query-docs`.
 are not certain of, any deprecation or migration path, any framework-lifecycle
 or async question, any security API (JWT, CORS, CSRF, RLS, permissions).
 
-**Version discipline:** the repo is pinned to React 18 / Ant Design 5 / Django
-5.2 LTS / Vite 6. Docs for React 19, Ant Design 6, Django 6 or Vite 8 describe
-an API this repo does not run. If the pinned version and the latest docs
+**Version discipline:** the repo is pinned to React 18 / Shadcn UI + Tailwind
+v4 / Django 5.2 LTS / Vite 6. Ant Design 5 is removed; docs for Ant Design 6
+describe an API this repo no longer uses. If the pinned version and the latest docs
 disagree, the pinned version wins — read the versioned ID above, and if the
 feature genuinely requires the newer major, stop and report instead of
 migrating silently.
@@ -160,7 +162,8 @@ Redis, Celery 5.6 + django-celery-beat, Channels 4.3, **daphne 4.2** (ASGI
 server), SimpleJWT, django-otp, drf-spectacular, OpenTelemetry + Sentry.
 
 **Frontend:** React 18.3, TypeScript 5.9, Vite 6.4, Ant Design 5.29,
-TanStack Query 5.104, Zustand, React Hook Form, Zod.
+`@ant-design/icons` 5.6, **React Router 7.18** (`react-router-dom` — installed
+and in use), TanStack Query 5.104, Zustand, React Hook Form, Zod.
 
 **Dependency rules:**
 
@@ -181,8 +184,10 @@ TanStack Query 5.104, Zustand, React Hook Form, Zod.
   `opentelemetry-sdk`, `opentelemetry-instrumentation-django`, `sentry-sdk`) are
   declared but not imported; each backs a documented requirement that is not
   implemented. Unused **frontend** dependencies (`@ant-design/charts`,
-  `zustand`, `react-hook-form`, `zod`) are the same situation. Do not build
-  features on them silently — flag that they are unwired. `tests/unit/test_dependency_wiring.py`
+  `react-hook-form`, `zod`) are the same situation. Do not build features on
+  them silently — flag that they are unwired. `zustand` and `react-router-dom`
+  are wired: `src/stores/authStore.ts` and `src/App.tsx` / `src/main.tsx`
+  respectively. `tests/unit/test_dependency_wiring.py`
   enforces this for the backend: a declared dependency that is neither
   imported, run as a process, nor listed in that test's `UNIMPLEMENTED` map
   fails the suite.
@@ -437,12 +442,21 @@ This repo documents **why**, not what, and it is meticulous about it. Follow it:
 
 ### Routing and structure
 
-Architecture doc §14 requires feature folders mirroring backend modules
-(`src/features/patient_registry/`, etc.) with **route-level code splitting**.
-The current `src/App.tsx` is a dashboard shell, not the target structure. When
-adding a module, create its feature folder rather than growing `App.tsx`.
-React Router is not installed; if you add routing, add the dependency in your
-report and read its current docs via Context7 first.
+Architecture doc §14 requires per-module folders with **route-level code
+splitting**. The layout is `src/modules/<backend_module>/`, mirroring the backend
+app names (`src/modules/auth/`, `src/modules/patient_registry/`,
+`src/modules/dashboard/`) — `src/modules/`, not `src/features/`. When adding a
+module, create its folder there rather than growing `src/App.tsx`; `App.tsx` is
+the authenticated shell and route table only.
+
+Routing is **React Router 7** (`react-router-dom`), installed and in use:
+`BrowserRouter` in `src/main.tsx`, the route table and `/*` auth guard in
+`src/App.tsx`. Add new routes there, keep the `/login` and `/*` guard structure
+intact, and remember that a nav entry with no matching `<Route>` renders a blank
+content area — mark it `disabled` until its module exists. Lazy-load module
+routes rather than importing them eagerly. Read the current docs via Context7
+(`/remix-run/react-router`, `/websites/reactrouter`) before using an unfamiliar
+router API.
 
 ### PWA and offline (architecture doc §14)
 

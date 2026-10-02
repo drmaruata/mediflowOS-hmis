@@ -2,6 +2,8 @@
 
 **Version:** 0.6 (draft) | **Status:** For review | **Date:** 1 Oct 2026
 
+**Changes (UI layer, v0.6 amendment A):** the frontend UI layer was migrated from Ant Design 5 + ProComponents to **Shadcn UI** on Tailwind CSS v4 with Radix primitives and `lucide-react` icons. Charts are hand-rolled inline SVG. See §4 (Technology Stack) and the new **§14.1** for the decision table, rationale, and constraints. `@ant-design/charts` is removed.
+
 **Changes from v0.5:** reconciled against the uploaded SRS/PRD baseline; added facility setup as a first-class configuration capability, added the Blood Bank module, added department-driven registration/admission, formalised the NQAS workbook sheet-to-service mapping, corrected the generic Quality OS treatment of LAMA/absconding so source-specific definitions always take precedence, and promoted the 406-indicator catalogue/provenance model to the canonical baseline.
 
 **Changes from v0.4:** replaced the NestJS/TypeScript backend with a Django + Django REST Framework modular monolith. **Django Channels is deliberately restricted to the real-time notification engine and live vitals dashboards only**; other operational screens continue to use REST with polling/refetching. BullMQ is replaced by Celery + Celery Beat for background jobs and scheduling.
@@ -53,8 +55,9 @@ These are planning assumptions to validate, not measurements.
 | Layer | Choice | Notes |
 | --- | --- | --- |
 | Frontend | React + TypeScript, **Vite SPA** | No SSR needed; the app sits behind authentication |
-| UI | Ant Design 5 + ProComponents | Dense tables/forms out of the box |
-| Charts | Ant Design Charts or Apache ECharts | Run charts and control charts for Quality OS |
+| UI | **Shadcn UI** (Tailwind + Radix) — replaces Ant Design 5 | Copied-source components via CLI; no external icon library dependency; semantic tokens (`bg-primary`, `text-foreground`) replace `ConfigProvider` theming |
+| Charts | **Inline SVG** (hand-rolled donut with `stroke-dasharray`, bars via SVG primitives) | No `@ant-design/charts`, no `recharts`; avoids dependency sync and keeps bundle small |
+| Component registry | `components.json` + `src/components/ui/` | `Button`, `Card`, `Badge`, `Input`, `Label`, `Dialog`, `Tabs`, `Avatar`, `Tooltip`, `Toast`, `ScrollArea`, `Progress`, `DropdownMenu`, `Separator`, `Select` (planned)
 | Data fetching | TanStack Query | Server-state cache and refetching |
 | Forms/validation | React Hook Form + Zod | Frontend validation; API contracts are generated from OpenAPI |
 | UI state | Zustand | Active patient tabs, UI preferences |
@@ -570,12 +573,33 @@ It is **not** used as the general transport for bed status, ER boards, OPD queue
 
 ## 14. Frontend Architecture
 
-- Vite SPA, route-level code splitting per module to keep the initial bundle small (Quality OS charts are lazy-loaded).
-- Feature-folder structure mirroring backend modules.
+- Vite SPA, route-level code splitting per module to keep the initial bundle small (modules under `src/modules/` are lazy-loaded, including the clinical operations dashboard and patient registration).
+- Module-folder structure under `src/modules/` mirroring backend apps (`src/modules/dashboard/`, `src/modules/patient_registry/`, `src/modules/auth/`).
 - Typed API client generated from the Django REST Framework OpenAPI schema; Zod remains frontend-only for form/input validation.
 - PWA service worker for asset caching and a **short-lived offline queue** for ward screens (drafts retained locally, clear "unsynced" indicators, conflict handling on resubmit). Clinical orders never appear "saved" until the server confirms.
 - A **counter display** route (token board) designed for wall-mounted screens: large type, periodic REST polling/refetching, no login prompts, kiosk token scoped to display only. It does not use Django Channels.
 - Accessibility and readability standards for long sessions; localization-ready (English first; Hindi and regional languages such as Mizo later).
+
+### 14.1 UI system: Shadcn UI on Tailwind (replaces Ant Design)
+
+The frontend UI layer was migrated from **Ant Design 5 + ProComponents** to **Shadcn UI**.
+
+| Concern | Decision | Rationale |
+| --- | --- | --- |
+| Component source | Copied into `frontend/src/components/ui/` via `components.json` | Components are reviewed, versioned, and patched in-repo rather than consumed as a black-box dependency. Avoids the Ant Design v5-to-v6 coordinated major migration. |
+| Styling | Tailwind CSS v4 via `@tailwindcss/vite` | Utility classes + semantic CSS variables replace the AntD `ConfigProvider` token system. Theme still centres on teal `#0f766e` (`--primary: 174 83% 25%`). |
+| Primitives | Radix UI | Unstyled, accessible primitives that shadcn composes into styled source. |
+| Icons | `lucide-react` | Replaces `@ant-design/icons`. Tree-shakeable, consistent stroke set. |
+| Theming | CSS variables in `src/styles/globals.css` (`:root` / `.dark`) | Dark mode is class-driven; tokens are HSL triplets consumed as `hsl(var(--token))`. |
+| Charts | Hand-rolled inline SVG | Donut via `stroke-dasharray` arcs; bars/funnels via SVG primitives. No `@ant-design/charts` and no `recharts` — avoids adding an unwired dependency. |
+
+**Constraints carried into the new stack:**
+
+- `components.json` is the source of truth for the registry; run `npx shadcn@latest add <component>` rather than hand-writing a component that already exists.
+- Icons come from `lucide-react`, never from a CDN or an SVG asset.
+- shadcn components are *owned* code: upstream changes arrive only via `shadcn add --diff`, and local edits are preserved deliberately.
+- Accessibility is inherited from Radix but still required: `aria-label` on every icon-only `Button`, labelled inputs, keyboard-reachable interactions.
+- Responsive behaviour uses Tailwind `sm:`/`md:`/`lg:`/`xl:` breakpoints rather than AntD `Row`/`Col` props.
 
 ## 15. Infrastructure and Deployment
 

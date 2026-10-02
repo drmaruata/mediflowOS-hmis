@@ -1,181 +1,95 @@
-import { useQuery } from "@tanstack/react-query";
-import {
-  App as AntApp,
-  Avatar,
-  Badge,
-  Button,
-  Card,
-  Col,
-  ConfigProvider,
-  Input,
-  Layout,
-  Menu,
-  Row,
-  Space,
-  Statistic,
-  Tag,
-  Typography,
-} from "antd";
-import {
-  AlertOutlined,
-  ApartmentOutlined,
-  AuditOutlined,
-  BellOutlined,
-  DashboardOutlined,
-  DatabaseOutlined,
-  MenuFoldOutlined,
-  MenuUnfoldOutlined,
-  MedicineBoxOutlined,
-  SearchOutlined,
-  SettingOutlined,
-  TeamOutlined,
-} from "@ant-design/icons";
-import { useState } from "react";
-import { fetchApiHealth } from "./lib/health";
+/**
+ * App.tsx — root shell for the Vite React SPA (React Router 7).
+ *
+ * Only this file and `src/styles/index.css` may change outside of
+ * `src/modules/dashboard/` per the file-boundary rule (◪ [2026-10-02]).
+ *
+ * Note: the previous Ant Design `ConfigProvider` is removed; shadcn/ui
+ * components use Tailwind CSS variables defined in `src/styles/globals.css`.
+ */
 
-const { Header, Sider, Content } = Layout;
-const { Text, Title } = Typography;
+import React, { Suspense, lazy } from "react";
+import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
-const modules = [
-  { key: "overview", icon: <DashboardOutlined />, label: "Overview" },
-  { key: "registration", icon: <TeamOutlined />, label: "Registration" },
-  { key: "opd", icon: <MedicineBoxOutlined />, label: "OPD queue" },
-  { key: "ipd", icon: <ApartmentOutlined />, label: "IPD & beds" },
-  { key: "quality", icon: <AuditOutlined />, label: "Quality OS" },
-  { key: "integrations", icon: <DatabaseOutlined />, label: "Integrations" },
-];
+import { useAuthStore } from "@/stores/authStore";
+import { AppHeader } from "@/components/AppHeader";
+import LoginPage from "@/modules/auth/LoginPage";
 
-function App() {
-  const [collapsed, setCollapsed] = useState(false);
-  const [activeModule, setActiveModule] = useState("overview");
-  const [search, setSearch] = useState("");
-  const health = useQuery({
-    queryKey: ["health"],
-    queryFn: fetchApiHealth,
-    retry: false,
-    refetchInterval: 30_000,
-  });
+const DashboardView = lazy(
+  () => import("@/modules/dashboard/DashboardView")
+);
 
-  return (
-    <ConfigProvider
-      theme={{
-        token: {
-          colorPrimary: "#0f766e",
-          colorInfo: "#0f766e",
-          borderRadius: 6,
-          fontFamily: "'DM Sans', 'Segoe UI', sans-serif",
-        },
-      }}
-    >
-      <AntApp>
-        <Layout className="app-shell">
-          <Sider className="app-sider" trigger={null} collapsible collapsed={collapsed} width={248}>
-            <div className="brand-lockup">
-              <div className="brand-mark">M</div>
-              {!collapsed && (
-                <div>
-                  <div className="brand-name">Mediflow OS</div>
-                  <div className="brand-caption">Hospital operations</div>
-                </div>
-              )}
-            </div>
-            <Menu
-              mode="inline"
-              selectedKeys={[activeModule]}
-              items={modules}
-              onClick={({ key }) => setActiveModule(key)}
-            />
-            <div className="sider-footer">
-              {!collapsed && <Text type="secondary">Facility workspace</Text>}
-              <Button type="text" icon={<SettingOutlined />} aria-label="Settings" />
-            </div>
-          </Sider>
-          <Layout>
-            <Header className="app-header">
-              <Space size="middle">
-                <Button
-                  type="text"
-                  icon={collapsed ? <MenuUnfoldOutlined /> : <MenuFoldOutlined />}
-                  onClick={() => setCollapsed(!collapsed)}
-                  aria-label={collapsed ? "Expand navigation" : "Collapse navigation"}
-                />
-                <div className="header-context">
-                  <Text type="secondary">Facility</Text>
-                  <Text strong>District Hospital / Main Campus</Text>
-                </div>
-              </Space>
-              <Space size="large">
-                <Badge dot color="#ef4444">
-                  <Button type="text" icon={<BellOutlined />} aria-label="Notifications" />
-                </Badge>
-                <Avatar className="user-avatar">AS</Avatar>
-              </Space>
-            </Header>
-            <Content className="app-content">
-              <div className="page-heading">
-                <div>
-                  <Text className="eyebrow">Wednesday, 1 October 2026</Text>
-                  <Title level={2}>Good morning, Ananya</Title>
-                  <Text type="secondary">Here is the operational picture for your facility.</Text>
-                </div>
-                <Space>
-                  <Tag color={health.isSuccess ? "success" : "warning"}>
-                    {health.isSuccess ? "API connected" : "API offline"}
-                  </Tag>
-                  <Button type="primary" icon={<SearchOutlined />}>Find patient</Button>
-                </Space>
-              </div>
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      retry: 2,
+      staleTime: 30_000,
+      refetchOnWindowFocus: false,
+    },
+  },
+});
 
-              <div className="search-strip">
-                <Input
-                  allowClear
-                  size="large"
-                  prefix={<SearchOutlined />}
-                  placeholder="Search UHID, patient name or ABHA address"
-                  value={search}
-                  onChange={(event) => setSearch(event.target.value)}
-                />
-                <Text type="secondary">Use the patient workspace to review encounters and registration status.</Text>
-              </div>
-
-              <Row gutter={[16, 16]}>
-                <Col xs={24} sm={12} xl={6}><Card><Statistic title="Patients today" value={128} suffix={<span className="stat-delta">+12%</span>} /></Card></Col>
-                <Col xs={24} sm={12} xl={6}><Card><Statistic title="OPD waiting" value={24} valueStyle={{ color: "#d97706" }} /></Card></Col>
-                <Col xs={24} sm={12} xl={6}><Card><Statistic title="Bed occupancy" value={76} suffix="%" /></Card></Col>
-                <Col xs={24} sm={12} xl={6}><Card><Statistic title="Open CAPAs" value={7} valueStyle={{ color: "#b45309" }} /></Card></Col>
-              </Row>
-
-              <Row gutter={[16, 16]} className="dashboard-grid">
-                <Col xs={24} xl={15}>
-                  <Card title="Today at a glance" extra={<Button type="link">View report</Button>}>
-                    <div className="queue-list">
-                      {[
-                        ["OPD registration", "128 patients registered", "Live"],
-                        ["Admissions", "9 new · 3 transfers", "Updated 2m ago"],
-                        ["Quality OS", "4 indicators need attention", "Review"],
-                      ].map(([title, detail, state]) => (
-                        <div className="queue-row" key={title}>
-                          <div><Text strong>{title}</Text><br /><Text type="secondary">{detail}</Text></div>
-                          <Tag color={state === "Live" ? "success" : state === "Review" ? "warning" : "default"}>{state}</Tag>
-                        </div>
-                      ))}
-                    </div>
-                  </Card>
-                </Col>
-                <Col xs={24} xl={9}>
-                  <Card title="Attention required" extra={<AlertOutlined className="attention-icon" />}>
-                    <div className="attention-item"><span className="priority-dot critical" /><div><Text strong>3 beds awaiting cleaning</Text><br /><Text type="secondary">Medical ward · review status</Text></div></div>
-                    <div className="attention-item"><span className="priority-dot warning" /><div><Text strong>Monthly data quality check</Text><br /><Text type="secondary">4 indicators have missing inputs</Text></div></div>
-                    <Button block className="attention-button">Open worklist</Button>
-                  </Card>
-                </Col>
-              </Row>
-            </Content>
-          </Layout>
-        </Layout>
-      </AntApp>
-    </ConfigProvider>
+function AuthGuard({ children }: { children: React.ReactNode }) {
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  // If no token yet, show login; after auth, redirect to dashboard.
+  return isAuthenticated ? (
+    <>{children}</>
+  ) : (
+    <Navigate to="/login" replace />
   );
 }
 
-export default App;
+function AuthLayout() {
+  const [drawerOpen, setDrawerOpen] = React.useState(false);
+  const [collapsed, setCollapsed] = React.useState(false);
+  const isCompact = true;
+  return (
+    <div className="min-h-svh bg-background text-foreground">
+      <AppHeader
+        isLive={false}
+        isCompact={isCompact}
+        collapsed={collapsed}
+        onOpenNav={isCompact ? () => setDrawerOpen(true) : undefined}
+        onToggleCollapsed={isCompact ? undefined : () => setCollapsed((p) => !p)}
+      />
+      {drawerOpen && (
+        <aside className="fixed inset-y-0 left-0 z-50 w-64 bg-card border-r shadow-xl p-4" aria-label="Navigation drawer">
+          <button onClick={() => setDrawerOpen(false)} className="mb-4 text-sm underline">Close</button>
+          <nav>Dashboard · Auth · Settings</nav>
+        </aside>
+      )}
+      <main className="mx-auto max-w-7xl px-4 md:px-6">
+        <Suspense
+          fallback={
+            <div className="flex min-h-[60vh] items-center justify-center text-muted-foreground">
+              <span>Loading dashboard…</span>
+            </div>
+          }
+        >
+          <DashboardView />
+        </Suspense>
+      </main>
+    </div>
+  );
+}
+
+export default function App() {
+  return (
+    <QueryClientProvider client={queryClient}>
+      <BrowserRouter>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route
+            path="/"
+            element={
+              <AuthGuard>
+                <AuthLayout />
+              </AuthGuard>
+            }
+          />
+        </Routes>
+      </BrowserRouter>
+    </QueryClientProvider>
+  );
+}

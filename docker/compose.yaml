@@ -17,6 +17,10 @@ x-backend: &backend
   env_file:
     - .env
   environment:
+    DJANGO_SETTINGS_MODULE: config.settings.dev
+    DJANGO_DEBUG: "true"
+    DJANGO_ALLOWED_HOSTS: localhost,127.0.0.1,0.0.0.0
+    CORS_ALLOWED_ORIGINS: http://localhost:5173,http://localhost:8000
     # The compose service name, matching the default in
     # config/settings/dev.py.
     PGHOST: db

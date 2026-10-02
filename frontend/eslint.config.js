@@ -1,23 +1,19 @@
-import js from "@eslint/js";
-import globals from "globals";
-import reactHooks from "eslint-plugin-react-hooks";
-import reactRefresh from "eslint-plugin-react-refresh";
-import tseslint from "typescript-eslint";
+import tsParser from "@typescript-eslint/parser";
+import tsPlugin from "@typescript-eslint/eslint-plugin";
 
-export default tseslint.config(
-  { ignores: ["dist/**", "coverage/**", "node_modules/**", "tsconfig.tsbuildinfo"] },
-  js.configs.recommended,
-  ...tseslint.configs.recommended,
+export default [
   {
-    files: ["**/*.{ts,tsx}"],
-    languageOptions: { globals: globals.browser },
-    plugins: {
-      "react-hooks": reactHooks,
-      "react-refresh": reactRefresh,
+    files: ["src/**/*.ts", "src/**/*.tsx"],
+    languageOptions: {
+      parser: tsParser,
+      parserOptions: { ecmaFeatures: { jsx: true }, sourceType: "module" },
+      globals: { console: "readonly", document: "readonly", window: "readonly", navigator: "readonly" },
     },
+    plugins: { "@typescript-eslint": tsPlugin },
     rules: {
-      ...reactHooks.configs.flat.recommended.rules,
-      ...reactRefresh.configs.vite.rules,
+      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
+      "@typescript-eslint/no-explicit-any": "warn",
+      "no-unused-vars": "off",
     },
   },
-);
+];

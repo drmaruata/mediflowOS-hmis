@@ -57,13 +57,10 @@ NOT_IMPORTED = {
 #: Declared for documented features that are not implemented yet. The import name
 #: is recorded so the staleness check can tell when one starts being used.
 UNIMPLEMENTED = {
-    "Pillow": "printable QR codes (architecture doc 8.4)",
+    "Pillow": "printable facility/counter QR codes (architecture doc 8.4)",
     "openpyxl": "Quality OS regulatory exports (9.9)",
     "reportlab": "Quality OS regulatory exports (9.9)",
     "httpx": "ABDM gateway, HL7 v2 bridge and payer adapters (12)",
-    "opentelemetry-sdk": "observability (16) - entirely unimplemented",
-    "opentelemetry-instrumentation-django": "observability (16) - entirely unimplemented",
-    "sentry-sdk": "observability (16) - entirely unimplemented",
 }
 
 

@@ -14,7 +14,7 @@ The application is built around the following principles:
 - Realtime features using Django Channels and Redis
 - Background jobs and scheduling through Celery and Redis
 - PostgreSQL as the primary data store
-- React frontend with Ant Design and Vite for a modern admin interface
+- React frontend with Shadcn UI (Tailwind CSS) and Vite for a modern admin interface
 
 ## Tech stack
 
@@ -33,9 +33,12 @@ The application is built around the following principles:
 ### Frontend
 - React 18
 - TypeScript
-- Vite
-- Ant Design
-- React Query
+- Vite 6
+- **Shadcn UI** on Tailwind CSS v4 (components vendored into `src/components/ui/`)
+- Radix UI primitives (unstyled accessible bases)
+- `lucide-react` (icons)
+- React Router 7
+- TanStack Query 5
 - Zustand
 - Zod + React Hook Form
 
@@ -53,20 +56,61 @@ Versions below were checked against npm and PyPI on 2026-10-01. Prefer the newes
 
 | Dependency | Installed | Latest | Recommendation |
 | --- | --- | --- | --- |
-| `react`, `react-dom` | 18.3.1 | 19.3.0 | Keep React 18 until React 19 is tested with Ant Design and the full UI. |
+| `react`, `react-dom` | 18.3.1 | 19.3.0 | Keep React 18 until React 19 is tested with shadcn/ui and the full UI. |
 | `@types/react`, `@types/react-dom` | 18.3.31, 18.3.7 | 19.3.0 | Keep aligned with React 18; upgrade with React, not independently. |
-| `antd` | 5.29.3 | 6.6.5 | Stay on v5 for now; v6 is a coordinated major migration. |
-| `@ant-design/icons` | 5.6.1 | 6.3.4 | Keep on v5 with Ant Design v5; upgrade alongside Ant Design. |
-| `@ant-design/charts` | 2.6.7 | 2.6.7 | Current latest; currently unused, so remove if charts are not planned. |
+| `tailwindcss`, `@tailwindcss/vite` | 4.1.11 | 4.1.11 | Current latest; used via the Vite plugin, no `tailwind.config.js`. |
+| `lucide-react` | 0.525.0 | 0.525.0 | Replaces `@ant-design/icons`. Keep aligned with shadcn's `iconLibrary` in `components.json`. |
+| `@radix-ui/react-*` | see `package.json` | — | Unstyled primitives shadcn composes. Upgrade the whole set together. |
+| `class-variance-authority` | 0.7.1 | 0.7.1 | Variant system for vendored shadcn components. |
+| `tailwind-merge`, `clsx` | 3.3.1, 2.1.1 | — | Back `cn()` in `src/lib/utils.ts`. |
+| `sonner` | 2.0.6 | 2.0.6 | Toast notifications (declared; a Radix toast component is vendored instead — see below). |
 | `@tanstack/react-query` | 5.104.0 | 5.104.0 | Current latest and used by the app. |
-| `zustand` | 4.5.7 | 5.0.15 | Defer v5 until state-store usage is added and tested; currently unused. |
-| `react-hook-form` | 7.89.0 | 7.89.0 | Current latest; currently unused, so remove if no forms are planned. |
-| `zod` | 3.25.76 | 4.6.5 | Defer the v4 schema migration; currently unused. |
+| `react-router-dom` | 7.18.4 | 7.18.4 | Current latest in v7 and used by the app for routing; keep in step with `react-router`, which it pins exactly. |
+| `zustand` | 4.5.7 | 5.0.15 | Used by `src/stores/authStore.ts`. Defer v5 until the store's usage is re-tested against it. |
+| `react-hook-form`, `@hookform/resolvers` | 7.89.0, 3.10.0 | — | **Now wired** by the login form (`src/modules/auth/LoginPage.tsx`). |
+| `zod` | 3.25.76 | 4.6.5 | **Now wired** for login-form validation. Defer the v4 schema migration. |
 | `vite` | 6.4.3 | 8.3.2 | Current patched v6 is clean; plan an upgrade to v8 and verify plugins and aliases. |
 | `@vitejs/plugin-react` | 4.7.0 | 6.1.1 | Keep compatible with Vite 6 now; upgrade with Vite when moving to v8. |
 | `typescript` | 5.9.3 | 7.0.2 | Keep v5 for now; current typescript-eslint does not support TypeScript 7 yet. |
+| `vitest`, `@vitest/coverage-v8` | 3.2.4 | — | Test runner and coverage provider. |
+| `eslint` + typescript/react plugins | 9.29.0 | — | Lint gate for `npm run check`. |
 
-React Router was removed because the app does not currently use it. `@ant-design/charts`, `zustand`, `react-hook-form`, and `zod` are also not imported by the current frontend source; retain them only if their features are planned.
+`react-router-dom` (7.18.4) is installed and used: `BrowserRouter` in
+`frontend/src/App.tsx`, the route table and auth guard in the same file, and
+`MemoryRouter` in the tests. `react-hook-form` and `zod` are now genuinely
+imported by the login form, so they are no longer "declared but unused".
+
+### UI system migration: Ant Design 5 → Shadcn UI (2 Oct 2026)
+
+The frontend `frontend/` folder was deleted and re-scaffolded. Ant Design,
+`@ant-design/icons`, and `@ant-design/charts` were **removed** and replaced
+with Shadcn UI on Tailwind CSS v4. Rationale and the full decision table are
+in `docs/SaaS HMIS Architecture v0.6.md` §14.1.
+
+| Removed | Added | Why |
+| --- | --- | --- |
+| `antd` | `tailwindcss` + `@tailwindcss/vite` | Components are vendored source, not a compiled dependency; Tailwind owns the token system. |
+| `@ant-design/icons` | `lucide-react` | Matches shadcn's default `iconLibrary`. |
+| `@ant-design/charts` | *(nothing)* | Dashboard donut/bar charts are hand-rolled inline SVG, so no chart dependency is needed at all. |
+| — | `@radix-ui/react-*` | Unstyled accessible primitives shadcn builds on. |
+| — | `class-variance-authority`, `tailwind-merge`, `clsx` | Variant system and `cn()` class merging for the vendored components. |
+| — | `components.json`, `src/components/ui/` | shadcn registry config plus the vendored component source. |
+
+**Breaking change for contributors.** shadcn components are *source files you
+own*, not a package you import. Upstream changes arrive only via
+`npx shadcn@latest add <component> --diff`; never overwrite local edits without
+reviewing the diff.
+
+`sonner` is declared but the vendored Radix `Toast` component is used instead;
+treat `sonner` as unused until a toast call site is written.
+
+**Added shadcn components** (vendored in `frontend/src/components/ui/`):
+`button`, `card`, `input`, `label`, `badge`, `avatar`, `dialog`, `tabs`,
+`tooltip`, `dropdown-menu`, `toast`, `scroll-area`, `progress`, `separator`.
+
+**Removed dependencies:** `antd`, `@ant-design/icons`, `@ant-design/charts`,
+`tailwindcss-animate` was also dropped in favour of Tailwind v4's built-in
+animation utilities.
 
 ### Backend dependencies
 
@@ -146,7 +190,9 @@ stale without a test failing.
 - `python-dotenv` was never loaded; settings read `os.getenv` directly.
 - `pydantic` had no consumer; Django and DRF do not use it.
 
-`react-router` had already been removed from the frontend before this work.
+No frontend dependency was removed in that pass. An earlier note here stated that
+`react-router` had been removed from the frontend; that was inaccurate — the
+current source uses `react-router-dom` 7.18.4 (see the frontend table above).
 
 ## Repository structure
 
@@ -166,6 +212,10 @@ mediflowOS-hmis/
 │   └── scripts/                   # migration and traceability generators
 ├── frontend/
 │   ├── src/
+│   │   ├── modules/              # one folder per backend module (auth, dashboard, ...)
+│   │   ├── lib/                  # fetch wrappers, e.g. health.ts
+│   │   ├── stores/               # zustand client UI state
+│   │   └── styles/               # index.css; ConfigProvider owns the antd tokens
 │   ├── public/
 │   ├── package.json
 │   ├── vite.config.ts
@@ -398,8 +448,8 @@ npm run check
 # Run individual checks
 npm run lint
 npm run typecheck
-npm run test:unit
-npm run test:integration
+npm run test:unit   # vitest run "src/**/*.unit.test.ts" (glob by file naming convention)
+npm run test:integration  # vitest run "src/**/*.integration.test.tsx"
 npm run test:coverage
 
 # Build the project
