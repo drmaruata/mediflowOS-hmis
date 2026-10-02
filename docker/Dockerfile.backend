@@ -18,7 +18,10 @@ RUN apt-get update \
     && apt-get install --no-install-recommends -y build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements.txt requirements-dev.txt ./
+# Build context is the repository root, so every COPY below is prefixed with
+# backend/. Keeping the context at the root means one .dockerignore covers the
+# whole repository instead of needing a second one beside backend/.
+COPY backend/requirements.txt backend/requirements-dev.txt ./
 RUN python -m venv /opt/venv \
     && /opt/venv/bin/pip install --upgrade pip \
     && /opt/venv/bin/pip install -r requirements.txt
@@ -45,14 +48,18 @@ RUN groupadd --system mediflow \
     && useradd --system --gid mediflow --home /app --shell /usr/sbin/nologin mediflow
 
 WORKDIR /app
-COPY --chown=mediflow:mediflow . .
+# Only the backend tree is copied: the frontend, docs and Terraform are not
+# needed to serve the API and would just bloat the image.
+COPY --chown=mediflow:mediflow backend/ /app/
 
 USER mediflow
 
 EXPOSE 8000
 
-# Hits the anonymous liveness probe, which is the one endpoint that answers
-# without a tenant or a token.
+# Hits the liveness probe, which is anonymous and does not touch PostgreSQL.
+# That is deliberate: a healthcheck that depended on the database would restart
+# this container every time the database blipped, turning a dependency outage
+# into a restart loop. Readiness is a separate endpoint for the load balancer.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
     CMD curl -fsS http://127.0.0.1:8000/api/v1/health/ || exit 1
 

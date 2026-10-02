@@ -1,0 +1,39 @@
+# Build context is the repository root (see docker/compose.yaml and
+# .github/workflows/ci.yml), so these paths are relative to that.
+
+# Never let a local virtualenv, build output or secret into the image. The
+# venv in particular is ~1GB of Windows binaries that would break the Linux
+# image even if it did fit.
+backend/venv/
+**/__pycache__/
+**/*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/staticfiles/
+**/.coverage
+**/htmlcov/
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+**/*.tsbuildinfo
+
+# Secrets and local environment
+**/.env
+**/.env.*
+!**/.env.example
+docker/.env
+
+.git/
+.github/
+docs/
+tests/
+terraform/
+frontend/
+*.md
+**/*.md
+
+# Not needed to build or serve the API
+**/*.md
+**/.gitignore
+**/.gitattributes

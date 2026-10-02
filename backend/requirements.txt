@@ -15,13 +15,19 @@ channels-redis>=4.3,<4.4
 # Daphne is the reference server for Channels 4 and is maintained by the Django
 # Software Foundation.
 daphne>=4.2,<5
-python-jose>=3.5,<4
-python-dotenv>=1.2,<2
+# --- Declared for features that are specified but not yet implemented --------
+# Kept pinned rather than removed, because each backs a documented requirement
+# and would otherwise have to be re-resolved from scratch. tests/unit/test_dependency_wiring.py
+# asserts each is imported somewhere, so the list cannot quietly grow.
+#
+# Pillow, openpyxl, reportlab: printable QR codes (architecture doc 8.4) and
+#   Quality OS regulatory exports (9.9).
+# httpx: ABDM gateway, HL7 v2 bridge and payer adapters (12).
+# opentelemetry-*, sentry-sdk: observability (16) - not implemented at all yet.
 Pillow>=12.3,<13
 openpyxl>=3.1,<3.2
 reportlab>=5.0,<6
 httpx>=0.28,<0.29
-pydantic>=2.13,<3
 opentelemetry-sdk>=1.45,<1.46
 opentelemetry-instrumentation-django==0.66b0
 sentry-sdk>=2.71,<3
