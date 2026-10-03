@@ -1,65 +1,120 @@
 @import "tailwindcss";
 
+/*
+ * Dark mode is class-driven (design.md §16; Architecture §14.1).
+ * Without this, Tailwind v4's `dark:` utilities key off
+ * `prefers-color-scheme` while our token overrides key off `.dark`, so a
+ * user with OS dark mode gets dark surfaces painted over light-theme text.
+ */
+@custom-variant dark (&:is(.dark *));
+
+/*
+ * Register the semantic tokens as theme colours. Tailwind v4 only emits
+ * `bg-background`, `text-foreground`, `border-border`, ... for variables
+ * declared here; un-registered CSS variables produce utilities that
+ * silently do nothing, leaving components unstyled.
+ */
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+
+  --radius-sm: calc(var(--radius) * 0.6);
+  --radius-md: calc(var(--radius) * 0.8);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) * 1.4);
+  --radius-2xl: calc(var(--radius) * 1.8);
+}
+
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 84% 4.9%;
+    --radius: 0.5rem;
+
+    /* design.md §2.2 — brand teal #0f766e is the fixed Architecture primary */
+    --background: 210 40% 98%;
+    --foreground: 222 47% 11%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 84% 4.9%;
+    --card-foreground: 222 47% 11%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 84% 4.9%;
+    --popover-foreground: 222 47% 11%;
     --primary: 174 83% 25%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
+    --secondary: 210 40% 96%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 40% 96%;
+    --muted-foreground: 215 16% 35%;
+    --accent: 210 40% 96%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 74% 42%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 20% 86%;
+    --input: 214 20% 86%;
     --ring: 174 83% 25%;
-    --radius: 0.5rem;
-    --sidebar-background: 174 83% 12%;
-    --sidebar-foreground: 174 30% 90%;
-    --sidebar-primary: 174 83% 45%;
+
+    --sidebar: 210 40% 98%;
+    --sidebar-foreground: 222 47% 11%;
+    --sidebar-primary: 174 83% 25%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 174 60% 20%;
-    --sidebar-accent-foreground: 174 30% 90%;
-    --sidebar-border: 174 60% 18%;
-    --sidebar-ring: 174 83% 45%;
+    --sidebar-accent: 210 40% 94%;
+    --sidebar-accent-foreground: 222 47% 11%;
+    --sidebar-border: 214 20% 86%;
+    --sidebar-ring: 174 83% 25%;
   }
 
   .dark {
-    --background: 222.2 84% 4.9%;
+    --background: 222 22% 10%;
     --foreground: 210 40% 98%;
-    --card: 222.2 84% 4.9%;
+    --card: 222 22% 13%;
     --card-foreground: 210 40% 98%;
-    --popover: 222.2 84% 4.9%;
+    --popover: 222 22% 13%;
     --popover-foreground: 210 40% 98%;
-    --primary: 174 83% 45%;
+    --primary: 174 65% 42%;
     --primary-foreground: 0 0% 100%;
-    --secondary: 217.2 32.6% 17.5%;
+    --secondary: 217 32% 18%;
     --secondary-foreground: 210 40% 98%;
-    --muted: 217.2 32.6% 17.5%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --accent: 217.2 32.6% 17.5%;
+    --muted: 217 32% 18%;
+    --muted-foreground: 215 20% 72%;
+    --accent: 217 32% 18%;
     --accent-foreground: 210 40% 98%;
-    --destructive: 0 62.8% 30.6%;
-    --destructive-foreground: 210 40% 98%;
-    --border: 217.2 32.6% 17.5%;
-    --input: 217.2 32.6% 17.5%;
-    --ring: 174 83% 45%;
-    --sidebar-background: 174 83% 8%;
-    --sidebar-foreground: 174 30% 90%;
-    --sidebar-primary: 174 83% 45%;
+    --destructive: 0 62% 45%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 217 20% 28%;
+    --input: 217 20% 28%;
+    --ring: 174 65% 42%;
+
+    --sidebar: 213 43% 13%;
+    --sidebar-foreground: 210 40% 96%;
+    --sidebar-primary: 174 65% 42%;
     --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 174 60% 15%;
-    --sidebar-accent-foreground: 174 30% 90%;
-    --sidebar-border: 174 60% 14%;
-    --sidebar-ring: 174 83% 45%;
+    --sidebar-accent: 213 38% 18%;
+    --sidebar-accent-foreground: 210 40% 96%;
+    --sidebar-border: 213 30% 20%;
+    --sidebar-ring: 174 65% 42%;
   }
 }
 
@@ -67,9 +122,29 @@
   * {
     border-color: hsl(var(--border));
   }
+
+  html {
+    font-family: Inter, "Noto Sans Devanagari", ui-sans-serif, system-ui,
+      -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+
   body {
     background-color: hsl(var(--background));
     color: hsl(var(--foreground));
     font-feature-settings: "rlig" 1, "calt" 1;
+    font-synthesis-weight: none;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Respect the accessibility baseline (design.md §23/§24). */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 }

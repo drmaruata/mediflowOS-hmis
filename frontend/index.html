@@ -5,6 +5,24 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5" />
     <meta name="description" content="Mediflow OS — multi-tenant HMIS for hospitals and clinics." />
     <title>Mediflow OS</title>
+    <script>
+      // Apply the theme class before first paint. globals.css overrides tokens
+      // under `.dark` and `dark:` utilities are class-driven, so something must
+      // set the class — otherwise OS dark mode paints dark surfaces over
+      // light-theme text. Runs inline to avoid a flash of the wrong theme.
+      (function () {
+        try {
+          var stored = localStorage.getItem("theme");
+          var dark =
+            stored === "dark" ||
+            (stored !== "light" &&
+              window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+        } catch (e) {
+          /* localStorage blocked (private mode) — fall back to light theme. */
+        }
+      })();
+    </script>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link

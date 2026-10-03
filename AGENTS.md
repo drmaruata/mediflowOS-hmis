@@ -69,8 +69,8 @@ Load a skill before implementing. Check both locations.
 1. **Project workspace skills** — `.opencode/skills/` in this repo. None exist
    yet. If you add one, it takes precedence over a global skill of the same
    purpose.
-2. **Global skills** — `C:\Users\USER\.config\opencode\skills`. Load by ID via
-   the `skill` tool.
+2. **Global skills** — `C:\Users\USER\.config\opencode\skills` and 'C:\Users\USER\.agents\skills'.
+  Load by ID via the `skill` tool.
 
 **Mandatory skill mapping for this stack:**
 

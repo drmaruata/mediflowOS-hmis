@@ -16,7 +16,7 @@ describe("LoginPage", () => {
       </MemoryRouter>,
     );
     expect(screen.getByText("Mediflow OS")).toBeInTheDocument();
-    expect(screen.getByLabelText(/username/i)).toBeInTheDocument();
-    expect(screen.getByLabelText(/password/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/email.*user id/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/^password$/i)).toBeInTheDocument();
   });
 });

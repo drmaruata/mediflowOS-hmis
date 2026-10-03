@@ -25,6 +25,6 @@ describe("DashboardView", () => {
 
   it("shows the demo-data pill by default (prop-driven)", () => {
     wrapper();
-    expect(screen.getByText(/demo data/i)).toBeInTheDocument();
+    expect(screen.getAllByText(/demo data/i).length).toBeGreaterThanOrEqual(1);
   });
 });

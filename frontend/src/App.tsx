@@ -9,7 +9,7 @@
  */
 
 import React, { Suspense, lazy } from "react";
-import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
+import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { useAuthStore } from "@/stores/authStore";
@@ -41,29 +41,35 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 }
 
 function AuthLayout() {
-  const [drawerOpen, setDrawerOpen] = React.useState(false);
-  const [collapsed, setCollapsed] = React.useState(false);
-  const isCompact = true;
+  const location = useLocation();
+  const isDashboard = location.pathname === "/";
+  const isCompact = false;
   return (
-    <div className="min-h-svh bg-background text-foreground">
+    <div className="min-h-svh bg-muted text-foreground">
       <AppHeader
         isLive={false}
         isCompact={isCompact}
-        collapsed={collapsed}
-        onOpenNav={isCompact ? () => setDrawerOpen(true) : undefined}
-        onToggleCollapsed={isCompact ? undefined : () => setCollapsed((p) => !p)}
+        collapsed={false}
+        onOpenNav={undefined}
+        onToggleCollapsed={undefined}
       />
-      {drawerOpen && (
-        <aside className="fixed inset-y-0 left-0 z-50 w-64 bg-card border-r shadow-xl p-4" aria-label="Navigation drawer">
-          <button onClick={() => setDrawerOpen(false)} className="mb-4 text-sm underline">Close</button>
-          <nav>Dashboard · Auth · Settings</nav>
+      {!isDashboard && (
+        <aside
+          className="fixed inset-y-0 left-0 z-50 w-72 border-r bg-sidebar p-4 text-sidebar-foreground"
+          aria-label="Navigation"
+        >
+          <nav className="flex flex-col gap-3 text-sm">
+            <div>Dashboard</div>
+            <div>Auth</div>
+            <div>Settings</div>
+          </nav>
         </aside>
       )}
-      <main className="mx-auto max-w-7xl px-4 md:px-6">
+      <main className={`mx-auto px-4 md:px-8 py-6 ${isDashboard ? "max-w-[1440px]" : "max-w-7xl ml-72"}`}>
         <Suspense
           fallback={
             <div className="flex min-h-[60vh] items-center justify-center text-muted-foreground">
-              <span>Loading dashboard…</span>
+              <span>Loading dashboard�</span>
             </div>
           }
         >

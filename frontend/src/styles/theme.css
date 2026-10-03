@@ -1,8 +1,18 @@
 /* Theme tokens and chart variables — no raw hex in JSX. */
 :root {
+  --shell-sidebar: #132134;
+  --shell-topbar: #153047;
+  --shell-active: #0B75E5;
+  --canvas-dashboard: #F5F9FD;
+  --surface: #FFFFFF;
+  --surface-subtle: #F8FBFD;
+  --text-primary: #0F172A;
+  --text-secondary: #475569;
+  --brand-primary: #0F766E;
+
   --chart-fill-1: hsl(174 83% 30%);
   --chart-fill-2: hsl(174 60% 50%);
-  --chart-fill-3: hsl(200 70% 55%);
+  --chart-fill-3: hsl(210 70% 55%);
   --chart-fill-4: hsl(40 90% 55%);
   --chart-fill-5: hsl(var(--muted-foreground));
   --tone-positive: hsl(174 83% 30%);
