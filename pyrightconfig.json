@@ -1,0 +1,11 @@
+{
+  "typeCheckingMode": "basic",
+  "reportUnknownVariableType": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownParameterType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportMissingParameterType": "none",
+  "reportMissingTypeStubs": "none",
+  "reportIncompatibleVariableOverride": "none",
+  "reportIncompatibleMethodOverride": "none"
+}

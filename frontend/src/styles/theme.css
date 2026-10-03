@@ -1,0 +1,22 @@
+/* Theme tokens and chart variables — no raw hex in JSX. */
+:root {
+  --chart-fill-1: hsl(174 83% 30%);
+  --chart-fill-2: hsl(174 60% 50%);
+  --chart-fill-3: hsl(200 70% 55%);
+  --chart-fill-4: hsl(40 90% 55%);
+  --chart-fill-5: hsl(var(--muted-foreground));
+  --tone-positive: hsl(174 83% 30%);
+  --tone-negative: hsl(0 84% 60%);
+  --tone-neutral: hsl(215 20% 65%);
+  --panel-card: hsl(var(--card));
+  --donut-stroke: 16;
+}
+
+.panel-card { border-radius: 0.75rem; border-width: 1px; border-color: hsl(var(--border)); background-color: hsl(var(--card)); box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1); }
+.app-header__inner { @apply flex h-14 items-center gap-3 px-4; }
+.donut { @apply shrink-0; }
+.bars { @apply flex gap-1 items-end; }
+.app-drawer { @apply fixed inset-y-0 left-0 z-[60] w-72 bg-background border-r; }
+.stat-delta--negative { color: var(--tone-negative); }
+.stat-delta--neutral { color: var(--tone-neutral); }
+@media (max-width: 760px) { .app-drawer { @apply shadow-2xl; } }
