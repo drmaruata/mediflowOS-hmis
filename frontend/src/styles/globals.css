@@ -1,4 +1,11 @@
 @import "tailwindcss";
+/*
+ * Single style entry point: `main.tsx` imports only this file, so theme.css
+ * must be pulled in from here. Previously it was imported by index.css,
+ * which nothing imported — leaving every --shell-* and --chart-* token
+ * (and the .panel-card / .app-drawer helpers) undefined at runtime.
+ */
+@import "./theme.css";
 
 /*
  * Dark mode is class-driven (design.md §16; Architecture §14.1).
@@ -13,36 +20,70 @@
  * `bg-background`, `text-foreground`, `border-border`, ... for variables
  * declared here; un-registered CSS variables produce utilities that
  * silently do nothing, leaving components unstyled.
+ *
+ * The `hsl()` wrapper is load-bearing. design.md §2.2 defines the tokens as
+ * bare HSL *triplets* (`--primary: 174 83% 25%`) so they can be composed
+ * into alpha variants. `@theme inline` substitutes the reference at the use
+ * site, so without the wrapper `bg-primary` would emit the invalid
+ * declaration `background-color: 174 83% 25%` and render transparent.
  */
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --color-card: var(--card);
-  --color-card-foreground: var(--card-foreground);
-  --color-popover: var(--popover);
-  --color-popover-foreground: var(--popover-foreground);
-  --color-primary: var(--primary);
-  --color-primary-foreground: var(--primary-foreground);
-  --color-secondary: var(--secondary);
-  --color-secondary-foreground: var(--secondary-foreground);
-  --color-muted: var(--muted);
-  --color-muted-foreground: var(--muted-foreground);
-  --color-accent: var(--accent);
-  --color-accent-foreground: var(--accent-foreground);
-  --color-destructive: var(--destructive);
-  --color-destructive-foreground: var(--destructive-foreground);
-  --color-border: var(--border);
-  --color-input: var(--input);
-  --color-ring: var(--ring);
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
 
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar: hsl(var(--sidebar));
+  --color-sidebar-foreground: hsl(var(--sidebar-foreground));
+  --color-sidebar-primary: hsl(var(--sidebar-primary));
+  --color-sidebar-primary-foreground: hsl(var(--sidebar-primary-foreground));
+  --color-sidebar-accent: hsl(var(--sidebar-accent));
+  --color-sidebar-accent-foreground: hsl(var(--sidebar-accent-foreground));
+  --color-sidebar-border: hsl(var(--sidebar-border));
+  --color-sidebar-ring: hsl(var(--sidebar-ring));
+
+  /*
+   * Shell palette from design.md §2.3A. Blue is an operational/navigation
+   * accent, not a replacement for the teal brand primary.
+   */
+  --color-shell-sidebar: var(--shell-sidebar);
+  --color-shell-sidebar-foreground: var(--shell-sidebar-foreground);
+  --color-shell-sidebar-subtle: var(--shell-sidebar-subtle);
+  --color-shell-sidebar-hover: var(--shell-sidebar-hover);
+  --color-shell-sidebar-border: var(--shell-sidebar-border);
+  --color-shell-topbar: var(--shell-topbar);
+  --color-shell-active: var(--shell-active);
+  --color-canvas-dashboard: hsl(var(--canvas-dashboard));
+  --color-surface: hsl(var(--surface));
+  --color-surface-subtle: hsl(var(--surface-subtle));
+  --color-text-primary: hsl(var(--text-primary));
+  --color-text-secondary: hsl(var(--text-secondary));
+
+  /* Trend tones — always paired with an arrow/word, never colour alone. */
+  --color-tone-positive: hsl(var(--tone-positive));
+  --color-tone-negative: hsl(var(--tone-negative));
+  --color-tone-neutral: hsl(var(--tone-neutral));
+
+  --color-chart-fill-1: hsl(var(--chart-fill-1));
+  --color-chart-fill-2: hsl(var(--chart-fill-2));
+  --color-chart-fill-3: hsl(var(--chart-fill-3));
+  --color-chart-fill-4: hsl(var(--chart-fill-4));
+  --color-chart-fill-5: var(--chart-fill-5);
 
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);

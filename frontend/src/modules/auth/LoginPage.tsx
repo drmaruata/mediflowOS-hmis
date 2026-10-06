@@ -63,7 +63,7 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="flex min-h-svh flex-col items-center justify-center bg-muted p-4">
+    <div className="flex min-h-svh flex-col items-center justify-center bg-background p-4">
       {/* Brand mark — above the card, max 220px as per design §2.4 */}
       <div className="mb-6 flex flex-col items-center gap-2 text-center">
         <div className="flex size-10 items-center justify-center rounded-xl bg-primary shadow-sm">

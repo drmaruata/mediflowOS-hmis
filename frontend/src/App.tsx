@@ -1,24 +1,32 @@
 /**
- * App.tsx — root shell for the Vite React SPA (React Router 7).
+ * App.tsx — root shell and route table for the Vite React SPA (React Router 7).
  *
- * Only this file and `src/styles/index.css` may change outside of
- * `src/modules/dashboard/` per the file-boundary rule (◪ [2026-10-02]).
+ * The authenticated shell follows design.md §5: a 64px global top bar, a
+ * 240px persistent navigation rail (72px when collapsed) and the page
+ * canvas. Navigation content lives in `@/lib/navigation`; this file is the
+ * route table and layout only (AGENTS.md §5).
  *
  * Note: the previous Ant Design `ConfigProvider` is removed; shadcn/ui
- * components use Tailwind CSS variables defined in `src/styles/globals.css`.
+ * components use the Tailwind CSS variables in `src/styles/globals.css`.
  */
 
-import React, { Suspense, lazy } from "react";
-import { BrowserRouter, Routes, Route, Navigate, useLocation } from "react-router-dom";
+import { Suspense, lazy, useEffect, useState } from "react";
+import {
+  BrowserRouter,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router-dom";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { useAuthStore } from "@/stores/authStore";
+import { useThemeStore } from "@/stores/themeStore";
 import { AppHeader } from "@/components/AppHeader";
+import { AppSidebar, AppSidebarDrawer } from "@/components/AppSidebar";
 import LoginPage from "@/modules/auth/LoginPage";
 
-const DashboardView = lazy(
-  () => import("@/modules/dashboard/DashboardView")
-);
+const DashboardView = lazy(() => import("@/modules/dashboard/DashboardView"));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -32,50 +40,67 @@ const queryClient = new QueryClient({
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  // If no token yet, show login; after auth, redirect to dashboard.
-  return isAuthenticated ? (
-    <>{children}</>
-  ) : (
-    <Navigate to="/login" replace />
-  );
+  // No token yet ⇒ sign-in; authenticated ⇒ requested route.
+  return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
+}
+
+/**
+ * Keep `theme=system` honest when the OS flips while the app is open.
+ * StrictMode mounts effects twice, so subscribe/unsubscribe must be
+ * symmetric and the handler must be idempotent (AGENTS.md §5).
+ */
+function useSystemThemeSync() {
+  const sync = useThemeStore((s) => s.sync);
+
+  useEffect(() => {
+    if (typeof window === "undefined" || typeof window.matchMedia !== "function") {
+      return;
+    }
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const onChange = () => sync();
+    query.addEventListener("change", onChange);
+    // Reconcile once on mount in case the bootstrap ran before storage was
+    // readable (e.g. storage blocked until interaction).
+    onChange();
+    return () => query.removeEventListener("change", onChange);
+  }, [sync]);
 }
 
 function AuthLayout() {
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [collapsed, setCollapsed] = useState(false);
+  useSystemThemeSync();
+
+  // Close the mobile drawer on navigation so it cannot cover the new page.
   const location = useLocation();
-  const isDashboard = location.pathname === "/";
-  const isCompact = false;
+  useEffect(() => {
+    setDrawerOpen(false);
+  }, [location.pathname]);
+
   return (
-    <div className="min-h-svh bg-muted text-foreground">
+    <div className="min-h-svh bg-canvas-dashboard text-foreground">
       <AppHeader
         isLive={false}
-        isCompact={isCompact}
-        collapsed={false}
-        onOpenNav={undefined}
-        onToggleCollapsed={undefined}
+        isCompact={false}
+        collapsed={collapsed}
+        onOpenNav={() => setDrawerOpen(true)}
+        onToggleCollapsed={() => setCollapsed((prev) => !prev)}
       />
-      {!isDashboard && (
-        <aside
-          className="fixed inset-y-0 left-0 z-50 w-72 border-r bg-sidebar p-4 text-sidebar-foreground"
-          aria-label="Navigation"
-        >
-          <nav className="flex flex-col gap-3 text-sm">
-            <div>Dashboard</div>
-            <div>Auth</div>
-            <div>Settings</div>
-          </nav>
-        </aside>
-      )}
-      <main className={`mx-auto px-4 md:px-8 py-6 ${isDashboard ? "max-w-[1440px]" : "max-w-7xl ml-72"}`}>
-        <Suspense
-          fallback={
-            <div className="flex min-h-[60vh] items-center justify-center text-muted-foreground">
-              <span>Loading dashboard�</span>
-            </div>
-          }
-        >
-          <DashboardView />
-        </Suspense>
-      </main>
+      <div className="flex">
+        <AppSidebar collapsed={collapsed} />
+        <AppSidebarDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+        <main className="min-w-0 flex-1 px-4 py-6 md:px-8">
+          <Suspense
+            fallback={
+              <div className="flex min-h-[60vh] items-center justify-center text-muted-foreground">
+                <span>Loading dashboard…</span>
+              </div>
+            }
+          >
+            <DashboardView />
+          </Suspense>
+        </main>
+      </div>
     </div>
   );
 }
@@ -94,6 +119,9 @@ export default function App() {
               </AuthGuard>
             }
           />
+          {/* Unknown routes land on the nearest safe parent with a stable
+              shell rather than a blank page (UI_UX_design §4.3). */}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </BrowserRouter>
     </QueryClientProvider>

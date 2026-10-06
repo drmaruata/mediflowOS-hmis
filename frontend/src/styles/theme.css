@@ -1,32 +1,88 @@
-/* Theme tokens and chart variables — no raw hex in JSX. */
+/*
+ * theme.css — shell chrome, dashboard surfaces and chart palette.
+ *
+ * Two distinct kinds of token live here, and mixing them up is what broke the
+ * dark theme: a token whose surface is fixed must be theme-independent, and a
+ * token used on a theme-scoped surface must follow the theme.
+ *
+ *   1. Theme-INDEPENDENT — the application shell chrome. design.md §2.3A
+ *      fixes the rail and top bar as dark navy in BOTH themes, so their
+ *      foregrounds must not be derived from `--sidebar-foreground`/`--card`
+ *      or light mode paints dark text on a dark rail.
+ *   2. Theme-SCOPED — dashboard canvas, surfaces, text and chart series.
+ *      These were single fixed light hexes in one `:root` block with no
+ *      `.dark` counterpart, so dark mode left a white canvas behind dark
+ *      cards.
+ *
+ * Values are bare HSL triplets so they compose with alpha variants; the
+ * `hsl()` wrapper lives in the `@theme inline` block in globals.css.
+ */
+
+/* ── 1. Shell chrome — fixed in both themes (design.md §2.3A) ─────────── */
 :root {
   --shell-sidebar: #132134;
   --shell-topbar: #153047;
-  --shell-active: #0B75E5;
-  --canvas-dashboard: #F5F9FD;
-  --surface: #FFFFFF;
-  --surface-subtle: #F8FBFD;
-  --text-primary: #0F172A;
-  --text-secondary: #475569;
-  --brand-primary: #0F766E;
+  /*
+   * design.md §2.3A specifies #0B75E5, but white on it measures 4.48:1 —
+   * below the 4.5:1 normal-text floor, and UI_UX_design §5.2 requires CI to
+   * fail any normal-text pair under 4.5:1. Darkened by two points to
+   * #0B6BD4 (white = 5.21:1); visually the same operational blue.
+   * Asserted in styles.unit.test.ts so it cannot silently regress.
+   */
+  --shell-active: #0B6BD4;
 
-  --chart-fill-1: hsl(174 83% 30%);
-  --chart-fill-2: hsl(174 60% 50%);
-  --chart-fill-3: hsl(210 70% 55%);
-  --chart-fill-4: hsl(40 90% 55%);
-  --chart-fill-5: hsl(var(--muted-foreground));
-  --tone-positive: hsl(174 83% 30%);
-  --tone-negative: hsl(0 84% 60%);
-  --tone-neutral: hsl(215 20% 65%);
-  --panel-card: hsl(var(--card));
+  /*
+   * Rail foregrounds, deliberately not theme-scoped.
+   * Contrast on #132134: #E2E8F0 = 13.2:1, #94A8C0 = 6.7:1.
+   */
+  --shell-sidebar-foreground: #E2E8F0;
+  --shell-sidebar-subtle: #94A8C0;
+  --shell-sidebar-hover: #1D3350;
+  --shell-sidebar-border: #24384F;
+
   --donut-stroke: 16;
 }
 
-.panel-card { border-radius: 0.75rem; border-width: 1px; border-color: hsl(var(--border)); background-color: hsl(var(--card)); box-shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1); }
-.app-header__inner { @apply flex h-14 items-center gap-3 px-4; }
-.donut { @apply shrink-0; }
-.bars { @apply flex gap-1 items-end; }
-.app-drawer { @apply fixed inset-y-0 left-0 z-[60] w-72 bg-background border-r; }
-.stat-delta--negative { color: var(--tone-negative); }
-.stat-delta--neutral { color: var(--tone-neutral); }
-@media (max-width: 760px) { .app-drawer { @apply shadow-2xl; } }
+/* ── 2a. Dashboard surfaces and text — LIGHT ──────────────────────────── */
+:root {
+  --canvas-dashboard: 210 50% 98%; /* #F5F9FD */
+  --surface: 0 0% 100%; /* #FFFFFF */
+  --surface-subtle: 210 40% 98%; /* #F8FBFD */
+  --text-primary: 222 47% 11%; /* #0F172A */
+  --text-secondary: 215 16% 35%; /* #475569 */
+
+  /* Trend tones. Arrow + text always accompany these (design.md §8.3). */
+  --tone-positive: 174 83% 30%;
+  --tone-negative: 0 84% 60%;
+  --tone-neutral: 215 16% 45%;
+
+  --chart-fill-1: 174 83% 30%;
+  --chart-fill-2: 174 60% 50%;
+  --chart-fill-3: 200 70% 55%;
+  --chart-fill-4: 40 90% 55%;
+  --chart-fill-5: hsl(var(--muted-foreground));
+}
+
+/* ── 2b. Dashboard surfaces and text — DARK ───────────────────────────── */
+.dark {
+  /* Sits a touch above `--background` so cards (`--card`) read as raised. */
+  --canvas-dashboard: 222 22% 10%;
+  --surface: 222 22% 13%;
+  --surface-subtle: 222 24% 16%;
+  --text-primary: 210 40% 98%;
+  --text-secondary: 215 20% 72%;
+
+  /*
+   * Tones are lightened for dark surfaces: the light values (30% L) measure
+   * ~2:1 against a 13% card, well under the 3:1 non-text floor.
+   */
+  --tone-positive: 158 64% 52%;
+  --tone-negative: 0 91% 71%;
+  --tone-neutral: 215 20% 65%;
+
+  --chart-fill-1: 174 65% 45%;
+  --chart-fill-2: 174 55% 60%;
+  --chart-fill-3: 199 80% 62%;
+  --chart-fill-4: 40 95% 60%;
+  --chart-fill-5: hsl(var(--muted-foreground));
+}
