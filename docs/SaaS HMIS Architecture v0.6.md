@@ -55,7 +55,7 @@ These are planning assumptions to validate, not measurements.
 | Layer | Choice | Notes |
 | --- | --- | --- |
 | Frontend | React + TypeScript, **Vite SPA** | No SSR needed; the app sits behind authentication |
-| UI | **Shadcn UI** (Tailwind + Radix) — replaces Ant Design 5 | Copied-source components via CLI; no external icon library dependency; semantic tokens (`bg-primary`, `text-foreground`) replace `ConfigProvider` theming |
+| UI | **Shadcn UI** (Tailwind + Radix) — replaces Ant Design 5 | Copied-source components via CLI; `lucide-react` icon set; semantic tokens (`bg-primary`, `text-foreground`) replace `ConfigProvider` theming |
 | Charts | **Inline SVG** (hand-rolled donut with `stroke-dasharray`, bars via SVG primitives) | No `@ant-design/charts`, no `recharts`; avoids dependency sync and keeps bundle small |
 | Component registry | `components.json` + `src/components/ui/` | `Button`, `Card`, `Badge`, `Input`, `Label`, `Dialog`, `Tabs`, `Avatar`, `Tooltip`, `Toast`, `ScrollArea`, `Progress`, `DropdownMenu`, `Separator`, `Select` (planned)
 | Data fetching | TanStack Query | Server-state cache and refetching |

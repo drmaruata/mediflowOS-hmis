@@ -50,31 +50,93 @@ MODULES = {
 
 #: Requirements the code explicitly refuses to claim. Each entry is a real
 #: functional gap, kept here so it is reported rather than implied by a
-#: green-looking matrix.
+#: green-looking matrix. Value = (status, note); status is what the
+#: per-requirement table prints, the note is appended to the Known gaps list.
+#: Every entry was re-verified against the code on 2026-10-07 — when a gap is
+#: closed, delete the entry so regeneration reflects reality.
 KNOWN_GAPS = {
-    "ABD-001": "ABDM gateway adapter not implemented; the callback endpoint "
-               "answers 501 by design (architecture doc 8.4)",
-    "ABD-002": "ABHA creation and verification pending the ABDM sandbox spec",
-    "QOS-001": "indicator catalogue exists in docs/ but no loader has been written; "
-               "the 406 records are not in the database",
+    "ABD-002": (
+        "partial",
+        "QR regenerate is implemented (`qr-codes/{id}/regenerate/`); the revoke "
+        "half of the requirement has no endpoint",
+    ),
+    "ABD-005": (
+        "**not implemented**",
+        "`ABHACallbackViewSet` accepts any non-empty X-ABDM-Signature or "
+        "Bearer header — presence-only, no secret comparison (verified "
+        "backend/apps/abdm_gateway/views.py `_authenticate`)",
+    ),
+    "ABD-011": (
+        "**not implemented**",
+        "the consent event is built and returned in the acknowledgement but "
+        "never written to any table",
+    ),
+    "ABD-012": (
+        "**not implemented**",
+        "the link token is `secrets.token_urlsafe(32)` and discarded — "
+        "no encryption, no storage (placeholder comment for KMS)",
+    ),
+    "TEN-004": (
+        "partial",
+        "Role.permissions exists but no permission class reads it; every "
+        "endpoint is plain IsAuthenticated",
+    ),
+    "TEN-006": (
+        "partial",
+        "TOTP enrol/confirm works, but MFARequiredIfConfigured is not in "
+        "DEFAULT_PERMISSION_CLASSES and the token carries no requires_mfa "
+        "claim — MFA is not enforced",
+    ),
+    "AUD-002": (
+        "partial",
+        "AuditEvent.hash_chain exists but is never computed — the log is "
+        "append-only in practice, not tamper-evident",
+    ),
+    "PLT-004": (
+        "**not implemented**",
+        "every Celery task body is `pass` and there is no "
+        "CELERY_BEAT_SCHEDULE — no background job can run",
+    ),
+    "QOS-001": (
+        "**not implemented**",
+        "indicator catalogue exists in docs/ but no loader has been written; "
+        "the 406 records are not in the database",
+    ),
+}
+
+
+#: Requirements whose status is a frontend fact, not a backend one. The
+#: Modelled/API/RLS columns are Django signals and read `no`/`no`/`no` for
+#: these rows by construction; this map keeps the Status column honest.
+#: Verified against frontend/src on 2026-10-07.
+MANUAL_STATUS = {
+    "UI-001": "partial",   # responsive shell + theme exist; only 2 screens
 }
 
 
 def parse_srs():
     """Requirement id -> (text, severity, release)."""
     rows = {}
+    # {2,3} letter prefixes: the old {3} silently dropped OT-, UI- and HW-.
     pattern = re.compile(
-        r"^\|\s*([A-Z]{3}-\d{3})\s*\|(.*?)\|(.*?)\|(.*?)\|\s*$"
+        r"^\|\s*([A-Z]{2,3}-\d{3})\s*\|(.*?)\|(.*?)\|(.*?)\|\s*$"
     )
+    nfr_pattern = re.compile(r"^\|\s*(NFR-[A-Z]+-\d{3})\s*\|")
+    nfr_count = 0
     for line in SRS.read_text(encoding="utf-8").splitlines():
-        match = pattern.match(line.strip())
-        if not match:
-            continue
-        rid, text, priority, release = (part.strip() for part in match.groups())
-        # Strip markdown emphasis and any trailing backticks.
-        text = re.sub(r"\*+|`+", "", text).strip()
-        rows[rid] = (text, priority, release)
-    return rows
+        stripped = line.strip()
+        match = pattern.match(stripped)
+        if match:
+            rid, text, priority, release = (part.strip() for part in match.groups())
+            # Strip markdown emphasis and any trailing backticks.
+            text = re.sub(r"\*+|`+", "", text).strip()
+            rows[rid] = (text, priority, release)
+        elif nfr_pattern.match(stripped):
+            # §5 NFR tables have no release column; counted for the header
+            # but not enumerated here, because a release cannot be read
+            # from the row itself (see §11 goal mapping instead).
+            nfr_count += 1
+    return rows, nfr_count
 
 
 def code_facts():
@@ -92,25 +154,31 @@ def code_facts():
     from django.db import connection
     from django.urls import get_resolver
 
-    def collect(resolver, prefix=""):
-        found = set()
-        for entry in resolver.url_patterns:
-            pattern = prefix + str(entry.pattern)
-            if hasattr(entry, "url_patterns"):
-                found |= collect(entry, pattern)
-            elif pattern.startswith("api/v1"):
-                found.add(pattern)
-        return found
-
-    routes = collect(get_resolver())
-
-    # "Exposed" means the app has a urls.py that config/urls.py actually mounts.
-    # Matching app labels against URL path segments does not work - the app
-    # patient_registry is published at /api/v1/patients/, not
-    # /api/v1/patient-registry/ - so the mount is read from the source instead.
+    # Exposure is counted, not guessed: walk the resolved URL tree and count
+    # the leaf routes under each include's namespace, then map the namespace
+    # back to the app label from config/urls.py itself. The previous version
+    # only asked whether config/urls.py mentioned the app, which reported an
+    # app as "exposed" even when its urls.py published a single hand-written
+    # route and never mounted its router (pharmacy, blood_bank).
     root_urls = (BACKEND / "config" / "urls.py").read_text(encoding="utf-8")
-    mounted = set(re.findall(r"apps\.([a-z_]+)\.urls", root_urls))
-    _ = routes  # collected above for completeness; mounting is the real signal
+    ns_to_app = {
+        ns: app
+        for app, ns in re.findall(
+            r'include\("apps\.(?P<app>[a-z_]+)\.urls",\s*namespace="(?P<ns>[a-z_]+)"\)',
+            root_urls,
+        )
+    }
+    routes = {}
+
+    def walk(resolver, current=None):
+        for entry in resolver.url_patterns:
+            if hasattr(entry, "url_patterns"):
+                nested = getattr(entry, "namespace", None) or current
+                walk(entry, nested)
+            else:
+                routes[current] = routes.get(current, 0) + 1
+
+    walk(get_resolver())
 
     facts = {}
     for config in registry.get_app_configs():
@@ -136,16 +204,21 @@ def code_facts():
             protected = len(
                 [p for p in migration_dir.glob("*.py") if "row_level_security" in p.name]
             )
+        exposed = 0
+        for namespace, app in ns_to_app.items():
+            if app == config.label:
+                exposed += routes.get(namespace, 0)
         facts[config.label] = {
             "models": len(models),
-            "exposed": config.label in mounted,
+            "exposed": exposed > 0,
+            "routes": exposed,
             "rls_migrations": protected,
         }
     return facts
 
 
 def main():
-    requirements = parse_srs()
+    requirements, nfr_count = parse_srs()
     facts = code_facts()
 
     by_module = {}
@@ -161,20 +234,25 @@ def main():
         "Generated by `backend/scripts/generate_traceability.py`. Do not edit by",
         "hand - regenerate instead, so the matrix cannot drift from the code.",
         "",
-        f"Source: `{SRS.name}` ({total} numbered requirements).",
+        f"Source: `{SRS.name}` - {total} requirements with a release column",
+        "(§3 interface and §4 functional). The SRS additionally carries",
+        f"{nfr_count} §5 NFR rows that have no release column; they are not",
+        "enumerated here (see SRS §5 and the §11 goal-to-release mapping).",
         "",
         "## How to read this",
         "",
         "| Column | Meaning |",
         "| --- | --- |",
         "| Modelled | A Django model exists in the module's app. |",
-        "| API | The module is published under `/api/v1/`. |",
+        "| API | The module's urls.py publishes at least one route under `/api/v1/`. |",
+        "| Routes | Leaf URL patterns published by that app (counted from the live URL resolver). |",
         "| RLS | A migration enables row level security for the module's tables. |",
-        "| Status | `partial` means modelled but not exposed or not verified. |",
+        "| Status | `partial` = present but incomplete; `not implemented` = a Known gap; `not started` = no code. |",
         "",
         "Modelled is not the same as delivered: the SRS describes intended",
         "behaviour, and a model captures only the data shape. Read the SRS for",
-        "what each requirement actually demands.",
+        "what each requirement actually demands. `UI-` and `HW-` rows describe",
+        "the frontend, so Modelled/API/RLS read `no` for them by construction.",
         "",
         "## Summary",
         "",
@@ -192,14 +270,14 @@ def main():
             reachable += len(entries)
         summary_rows.append(
             (prefix, app, phase, len(entries), "yes" if modelled else "no",
-             "yes" if exposed else "no",
+             "yes" if exposed else "no", fact.get("routes", 0),
              "yes" if fact.get("rls_migrations") else "no")
         )
 
-    lines.append("| Reqs | App | Phase | Count | Modelled | API | RLS |")
-    lines.append("| ---: | --- | --- | ---: | --- | --- | --- |")
+    lines.append("| Reqs | App | Phase | Count | Modelled | API | Routes | RLS |")
+    lines.append("| ---: | --- | --- | ---: | --- | --- | ---: | --- |")
     for row in summary_rows:
-        lines.append("| {} | {} | {} | `{}` | {} | {} | {} |".format(*row))
+        lines.append("| {} | {} | {} | `{}` | {} | {} | `{}` | {} |".format(*row))
     lines.append("")
     lines.append("### What these numbers do and do not mean")
     lines.append("")
@@ -218,21 +296,23 @@ def main():
     )
     lines.append("")
     lines.append(
-        "The remaining modules are modelled but not exposed, because what exists "
-        "is a stub rather than a working feature. Those are named under Known "
-        "gaps below instead of being counted as progress. In particular: the "
-        "Quality OS engine and catalogue loader, the audit trail, the realtime "
-        "consumers (unrouted in `config/asgi.py`) and both Celery tasks "
-        "(`compute_indicators`, `sync_abdm_callback`) are placeholders."
+        "**Routes** counts published URL patterns, so an app with a hand-written "
+        "route and an unmounted router still scores low: `pharmacy` and "
+        "`blood_bank` publish one route each while most of their viewsets are "
+        "not routed at all. Exposure says an endpoint exists; it says nothing "
+        "about whether the behaviour behind it is implemented. The gaps that "
+        "are known to the code are named under Known gaps below instead of "
+        "being counted as progress."
     )
     lines.append("")
     lines.append("## Known gaps")
     lines.append("")
     lines.append("Requirements that exist in the SRS but are deliberately not")
-    lines.append("claimed as delivered:")
+    lines.append("claimed as delivered (re-verified against the code each time")
+    lines.append("this file is regenerated):")
     lines.append("")
-    for rid, note in sorted(KNOWN_GAPS.items()):
-        lines.append(f"- **{rid}** - {note}")
+    for rid, (status, note) in sorted(KNOWN_GAPS.items()):
+        lines.append(f"- **{rid}** ({status.strip('*')}) - {note}")
     lines.append("")
     lines.append("## Per-requirement detail")
     lines.append("")
@@ -240,13 +320,15 @@ def main():
     for prefix in sorted(by_module):
         entries = sorted(by_module[prefix])
         app, phase = MODULES.get(prefix, ("-", "-"))
-        lines.append(f"### {prefix} - `{app}` (phase {phase})")
+        lines.append(f"### {prefix} - `{app}` (module completion phase {phase})")
         lines.append("")
         lines.append("| ID | Requirement | Priority | Release | Status |")
         lines.append("| --- | --- | --- | --- | --- |")
         for rid, text, priority, release in entries:
             if rid in KNOWN_GAPS:
-                status = "**not implemented**"
+                status = KNOWN_GAPS[rid][0]
+            elif rid in MANUAL_STATUS:
+                status = MANUAL_STATUS[rid]
             elif app in facts:
                 status = "partial"
             else:

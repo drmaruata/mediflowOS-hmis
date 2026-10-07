@@ -215,8 +215,12 @@ mediflowOS-hmis/
 │   │   ├── modules/              # one folder per backend module (auth, dashboard, ...)
 │   │   ├── lib/                  # fetch wrappers, e.g. health.ts
 │   │   ├── stores/               # zustand client UI state
-│   │   └── styles/               # index.css; ConfigProvider owns the antd tokens
-│   ├── public/
+│   │   ├── styles/               # globals.css owns the Tailwind/shadcn tokens
+│   │   ├── components/           # AppShell + vendored shadcn ui/ components
+│   │   ├── test/                 # vitest setup (matchMedia, ResizeObserver)
+│   │   ├── App.tsx               # route table + QueryClientProvider
+│   │   └── main.tsx
+│   ├── index.html                # dark-mode pre-paint bootstrap
 │   ├── package.json
 │   ├── vite.config.ts
 │   └── tsconfig.json
