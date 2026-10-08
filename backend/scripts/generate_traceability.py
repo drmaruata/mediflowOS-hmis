@@ -78,14 +78,18 @@ KNOWN_GAPS = {
     ),
     "TEN-004": (
         "partial",
-        "Role.permissions exists but no permission class reads it; every "
-        "endpoint is plain IsAuthenticated",
+        "Role.permissions exists and is copied into the token's `permissions` "
+        "claim, but no permission class reads it — authentication (plus the "
+        "MFA gate) is enforced server-side, role-based authorisation is not",
     ),
     "TEN-006": (
         "partial",
-        "TOTP enrol/confirm works, but MFARequiredIfConfigured is not in "
-        "DEFAULT_PERMISSION_CLASSES and the token carries no requires_mfa "
-        "claim — MFA is not enforced",
+        "TOTP enrol/confirm works and MFARequiredIfConfigured is installed "
+        "after IsAuthenticated in DEFAULT_PERMISSION_CLASSES, with the token "
+        "carrying `requires_mfa`/`mfa_verified` claims — but no POST "
+        "/auth/mfa/verify endpoint exists, so mfa_verified can never become "
+        "True after login and require_mfa roles are denied every "
+        "default-permission endpoint (fail-closed)",
     ),
     "AUD-002": (
         "partial",

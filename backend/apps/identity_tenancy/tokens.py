@@ -95,9 +95,12 @@ class TenantAwareTokenSerializer(TokenObtainPairSerializer):
         user = self.user
         membership = active_membership(user)
 
-        # The flag is a claim, not an enforcement point. django-otp's own
-        # middleware is what actually gates a session; publishing it lets the
-        # frontend prompt for a second factor without a second round trip.
+        # The claim is an enforcement input, not just display data: the
+        # MFARequiredIfConfigured default permission reads requires_mfa and
+        # this mfa_verified claim to gate default-permission endpoints.
+        # django-otp's state (user.otp_device) is what feeds the claim at
+        # issuance; publishing it in the response body too lets the frontend
+        # prompt for a second factor without a second round trip.
         device = getattr(user, "otp_device", None)
         data[MFA_CLAIM] = device is not None
 

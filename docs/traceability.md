@@ -45,8 +45,8 @@ the frontend, so Modelled/API/RLS read `no` for them by construction.
 | QOS | quality_os | R3 | `48` | yes | yes | `35` | yes |
 | REG | patient_registry | R1 | `13` | yes | yes | `22` | yes |
 | RIS | ris | R4 | `4` | yes | yes | `6` | yes |
-| SET | identity_tenancy | R1 | `13` | yes | yes | `46` | yes |
-| TEN | identity_tenancy | R1 | `11` | yes | yes | `46` | yes |
+| SET | identity_tenancy | R1 | `13` | yes | yes | `48` | yes |
+| TEN | identity_tenancy | R1 | `11` | yes | yes | `48` | yes |
 | UI | - | - | `7` | no | no | `0` | no |
 
 ### What these numbers do and do not mean
@@ -70,8 +70,8 @@ this file is regenerated):
 - **AUD-002** (partial) - AuditEvent.hash_chain exists but is never computed — the log is append-only in practice, not tamper-evident
 - **PLT-004** (not implemented) - every Celery task body is `pass` and there is no CELERY_BEAT_SCHEDULE — no background job can run
 - **QOS-001** (not implemented) - indicator catalogue exists in docs/ but no loader has been written; the 406 records are not in the database
-- **TEN-004** (partial) - Role.permissions exists but no permission class reads it; every endpoint is plain IsAuthenticated
-- **TEN-006** (partial) - TOTP enrol/confirm works, but MFARequiredIfConfigured is not in DEFAULT_PERMISSION_CLASSES and the token carries no requires_mfa claim — MFA is not enforced
+- **TEN-004** (partial) - Role.permissions exists and is copied into the token's `permissions` claim, but no permission class reads it — authentication (plus the MFA gate) is enforced server-side, role-based authorisation is not
+- **TEN-006** (partial) - TOTP enrol/confirm works and MFARequiredIfConfigured is installed after IsAuthenticated in DEFAULT_PERMISSION_CLASSES, with the token carrying `requires_mfa`/`mfa_verified` claims — but no POST /auth/mfa/verify endpoint exists, so mfa_verified can never become True after login and require_mfa roles are denied every default-permission endpoint (fail-closed)
 
 ## Per-requirement detail
 

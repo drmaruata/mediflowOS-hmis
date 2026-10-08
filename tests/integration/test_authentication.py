@@ -366,10 +366,22 @@ class TestTokenRefresh:
 
         assert refreshed.status_code == 200, refreshed.content
         new_access = AccessToken(refreshed.json()["access"])
-        for claim in ("tenant_id", "facility_id", "role", "permissions"):
+        # MFA claims are in this tuple deliberately: rotation dropping
+        # requires_mfa would fail open (the gate stops denying), and dropping
+        # mfa_verified would fail closed for privileged roles — either way the
+        # contract in common/mfa.py's docstring ("survive refresh") would be
+        # silently broken.
+        for claim in (
+            "tenant_id",
+            "facility_id",
+            "role",
+            "permissions",
+            "requires_mfa",
+            "mfa_verified",
+        ):
             assert new_access.payload[claim] == original.payload[claim], (
-                f"refresh dropped the {claim} claim; every request made with the "
-                "new access token would lose its tenant scope"
+                f"refresh dropped the {claim} claim; the rotated token no longer "
+                "carries what was issued — tenant scope or MFA state is lost"
             )
 
     def test_old_refresh_token_rejected_after_rotation(self, users):
