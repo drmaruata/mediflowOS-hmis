@@ -28,6 +28,7 @@ router.register(r"break-glass", views.BreakGlassViewSet, basename="break-glass")
 router.register(r"setup", views.SetupProgressViewSet, basename="setup")
 router.register(r"reference-data", views.ReferenceDataViewSet, basename="referencedata")
 router.register(r"baseline-inputs", views.BaselineInputViewSet, basename="baselineinput")
+router.register(r"config-revisions", views.ConfigRevisionViewSet, basename="configrevision")
 
 _mfa_list = TOTPEnrolViewSet.as_view({"get": "list", "post": "create"})
 _mfa_confirm = TOTPEnrolViewSet.as_view({"post": "confirm"})

@@ -6,6 +6,7 @@ from rest_framework.exceptions import PermissionDenied
 from .models import (
     BaselineInput,
     BreakGlassAccess,
+    ConfigRevision,
     Department,
     Facility,
     ReferenceData,
@@ -38,7 +39,13 @@ class DepartmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = Department
         fields = "__all__"
-        read_only_fields = ["id"]
+        # tenant is server-owned: TenantScopedQuerysetMixin stamps it on
+        # create, and a writable tenant would be a required input that every
+        # create must then overwrite — the two failure modes the mixin's
+        # contract names (common/tenant.py). The other tenant-owned
+        # serializers already declare it read-only; Department was the
+        # inconsistency, surfacing as a 400 on POST /departments/.
+        read_only_fields = ["id", "tenant"]
 
 
 class WardSerializer(serializers.ModelSerializer):
@@ -481,3 +488,27 @@ class BaselineInputSerializer(serializers.ModelSerializer):
         if value < 0:
             raise serializers.ValidationError("Baseline values cannot be negative.")
         return value
+
+
+class ConfigRevisionSerializer(serializers.ModelSerializer):
+    """One effective-dated configuration snapshot (SET-010).
+
+    The history endpoint is read-only by design — revisions are written only
+    by ``record_revision`` on update — so every field is read-only here;
+    explicit fields rather than ``__all__`` because the snapshot JSON would
+    otherwise invite confusion about whether it is writable client state.
+    """
+
+    class Meta:
+        model = ConfigRevision
+        fields = [
+            "id",
+            "tenant_id",
+            "entity",
+            "entity_id",
+            "snapshot",
+            "effective_from",
+            "effective_to",
+            "created_by",
+        ]
+        read_only_fields = fields

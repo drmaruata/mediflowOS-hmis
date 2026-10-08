@@ -19,6 +19,7 @@ PROTECTED_ENDPOINTS = [
     "/api/v1/beds/",
     "/api/v1/service-units/",
     "/api/v1/staff-positions/",
+    "/api/v1/config-revisions/",
     "/api/v1/patients/",
     "/api/v1/patients/search/",
     "/api/v1/intake-points/",

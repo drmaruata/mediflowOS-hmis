@@ -1,4 +1,4 @@
-"""Identity, tenancy and administration models (TEN-001 to TEN-011, SET-001, SET-006 to SET-009)."""
+"""Identity, tenancy and administration models (TEN-001 to TEN-011, SET-001 to SET-012)."""
 import uuid
 
 from django.conf import settings
@@ -85,6 +85,11 @@ class Bed(models.Model):
     bed_number = models.CharField(max_length=32)
     functional = models.BooleanField(default=True)
     occupied = models.BooleanField(default=False)
+    #: Additive (SET-011): a bed is deactivated, never deleted, so its history
+    #: and any locked indicator period keep pointing at the same row. Unlike
+    #: ``functional`` — the bed's equipment/operational state — ``active`` is
+    #: the administrative lifecycle flag the configuration surface flips.
+    active = models.BooleanField(default=True)
 
     class Meta:
         db_table = "identity.bed"
@@ -331,3 +336,41 @@ class BaselineInput(models.Model):
         # The list filter leads with tenant_id; the (indicator_source_code,
         # period) suffix is what a later indicator screen filters on (SET-007).
         indexes = [models.Index(fields=["tenant_id", "indicator_source_code", "period"])]
+
+
+class ConfigRevision(models.Model):
+    """Effective-dated snapshot of one configuration row (SET-010).
+
+    Written by :func:`apps.identity_tenancy.services.record_revision` on every
+    update of a department, ward, bed, service unit or staff position: the
+    snapshot is the row's *pre-update* state, opened ``effective_from = today``
+    and closed again (``effective_to`` set to yesterday) by the following
+    update. A locked indicator period can therefore re-read what the
+    configuration looked like at the time the period was filed, even after the
+    row changed (SET-010).
+
+    ``entity`` is the model's ``db_table`` (e.g. ``identity.department``) —
+    the same convention the audit mixin uses for ``AuditEvent.entity_type`` —
+    so revision history and the audit trail name a row identically, and an
+    ``entity_id`` inside one entity can never collide with the same id held by
+    another table. ``created_by`` mirrors the audit table's ``user_id``: a raw
+    ``auth.User`` primary key, converted by the UUID field the same way the
+    mixin writes it, so the two trails attribute the same change to the same
+    account.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
+    entity = models.CharField(max_length=32)
+    entity_id = models.UUIDField()
+    snapshot = models.JSONField()
+    effective_from = models.DateField()
+    effective_to = models.DateField(null=True, blank=True)
+    created_by = models.UUIDField(null=True)
+
+    class Meta:
+        db_table = "identity.config_revision"
+        # The history lookup filters (tenant_id, entity, entity_id) and the
+        # per-tenant list filter both lead with tenant_id, per the composite
+        # index rule.
+        indexes = [models.Index(fields=["tenant_id", "entity", "entity_id"])]

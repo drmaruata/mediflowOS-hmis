@@ -1,11 +1,12 @@
-"""Transactional tenant onboarding with seed configuration (TEN-010, TEN-011)."""
-from datetime import date
+"""Transactional tenant onboarding and config revisioning (TEN-010, TEN-011, SET-010)."""
+from datetime import date, datetime, timedelta
+import uuid
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
 from rest_framework import serializers
 
-from .models import Department, Facility, Role, Tenant, UserMembership
+from .models import ConfigRevision, Department, Facility, Role, Tenant, UserMembership
 from .serializers import OnboardAdminSerializer
 
 #: Permission bundles seeded onto the roles every onboarding mints. Explicit
@@ -157,4 +158,57 @@ def _create_admin(admin: dict, tenant: Tenant, role: Role) -> None:
         tenant=tenant,
         role=role,
         active=True,
+    )
+
+
+def _snapshot(instance) -> dict:
+    """A JSON-serialisable copy of ``instance``'s current column values.
+
+    Iterates the concrete fields so the snapshot carries exactly what the row
+    carries at the moment of capture - including fields a PATCH leaves
+    untouched. UUIDs and dates are stringified because the ``snapshot``
+    JSONField must store plain JSON; FK columns are read through their
+    ``attname`` (``department_id``), so the raw identifier is what lands in
+    the history rather than a resolved object.
+    """
+    data = {}
+    for field in instance._meta.concrete_fields:
+        value = getattr(instance, field.attname)
+        if isinstance(value, (uuid.UUID, date, datetime)):
+            value = str(value)
+        data[field.name] = value
+    return data
+
+
+def record_revision(instance, user) -> None:
+    """Archive a configuration row's pre-update state (SET-010).
+
+    Called from the config viewsets' ``perform_update`` *before* the new
+    values are saved: the snapshot is the old configuration, so a locked
+    indicator period keeps the settings that were actually in force. The
+    revision opens with ``effective_from = today`` and the previously open
+    revision for this (tenant, entity, row) is closed with
+    ``effective_to = yesterday`` — the closed records are exactly what a later
+    period can re-read.
+
+    ``entity`` is the model's ``db_table``, the same convention the audit
+    mixin uses, and the tenant comes from the instance itself, never from the
+    caller's session — a revision row can therefore never be stamped with a
+    tenant other than the row it archives.
+    """
+    today = date.today()
+    entity = instance._meta.db_table
+    ConfigRevision.objects.filter(
+        tenant_id=instance.tenant_id,
+        entity=entity,
+        entity_id=instance.pk,
+        effective_to__isnull=True,
+    ).update(effective_to=today - timedelta(days=1))
+    ConfigRevision.objects.create(
+        tenant_id=instance.tenant_id,
+        entity=entity,
+        entity_id=instance.pk,
+        snapshot=_snapshot(instance),
+        effective_from=today,
+        created_by=user.pk if getattr(user, "is_authenticated", False) else None,
     )

@@ -1,6 +1,7 @@
 """Identity and administration views."""
 from django.contrib.auth import get_user_model
-from django.db import IntegrityError
+from django.db import IntegrityError, transaction
+from django.db.models import Case, IntegerField, When
 from django.utils import timezone
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import viewsets, status
@@ -13,6 +14,7 @@ from .models import (
     SETUP_STEPS,
     BaselineInput,
     BreakGlassAccess,
+    ConfigRevision,
     Department,
     Facility,
     ReferenceData,
@@ -29,6 +31,7 @@ from .permissions import RequirePermission, WritePermissionMixin
 from .serializers import (
     BaselineInputSerializer,
     BreakGlassAccessSerializer,
+    ConfigRevisionSerializer,
     DepartmentSerializer,
     FacilitySerializer,
     ReferenceDataSerializer,
@@ -44,6 +47,7 @@ from .serializers import (
     UserSerializer,
     OnboardTenantSerializer,
 )
+from .services import record_revision
 
 
 class TenantViewSet(viewsets.ModelViewSet):
@@ -101,29 +105,137 @@ class FacilityViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
     queryset = Facility.objects.all()
 
 
-class DepartmentViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
+class EffectiveDatedConfigMixin:
+    """Effective dating and the no-hard-delete rule for configuration (SET-010, SET-011).
+
+    Configuration rows are referenced by audit history and — once indicator
+    periods exist — by locked reporting periods, so they are never hard
+    deleted: DELETE is not a routed verb (the framework answers 405 without
+    resolving any object), and deactivation is ``PATCH {active: false}``,
+    which keeps the row (SET-011). Every update first archives the row's
+    *pre-update* state into ``ConfigRevision`` and then applies the new
+    values (SET-010).
+
+    ``record_revision`` runs on ``serializer.instance``, which still holds the
+    committed values the serializer was bound to — the save happens in
+    ``super().perform_update`` below it — so the snapshot can never contain the
+    new configuration. Close and save share one explicit transaction, because
+    ``ATOMIC_REQUESTS`` is False in the test profile and a revision without its
+    update (or an update without its revision) would both be wrong.
+    """
+
+    #: DELETE never routes on config resources; see the class docstring.
+    http_method_names = ["get", "post", "put", "patch", "head", "options"]
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            record_revision(serializer.instance, self.request.user)
+            super().perform_update(serializer)
+
+
+class DepartmentViewSet(
+    EffectiveDatedConfigMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet
+):
+    """Department configuration (SET-002).
+
+    Creates and PATCHes land the tenant mixin's audit event (SET-012) and
+    effective-date the pre-update state (SET-010); DELETE is refused 405
+    (SET-011) — deactivation is ``PATCH {active: false}``.
+    """
     serializer_class = DepartmentSerializer
     queryset = Department.objects.all()
 
 
-class WardViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
+class WardViewSet(
+    EffectiveDatedConfigMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet
+):
+    """Ward configuration under a department (SET-003)."""
     serializer_class = WardSerializer
     queryset = Ward.objects.all()
 
 
-class BedViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
+class BedViewSet(
+    EffectiveDatedConfigMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet
+):
+    """Bed configuration under a ward (SET-003), including the ``active`` flag (SET-011)."""
     serializer_class = BedSerializer
     queryset = Bed.objects.all()
 
 
-class ServiceUnitViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
+class ServiceUnitViewSet(
+    EffectiveDatedConfigMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet
+):
+    """Service units without beds (SET-004)."""
     serializer_class = ServiceUnitSerializer
     queryset = ServiceUnit.objects.all()
 
 
-class StaffPositionViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
+class StaffPositionViewSet(
+    EffectiveDatedConfigMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet
+):
+    """Staff positions by designation, specialty and department (SET-005)."""
     serializer_class = StaffPositionSerializer
     queryset = StaffPosition.objects.all()
+
+
+class ConfigRevisionViewSet(TenantScopedQuerysetMixin, viewsets.ReadOnlyModelViewSet):
+    """Effective-dated configuration history (SET-010).
+
+    Read-only: revisions are written only by ``record_revision`` on update.
+    ``?entity=`` and ``?entity_id=`` narrow the history to one table and one
+    row (both optional); without them the endpoint lists the tenant's whole
+    revision log. The current (open, ``effective_to`` null) revision sorts
+    first, then older periods by ``effective_from`` descending, then id — the
+    open-first ordering is what an admin screen reads the current settings
+    from, and it is deterministic across the two databases the suite and
+    production run on, where NULL ordering rules differ.
+    """
+
+    serializer_class = ConfigRevisionSerializer
+    queryset = ConfigRevision.objects.all()
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="entity",
+                description=(
+                    "Restrict to one configuration table's history, e.g. "
+                    "'identity.department' (the model's db_table)."
+                ),
+                required=False,
+            ),
+            OpenApiParameter(
+                name="entity_id",
+                description=(
+                    "Restrict to one row's history within ``entity`` "
+                    "(a UUID, matching the archived row's id)."
+                ),
+                required=False,
+            ),
+        ],
+        responses={200: ConfigRevisionSerializer(many=True)},
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        entity = self.request.query_params.get("entity")
+        entity_id = self.request.query_params.get("entity_id")
+        if entity:
+            queryset = queryset.filter(entity=entity)
+        if entity_id:
+            queryset = queryset.filter(entity_id=entity_id)
+        # Open revisions (effective_to null) first — see the class docstring.
+        # ``Case/When`` rather than dialect NULLS FIRST so the ordering is
+        # identical on SQLite (test suite) and PostgreSQL (production).
+        return queryset.annotate(
+            _open=Case(
+                When(effective_to__isnull=True, then=0),
+                default=1,
+                output_field=IntegerField(),
+            )
+        ).order_by("_open", "-effective_from", "-id")
 
 
 class RoleViewSet(WritePermissionMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet):
