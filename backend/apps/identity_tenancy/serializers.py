@@ -329,3 +329,82 @@ class UserCreateSerializer(serializers.ModelSerializer):
         this serializer is write-only plumbing.
         """
         return UserSerializer(instance, context=self.context).data
+
+
+class FacilitySeedSerializer(serializers.Serializer):
+    """The first facility created at onboarding (TEN-010).
+
+    Only the operational identity is asked of the caller; the tenant is
+    stamped by the service, and address/HFR fields can be completed later
+    through the facilities API.
+    """
+
+    name = serializers.CharField(max_length=200)
+    level = serializers.CharField(max_length=64)
+
+
+class AbdmSeedSerializer(serializers.Serializer):
+    """ABDM identifiers recorded on the first facility (TEN-011).
+
+    Every field is optional: a hospital can board before NHA registration and
+    backfill the identifiers later. ``abdm_registration_status`` defaults to
+    the model's "pending" when absent.
+    """
+
+    abdm_hip_id = serializers.CharField(max_length=64, required=False, allow_blank=True)
+    abdm_facility_id = serializers.CharField(
+        max_length=64, required=False, allow_blank=True
+    )
+    abdm_registration_status = serializers.CharField(max_length=32, required=False)
+
+
+class OnboardAdminSerializer(serializers.ModelSerializer):
+    """The first administrator of a new tenant (TEN-010).
+
+    Not :class:`UserCreateSerializer`, which requires a caller-supplied
+    ``role_id`` — onboarding seeds the role itself — but the password rule is
+    delegated to it so the two write paths cannot drift. The password is
+    write-only and never represented: the boarding response is
+    :class:`TenantSerializer`'s, and the only other read the account gets is
+    the user list's :class:`UserSerializer`.
+    """
+
+    password = serializers.CharField(write_only=True)
+    # Declared explicitly so DRF does not attach the model UniqueValidator:
+    # the username-exists rule is enforced by the service after the tenant
+    # row is written (see services._create_admin), so that the slug conflict
+    # — the onboarding-specific one — is answered 409 before this check, and
+    # a pre-validated 400 here would mask it.
+    username = serializers.CharField(max_length=150)
+
+    class Meta:
+        model = get_user_model()
+        fields = ["username", "password", "email"]
+
+    def validate_password(self, value):
+        # The rule lives in UserCreateSerializer (TEN-008); delegating keeps
+        # one enforcement site instead of a second copy waiting to diverge.
+        return UserCreateSerializer().validate_password(value)
+
+
+class OnboardTenantSerializer(serializers.Serializer):
+    """POST /tenants/onboard/ payload (TEN-010, TEN-011).
+
+    A plain Serializer rather than a ModelSerializer on purpose: the action
+    mints five kinds of rows, and a ModelSerializer would attach a
+    UniqueValidator to ``slug``, answering duplicates 400 — the endpoint
+    refuses them 409 as a state conflict.
+    """
+
+    name = serializers.CharField(max_length=200)
+    slug = serializers.SlugField(max_length=50)
+    facility = FacilitySeedSerializer()
+    admin = OnboardAdminSerializer()
+    abdm = AbdmSeedSerializer(required=False, allow_null=True)
+
+    def create(self, validated_data):
+        # Imported here rather than at module top: services.py imports
+        # serializers, and the two would form an import cycle.
+        from .services import onboard_tenant
+
+        return onboard_tenant(**validated_data)

@@ -79,7 +79,20 @@ class TestIdentityTenancyAPI:
         assert response.status_code == status.HTTP_200_OK
 
     def test_tenant_onboard(self):
-        response = self.client.post("/api/v1/tenants/onboard/", {"name": "New Hospital", "slug": "new-hospital"})
+        response = self.client.post(
+            "/api/v1/tenants/onboard/",
+            {
+                "name": "New Hospital",
+                "slug": "new-hospital",
+                "facility": {"name": "Main Campus", "level": "District Hospital"},
+                "admin": {
+                    "username": "new-admin",
+                    "password": "a-secure-test-password",
+                    "email": "new-admin@example.org",
+                },
+            },
+            format="json",
+        )
         assert response.status_code == status.HTTP_201_CREATED
         assert response.data["slug"] == "new-hospital"
 

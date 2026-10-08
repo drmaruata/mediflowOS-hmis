@@ -1,5 +1,6 @@
 """Identity and administration views."""
 from django.contrib.auth import get_user_model
+from django.db import IntegrityError
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import viewsets, status
@@ -14,7 +15,7 @@ from .serializers import (
     BreakGlassAccessSerializer, DepartmentSerializer, FacilitySerializer,
     RoleSerializer, ServiceUnitSerializer, StaffPositionSerializer,
     TenantSerializer, WardSerializer, BedSerializer, UserMembershipSerializer,
-    UserCreateSerializer, UserSerializer,
+    UserCreateSerializer, UserSerializer, OnboardTenantSerializer,
 )
 
 
@@ -36,13 +37,36 @@ class TenantViewSet(viewsets.ModelViewSet):
         # common/mfa.py on views replacing DEFAULT_PERMISSION_CLASSES.
         return [*super().get_permissions(), RequirePermission("platform.tenants.manage")]
 
+    @extend_schema(
+        request=OnboardTenantSerializer,
+        responses={201: TenantSerializer},
+    )
     @action(detail=False, methods=["post"])
     def onboard(self, request):
-        """Repeatable tenant onboarding with seed configuration (TEN-010)."""
-        serializer = TenantSerializer(data=request.data)
+        """Repeatable tenant onboarding with seed configuration (TEN-010).
+
+        One service call mints the tenant, its first facility, the default
+        departments and roles, and the first admin account inside a single
+        transaction. ``Tenant.slug`` is globally unique, so a second boarding
+        of the same hospital is a state conflict the caller must reconcile —
+        answered 409, not the 400 a UniqueValidator would give or the 500 an
+        uncaught IntegrityError would.
+        """
+        serializer = OnboardTenantSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
-        serializer.save()
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+        try:
+            tenant = serializer.save()
+        except IntegrityError:
+            return Response(
+                {
+                    "detail": (
+                        f"A tenant with slug '{request.data.get('slug')}' "
+                        "already exists."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        return Response(TenantSerializer(tenant).data, status=status.HTTP_201_CREATED)
 
 
 class FacilityViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
