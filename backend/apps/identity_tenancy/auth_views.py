@@ -4,6 +4,7 @@ TEN-006 requires MFA for privileged roles; TEN-007 requires break-glass access
 to record a reason. Both live here because both are authentication concerns
 rather than domain logic.
 """
+from django.db import transaction
 from django.utils import timezone
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers, status, viewsets
@@ -12,7 +13,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 from rest_framework_simplejwt.views import TokenObtainPairView
 
-from .models import BreakGlassAccess
+from .models import BreakGlassAccess, UserMembership
 from common.authentication import claims_from
 from .tokens import (
     BREAK_GLASS_CLAIM,
@@ -106,7 +107,14 @@ class BreakGlassView(APIView):
     """Grants recorded emergency access to a record outside normal scope (TEN-007).
 
     Requires a non-empty reason, and the grant is written before access is
-    allowed, so there is no path to an unlogged emergency read.
+    allowed, so there is no path to an unlogged emergency read. Every grant
+    additionally writes its AUD-001 audit row and raises the TEN-007 alert:
+    a ``Notification(type="critical", title="Break-glass access granted")``
+    for every *active* membership whose role demands MFA — the peers whose
+    normal access is gated the hardest and who can stop the emergency read.
+    Rows are persisted before the success response, so an alert can never be
+    skipped by a client that retries: ``delivered`` stays False and Task 22's
+    consumer flips it when it actually pushes.
     """
 
     permission_classes = [IsAuthenticated]
@@ -145,14 +153,62 @@ class BreakGlassView(APIView):
                 {"resource_type": "Required.", "resource_id": "Required."}
             )
 
-        access = BreakGlassAccess.objects.create(
-            tenant_id=tenant_id,
-            user_id=request.user.pk,
-            resource_type=str(resource_type)[:64],
-            resource_id=str(resource_id)[:64],
-            reason=reason,
-            granted_at=timezone.now(),
-        )
+        # The atomicity is explicit rather than inherited from
+        # ``ATOMIC_REQUESTS``: that setting is False in the test profile, and
+        # the grant, its audit row and its alerts must land together or not at
+        # all — a grant without the TEN-007 record is exactly the "unlogged
+        # emergency read" this view exists to prevent.
+        with transaction.atomic():
+            # Model imports are local (cross-app), mirroring the ABDM views:
+            # neither audit nor platform imports identity_tenancy, so this is
+            # purely a readability choice.
+            from apps.audit.models import AuditEvent
+            from apps.platform.models import Notification
+
+            access = BreakGlassAccess.objects.create(
+                tenant_id=tenant_id,
+                user_id=request.user.pk,
+                resource_type=str(resource_type)[:64],
+                resource_id=str(resource_id)[:64],
+                reason=reason,
+                granted_at=timezone.now(),
+            )
+            # AUD-001 pins "reason (for break-glass)" on the audit row: the
+            # entry names the record that was opened — entity_type/entity_id
+            # are the resource, not the grant row — so the review chain reads
+            # "who opened patient UH-A-0001, why", which an access_id alone
+            # would only reach through a second query.
+            AuditEvent.objects.create(
+                tenant_id=tenant_id,
+                user_id=request.user.pk,
+                action="break-glass",
+                entity_type=str(resource_type)[:64],
+                entity_id=str(resource_id)[:64],
+                reason=reason,
+                source_ip=request.META.get("REMOTE_ADDR"),
+            )
+            # The alert reaches every active membership whose role demands MFA.
+            # unique_together(user, tenant) means one membership per user per
+            # tenant, so the filter cannot fan out duplicate alerts. The
+            # requester's own membership is included when it qualifies: the
+            # point is that *privileged* peers can see and stop the read.
+            for membership in UserMembership.objects.filter(
+                tenant_id=tenant_id, active=True, role__require_mfa=True
+            ):
+                Notification.objects.create(
+                    tenant_id=tenant_id,
+                    user_id=membership.user_id,
+                    title="Break-glass access granted",
+                    body=(
+                        f"{request.user.get_username()} requested break-glass "
+                        f"access to {resource_type} {resource_id}: {reason}"
+                    ),
+                    type="critical",
+                    # Persisted before delivery: Task 22's consumer flips
+                    # ``delivered`` when it actually pushes the alert.
+                    persisted=True,
+                    delivered=False,
+                )
         return Response(
             {"access_id": str(access.id), "granted_at": access.granted_at},
             status=status.HTTP_201_CREATED,

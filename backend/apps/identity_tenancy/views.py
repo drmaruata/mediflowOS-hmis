@@ -1,5 +1,6 @@
 """Identity and administration views."""
 from django.contrib.auth import get_user_model
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -195,21 +196,53 @@ class UserViewSet(WritePermissionMixin, TenantScopedQuerysetMixin, viewsets.Mode
         return Response(self.get_serializer(user).data)
 
 
-class BreakGlassViewSet(viewsets.ViewSet):
-    """Recorded break-glass access (TEN-007)."""
+class BreakGlassViewSet(TenantScopedQuerysetMixin, viewsets.GenericViewSet):
+    """Recorded break-glass access: administrative listing and revocation (TEN-007).
+
+    The grant stays on ``auth_views.BreakGlassView`` (``POST /auth/break-glass/``),
+    which enforces the role claim, the mandatory reason header and the AUD-001
+    and alert writes. This viewset is the administrative half: the
+    tenant-scoped record list an audit screen (Task 34) reads, and the revoke
+    action that ends a grant.
+
+    Every method demands the ``identity.break_glass.revoke`` claim, appended
+    after the defaults the same way ``TenantViewSet`` appends one platform
+    claim over every method — listing grants is as sensitive as revoking one,
+    so a single gate covers both rather than leaving the list behind.
+    """
+
+    serializer_class = BreakGlassAccessSerializer
+    queryset = BreakGlassAccess.objects.all()
     permission_classes = [IsAuthenticated]
 
-    def list(self, request):
-        tenant_id = getattr(request, "tenant_id", None)
-        queryset = BreakGlassAccess.objects.filter(tenant_id=tenant_id)
-        return Response(BreakGlassAccessSerializer(queryset, many=True).data)
+    def get_permissions(self):
+        return [*super().get_permissions(), RequirePermission("identity.break_glass.revoke")]
 
-    def create(self, request):
-        tenant_id = getattr(request, "tenant_id", None)
-        if not tenant_id:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("A tenant must be resolved before break-glass access.")
-        serializer = BreakGlassAccessSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-        serializer.save(tenant_id=tenant_id, user_id=request.user.pk)
-        return Response(serializer.data, status=status.HTTP_201_CREATED)
+    @extend_schema(responses=BreakGlassAccessSerializer(many=True))
+    def list(self, request):
+        return Response(
+            BreakGlassAccessSerializer(self.get_queryset(), many=True).data
+        )
+
+    @extend_schema(
+        responses=BreakGlassAccessSerializer,
+        description=(
+            "Revoke a break-glass grant (TEN-007). GET is what the interface "
+            "specifies; the action is idempotent — a retried revoke restamps "
+            "revoked_at and answers 200 again."
+        ),
+    )
+    @action(detail=True, methods=["get"])
+    def revoke(self, request, pk=None):
+        """Stamp ``revoked_at`` so the grant no longer passes its check (TEN-007).
+
+        ``self.get_object()`` resolves through the tenant-scoped queryset, so
+        a foreign or unknown id answers 404 before any write — the existence
+        of another hospital's grant is not disclosed, and this request can
+        never touch it. An already-revoked grant is the same end state:
+        re-stamping is harmless, so retries are idempotent.
+        """
+        access = self.get_object()
+        access.revoked_at = timezone.now()
+        access.save(update_fields=["revoked_at"])
+        return Response(BreakGlassAccessSerializer(access).data)

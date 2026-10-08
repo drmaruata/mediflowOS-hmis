@@ -46,7 +46,13 @@ def roles(tenants):
         tenant=Tenant.objects.get(id=TENANT_A),
         name="tenant-admin",
         defaults={
-            "permissions": ["patient_registry.view_patient", "quality_os.view_capa"],
+            "permissions": [
+                "patient_registry.view_patient",
+                "quality_os.view_capa",
+                # TEN-007: the revoke endpoint is admin-only, and this role is
+                # the tenant administrator whose membership the revoke tests use.
+                "identity.break_glass.revoke",
+            ],
             "require_mfa": True,
             "allows_break_glass": True,
         },
@@ -318,6 +324,227 @@ class TestBreakGlass:
         )
 
         assert response.status_code == 400
+
+
+class TestBreakGlassAuditAndRevocation:
+    """TEN-007: a grant is logged and raises the critical alert; a revoke ends it.
+
+    The grant path in :class:`TestBreakGlass` already pinned reason, claim and
+    resource-target checks. These tests pin the two things TEN-007 adds on
+    top: the audit record (AUD-001) and the alert — ``BreakGlassView.post``
+    must write an ``AuditEvent(action="break-glass")`` carrying the reason and
+    a ``Notification(type="critical", title="Break-glass access granted")``
+    for *every active* membership whose role demands MFA — and the revocation
+    half of the interface: ``GET /break-glass/{id}/revoke/``, admin-only, sets
+    ``revoked_at`` so the id no longer satisfies the grant check any
+    downstream ``BREAK_GLASS_CLAIM`` verification would consult.
+    """
+
+    def _grant(self):
+        """One successful break-glass grant as admin-a, returning the access id."""
+        response = _authed("admin-a").post(
+            "/api/v1/auth/break-glass/",
+            {"resource_type": "patient", "resource_id": "UH-A-0001"},
+            format="json",
+            HTTP_X_BREAK_GLASS_REASON="Emergency admission, awaiting bed",
+        )
+        assert response.status_code == 201, response.content
+        return uuid.UUID(response.json()["access_id"])
+
+    def _admin_access(self, users):
+        """An admin-a access token that satisfies the break-glass gates.
+
+        The tenant-admin role demands MFA, and this backend has no verify
+        endpoint yet, so the ``mfa_verified`` claim is flagged on the issued
+        token exactly the way ``test_mfa_verified_claim_unblocks_access``
+        does — the token that a verify endpoint will mint. The permission
+        claim comes from the role row, unchanged.
+        """
+        from apps.identity_tenancy.tokens import TenantAwareTokenSerializer
+
+        refresh = TenantAwareTokenSerializer.get_token(users["admin"])
+        refresh["mfa_verified"] = True
+        return str(refresh.access_token)
+
+    def _admin_client(self, users):
+        """An admin-a client carrying :meth:`_admin_access`'s token."""
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {self._admin_access(users)}")
+        return client
+
+    @staticmethod
+    def _uuid_pk(pk):
+        """The UUID spell of an auth.User integer pk as the UUID columns store it.
+
+        ``auth.User`` keeps Django's integer primary key, while the audit and
+        notification ``user_id`` columns are UUIDFields, so the int pk is
+        coerced (``uuid.UUID(int=pk)``) when the row is written. Comparing
+        against that spell — not the raw int — is what pins "the row records
+        the requester".
+        """
+        return uuid.UUID(int=pk)
+
+    def test_break_grant_writes_audit_and_alert(self, users):
+        """A grant must land an AUD-001 row and a critical notification (TEN-007).
+
+        The audit record is what keeps the emergency read reviewable; the
+        alert is what makes it visible to the privileged peers who can stop
+        it. TEN-007 says the alert reaches every active membership whose role
+        demands MFA, so an active peer must receive one, while an inactive
+        peer of the same role and a non-privileged clerk must not — the
+        recipient count is what pins that rule.
+        """
+        from apps.audit.models import AuditEvent
+        from apps.identity_tenancy.models import Role, Tenant, UserMembership
+        from apps.platform.models import Notification
+
+        mfa_peer = get_user_model().objects.create_user(
+            username="mfa-peer", password="pw-for-tests-only"
+        )
+        inactive_peer = get_user_model().objects.create_user(
+            username="inactive-peer", password="pw-for-tests-only"
+        )
+        admin_role = Role.objects.get(tenant_id=TENANT_A, name="tenant-admin")
+        for member, active in ((mfa_peer, True), (inactive_peer, False)):
+            UserMembership.objects.create(
+                user=member,
+                tenant=Tenant.objects.get(id=TENANT_A),
+                role=admin_role,
+                active=active,
+            )
+
+        response = _authed("admin-a").post(
+            "/api/v1/auth/break-glass/",
+            {"resource_type": "patient", "resource_id": "UH-A-0001"},
+            format="json",
+            HTTP_X_BREAK_GLASS_REASON="Emergency admission, awaiting bed",
+        )
+
+        assert response.status_code == 201, response.content
+        event = AuditEvent.objects.get(action="break-glass")
+        assert event.tenant_id == TENANT_A
+        assert event.user_id == self._uuid_pk(users["admin"].id)
+        # The audit row names the record that was opened, reason and all.
+        assert event.entity_type == "patient"
+        assert event.entity_id == "UH-A-0001"
+        assert event.reason == "Emergency admission, awaiting bed"
+
+        # Recipients: the requester herself plus the active peer — exactly the
+        # two active require_mfa memberships. The inactive peer and the clerk
+        # (role.require_mfa=False) get nothing.
+        alerts = Notification.objects.filter(tenant_id=TENANT_A)
+        assert alerts.count() == 2
+        assert set(alerts.values_list("user_id", flat=True)) == {
+            self._uuid_pk(users["admin"].id),
+            self._uuid_pk(mfa_peer.id),
+        }
+        for alert in alerts:
+            assert alert.type == "critical"
+            assert alert.title == "Break-glass access granted"
+            # Persisted before delivery: Task 22's consumer flips `delivered`.
+            assert alert.persisted is True
+            assert alert.delivered is False
+            assert "Emergency admission, awaiting bed" in alert.body
+
+    def test_break_grant_without_reason_still_400(self, users):
+        """No reason header, no grant — and no audit or alert row either.
+
+        The audit and notification writes sit on the success path only. A
+        reasonless request must not half-write a trail for an access that
+        never started: the reason is the whole point of TEN-007's record.
+        """
+        from apps.audit.models import AuditEvent
+        from apps.platform.models import Notification
+
+        response = _authed("admin-a").post(
+            "/api/v1/auth/break-glass/",
+            {"resource_type": "patient", "resource_id": "UH-A-0001"},
+            format="json",
+        )
+
+        assert response.status_code == 400
+        assert "reason" in response.json()["detail"].lower()
+        assert not AuditEvent.objects.filter(action="break-glass").exists()
+        assert not Notification.objects.filter(type="critical").exists()
+
+    def test_break_revoke_sets_revoked_at(self, users):
+        """Revoking a grant stamps revoked_at; the id then fails the grant check.
+
+        The endpoint is GET and admin-only (``identity.break_glass.revoke``):
+        the claim is asserted on the token before the call, so a 200 cannot
+        come from some other gate. The revoked_at stamp is read back from the
+        database — the "still granted" predicate any BREAK_GLASS_CLAIM
+        verification would consult flips from True to False.
+        """
+        from apps.identity_tenancy.models import BreakGlassAccess
+
+        grant_id = self._grant()
+        record = BreakGlassAccess.objects.get(pk=grant_id)
+        assert record.revoked_at is None  # the grant-check predicate passes
+
+        access = self._admin_access(users)
+        assert "identity.break_glass.revoke" in AccessToken(access).payload["permissions"]
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        response = client.get(f"/api/v1/break-glass/{grant_id}/revoke/")
+
+        assert response.status_code == 200, response.content
+        record.refresh_from_db()
+        assert record.revoked_at is not None
+        # A revoked id no longer satisfies the grant-check predicate.
+        assert BreakGlassAccess.objects.get(pk=grant_id).revoked_at is not None
+
+    def test_break_revoke_requires_revoke_permission(self, users):
+        """A member without the claim must be refused revoke with a named 403.
+
+        Clerk-a's role carries neither ``identity.break_glass.revoke`` nor
+        ``require_mfa``, so the default gates cannot fire and the denial has
+        to come from ``RequirePermission`` — whose detail names the missing
+        code, distinguishing this 403 from the MFA gate's. The record is
+        re-read afterwards: a refusal that still revoked would be no refusal.
+        """
+        from apps.identity_tenancy.models import BreakGlassAccess
+
+        grant_id = self._grant()
+        access = _token(APIClient(), "clerk-a")
+        assert "identity.break_glass.revoke" not in AccessToken(access).payload[
+            "permissions"
+        ]
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        response = client.get(f"/api/v1/break-glass/{grant_id}/revoke/")
+
+        assert response.status_code == 403, response.content
+        assert "identity.break_glass.revoke" in response.json()["detail"]
+        assert BreakGlassAccess.objects.get(pk=grant_id).revoked_at is None
+
+    def test_break_revoke_of_foreign_tenant_grant_404s(self, users):
+        """Another hospital's grant id must not resolve to a revocable row.
+
+        The detail lookup is tenant-scoped like every other tenant-owned
+        queryset: a foreign id answers 404, never 403 and never a mutation —
+        the existence of another tenant's grant is not disclosed, and the
+        request cannot touch the foreign row (TEN-002).
+        """
+        from apps.identity_tenancy.models import BreakGlassAccess
+
+        foreign = BreakGlassAccess.objects.create(
+            tenant_id=TENANT_B,
+            user_id=users["b"].id,
+            resource_type="patient",
+            resource_id="UH-B-0001",
+            reason="Foreign emergency",
+        )
+
+        response = self._admin_client(users).get(
+            f"/api/v1/break-glass/{foreign.id}/revoke/"
+        )
+
+        assert response.status_code == 404, response.content
+        foreign.refresh_from_db()
+        assert foreign.revoked_at is None
 
 
 class TestMfaDeviceManagement:
