@@ -2,7 +2,9 @@
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Case, IntegerField, When
+from django.http import HttpResponse
 from django.utils import timezone
+from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
@@ -10,6 +12,7 @@ from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.response import Response
 
 from common.tenant import TENANT_REQUIRED_MESSAGE, TenantScopedQuerysetMixin
+from . import csv_io
 from .models import (
     SETUP_STEPS,
     BaselineInput,
@@ -161,6 +164,61 @@ class BedViewSet(
     serializer_class = BedSerializer
     queryset = Bed.objects.all()
 
+    @extend_schema(
+        responses={200: OpenApiTypes.BINARY},
+        description=(
+            "Download this tenant's beds as a CSV attachment (SET-013). "
+            "Columns: ward, bed_number, functional, active — ward is the "
+            "ward's name."
+        ),
+    )
+    @action(detail=False, methods=["get"])
+    def export(self, request):
+        """Download the tenant's beds as a CSV attachment (SET-013).
+
+        ``self.get_queryset()`` applies the tenant-scoped mixin, so the
+        document holds this hospital's beds only; the header row is the fixed
+        SET-013 column set, ``ward`` as the ward's *name* so the matching
+        import can resolve it back within the tenant.
+        """
+        queryset = self.get_queryset().select_related("ward").order_by(
+            "ward__name", "bed_number"
+        )
+        response = HttpResponse(
+            csv_io.render_beds_csv(queryset), content_type="text/csv"
+        )
+        response["Content-Disposition"] = 'attachment; filename="beds.csv"'
+        return response
+
+    @extend_schema(
+        request=csv_io.CsvImportFileSerializer,
+        responses={200: csv_io.CsvImportResultSerializer},
+        description=(
+            "Import beds from a CSV upload (SET-013). Every row is validated "
+            "against the bed serializer and this tenant's wards before any "
+            "row is written; a single bad row writes nothing."
+        ),
+    )
+    @action(detail=False, methods=["post"], url_path="import")
+    def import_rows(self, request):
+        """Import beds from a CSV upload, all-or-nothing (SET-013).
+
+        The upload is read through the wrapper serializer (a missing file is
+        a 400), then ``parse_rows`` refuses a malformed document as a 422
+        before row inspection, and ``import_beds`` validates every row before
+        writing any — the atomicity is explicit in code because
+        ``ATOMIC_REQUESTS`` is False in the test profile. The tenant guard
+        mirrors ``TenantScopedQuerysetMixin.perform_create``: without a
+        resolved tenant there is nothing to scope the writes to.
+        """
+        tenant_id = self.get_tenant_id()
+        if not tenant_id:
+            raise PermissionDenied(TENANT_REQUIRED_MESSAGE)
+        upload = csv_io.CsvImportFileSerializer(data=request.data)
+        upload.is_valid(raise_exception=True)
+        rows = csv_io.parse_rows(upload.validated_data["file"], csv_io.BED_COLUMNS)
+        return Response(csv_io.import_beds(tenant_id, rows))
+
 
 class ServiceUnitViewSet(
     EffectiveDatedConfigMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet
@@ -173,9 +231,72 @@ class ServiceUnitViewSet(
 class StaffPositionViewSet(
     EffectiveDatedConfigMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet
 ):
-    """Staff positions by designation, specialty and department (SET-005)."""
+    """Staff positions by designation, specialty and department (SET-005).
+
+    The CSV surface (SET-013) mirrors the beds one: export downloads the
+    tenant's positions with the department as its name, import validates every
+    row before writing any, and the (department, designation) natural key
+    turns a re-imported export into in-place updates rather than duplicates.
+    """
     serializer_class = StaffPositionSerializer
     queryset = StaffPosition.objects.all()
+
+    @extend_schema(
+        responses={200: OpenApiTypes.BINARY},
+        description=(
+            "Download this tenant's staff positions as a CSV attachment "
+            "(SET-013). Columns: department, designation, specialty, "
+            "sanctioned, in_position — department is the department's name."
+        ),
+    )
+    @action(detail=False, methods=["get"])
+    def export(self, request):
+        """Download the tenant's staff positions as a CSV attachment (SET-013).
+
+        ``self.get_queryset()`` applies the tenant-scoped mixin, so the
+        document holds this hospital's positions only; the column set is
+        derived from the model (the department as its name plus the four
+        public scalar fields) and deliberately omits ``active``, which
+        ``StaffPosition`` does not have.
+        """
+        queryset = self.get_queryset().select_related("department").order_by(
+            "department__name", "designation"
+        )
+        response = HttpResponse(
+            csv_io.render_staff_positions_csv(queryset), content_type="text/csv"
+        )
+        response["Content-Disposition"] = 'attachment; filename="staff-positions.csv"'
+        return response
+
+    @extend_schema(
+        request=csv_io.CsvImportFileSerializer,
+        responses={200: csv_io.CsvImportResultSerializer},
+        description=(
+            "Import staff positions from a CSV upload (SET-013). Every row is "
+            "validated against the position serializer and this tenant's "
+            "departments before any row is written; a single bad row writes "
+            "nothing."
+        ),
+    )
+    @action(detail=False, methods=["post"], url_path="import")
+    def import_rows(self, request):
+        """Import staff positions from a CSV upload, all-or-nothing (SET-013).
+
+        Same shape as the beds import: wrapper serializer for the upload, 422
+        for a malformed document, row-by-row validation through
+        ``StaffPositionSerializer`` with department resolution scoped to the
+        caller's tenant, then one explicit transaction only when every row is
+        valid.
+        """
+        tenant_id = self.get_tenant_id()
+        if not tenant_id:
+            raise PermissionDenied(TENANT_REQUIRED_MESSAGE)
+        upload = csv_io.CsvImportFileSerializer(data=request.data)
+        upload.is_valid(raise_exception=True)
+        rows = csv_io.parse_rows(
+            upload.validated_data["file"], csv_io.STAFF_POSITION_COLUMNS
+        )
+        return Response(csv_io.import_staff_positions(tenant_id, rows))
 
 
 class ConfigRevisionViewSet(TenantScopedQuerysetMixin, viewsets.ReadOnlyModelViewSet):
