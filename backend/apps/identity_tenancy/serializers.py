@@ -4,8 +4,17 @@ from django.db import transaction
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 from .models import (
-    BreakGlassAccess, Department, Facility, Role, ServiceUnit, StaffPosition,
-    Tenant, Ward, Bed, UserMembership,
+    BreakGlassAccess,
+    Department,
+    Facility,
+    Role,
+    ServiceUnit,
+    SetupProgress,
+    StaffPosition,
+    Tenant,
+    Ward,
+    Bed,
+    UserMembership,
 )
 
 
@@ -408,3 +417,26 @@ class OnboardTenantSerializer(serializers.Serializer):
         from .services import onboard_tenant
 
         return onboard_tenant(**validated_data)
+
+
+class SetupProgressSerializer(serializers.ModelSerializer):
+    """Setup wizard step state: status + payload (SET-001, SET-008).
+
+    ``step_key`` comes from the URL, never the body — a client-provided key
+    could write a step the declared wizard does not contain. ``complete`` is a
+    derived flag (``status == "complete"``) kept read-only so the flag can
+    never contradict the stored status. Both ``status`` and ``payload`` are
+    optional on PUT: missing fields leave the stored value untouched, and a
+    fresh step is created with the model defaults (pending, empty payload) —
+    saving data does not imply finishing the step.
+    """
+
+    complete = serializers.SerializerMethodField()
+
+    class Meta:
+        model = SetupProgress
+        fields = ["step_key", "status", "payload", "complete", "updated_at"]
+        read_only_fields = ["step_key", "updated_at", "complete"]
+
+    def get_complete(self, obj) -> bool:
+        return obj.status == SetupProgress.Status.COMPLETE

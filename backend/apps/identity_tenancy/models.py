@@ -1,4 +1,4 @@
-"""Identity, tenancy and administration models (TEN-001 to TEN-011)."""
+"""Identity, tenancy and administration models (TEN-001 to TEN-011, SET-001, SET-008, SET-009)."""
 import uuid
 
 from django.conf import settings
@@ -199,3 +199,63 @@ class BreakGlassAccess(models.Model):
     class Meta:
         db_table = "identity.break_glass_access"
         indexes = [models.Index(fields=["tenant_id", "granted_at"])]
+
+
+#: The setup wizard's steps, in UI_UX design doc section 7 order. The wizard
+#: is a fixed sequence — the UI stepper renders this order and nothing else —
+#: so the list lives beside the model that stores progress rather than in the
+#: view, and the view orchestrates its responses from it. The brief's wording
+#: is authoritative: each key mirrors one step of the onboarding flow
+#: (SET-001).
+SETUP_STEPS = (
+    "hospital_identity",
+    "ownership_level",
+    "address",
+    "abdm_hfr_ids",
+    "accreditation",
+    "departments_wards_beds",
+    "service_units",
+    "staff_positions",
+    "reference_data",
+    "indicators_baseline",
+)
+
+
+class SetupProgress(models.Model):
+    """Resumable setup wizard step state (SET-001, SET-008, SET-009).
+
+    One row per step per tenant: the ``(tenant_id, step_key)`` pair is unique,
+    so resuming a session (SET-008) or editing configuration after setup
+    (SET-009) mutates the same row instead of stacking duplicates. ``payload``
+    is deliberately free-form JSON — each step's form has its own shape, and
+    a volatile clinical form should not be frozen into columns (AGENTS.md
+    models rule). Completion is an explicit status, never implied by a
+    non-empty payload: saving form data and finishing the step are different
+    wizard events.
+
+    ``updated_at`` is ``auto_now`` so the wizard can sort and display "last
+    touched" state without trusting the client's clock.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        IN_PROGRESS = "in_progress", "In progress"
+        COMPLETE = "complete", "Complete"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
+    step_key = models.CharField(max_length=64)
+    status = models.CharField(
+        max_length=16, choices=Status.choices, default=Status.PENDING
+    )
+    payload = models.JSONField(default=dict, blank=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        db_table = "identity.setup_progress"
+        # The unique index on (tenant_id, step_key) leads with tenant_id, so
+        # it doubles as the tenant-scoped lookup index for the viewset's
+        # ``filter(tenant_id=..., step_key=...)`` — mirroring Role's
+        # declaration of both the constraint and the index.
+        unique_together = [["tenant_id", "step_key"]]
+        indexes = [models.Index(fields=["tenant_id", "step_key"])]

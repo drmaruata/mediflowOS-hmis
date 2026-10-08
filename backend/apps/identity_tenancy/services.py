@@ -17,12 +17,17 @@ PLATFORM_ADMIN_SEED_PERMISSIONS = [
     "identity.roles.write",
     "identity.memberships.write",
     "identity.break_glass.revoke",
+    # SET-001: the first admin lands on the setup wizard right after
+    # onboarding (UI_UX: onboarding exits to setup), so the seeded admin must
+    # be able to drive it without asking someone to mint a gated role first.
+    "identity.setup.manage",
 ]
 
 TENANT_ADMIN_SEED_PERMISSIONS = [
     "identity.users.manage",
     "identity.roles.write",
     "identity.memberships.write",
+    "identity.setup.manage",
 ]
 
 

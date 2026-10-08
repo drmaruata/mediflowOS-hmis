@@ -2,20 +2,43 @@
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError
 from django.utils import timezone
-from drf_spectacular.utils import extend_schema
+from drf_spectacular.utils import OpenApiParameter, extend_schema
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.response import Response
 
 from common.tenant import TENANT_REQUIRED_MESSAGE, TenantScopedQuerysetMixin
-from .models import BreakGlassAccess, Department, Facility, Role, ServiceUnit, StaffPosition, Tenant, Ward, Bed, UserMembership
+from .models import (
+    SETUP_STEPS,
+    BreakGlassAccess,
+    Department,
+    Facility,
+    Role,
+    ServiceUnit,
+    SetupProgress,
+    StaffPosition,
+    Tenant,
+    Ward,
+    Bed,
+    UserMembership,
+)
 from .permissions import RequirePermission, WritePermissionMixin
 from .serializers import (
-    BreakGlassAccessSerializer, DepartmentSerializer, FacilitySerializer,
-    RoleSerializer, ServiceUnitSerializer, StaffPositionSerializer,
-    TenantSerializer, WardSerializer, BedSerializer, UserMembershipSerializer,
-    UserCreateSerializer, UserSerializer, OnboardTenantSerializer,
+    BreakGlassAccessSerializer,
+    DepartmentSerializer,
+    FacilitySerializer,
+    RoleSerializer,
+    ServiceUnitSerializer,
+    SetupProgressSerializer,
+    StaffPositionSerializer,
+    TenantSerializer,
+    WardSerializer,
+    BedSerializer,
+    UserMembershipSerializer,
+    UserCreateSerializer,
+    UserSerializer,
+    OnboardTenantSerializer,
 )
 
 
@@ -273,3 +296,118 @@ class BreakGlassViewSet(TenantScopedQuerysetMixin, viewsets.GenericViewSet):
         access.revoked_at = timezone.now()
         access.save(update_fields=["revoked_at"])
         return Response(BreakGlassAccessSerializer(access).data)
+
+
+class SetupProgressViewSet(
+    WritePermissionMixin, TenantScopedQuerysetMixin, viewsets.GenericViewSet
+):
+    """Resumable setup wizard state (SET-001, SET-008, SET-009).
+
+    ``GET /setup/`` is *orchestrated*, not a queryset dump: the declared
+    ordered step list (``SETUP_STEPS``) is the spine, and stored rows only
+    supply each step's saved state — a step with no row still appears as a
+    pending, incomplete step, which is what lets a resumed session see the
+    whole wizard and what ``?incomplete=true`` narrows to (SET-008).
+    ``PUT /setup/{step_key}/`` upserts one step's state: the
+    ``(tenant_id, step_key)`` uniqueness makes a resumption update the same
+    row rather than stack duplicates.
+
+    Writes are gated on the ``identity.setup.manage`` claim via
+    ``WritePermissionMixin``; reads stay authorised by authentication plus
+    tenant scoping like every other tenant-owned resource. The tenant guard
+    and the AUD-001/SET-012 audit event are replicated from
+    ``TenantScopedQuerysetMixin``'s hooks because the upsert goes through
+    ``update_or_create`` rather than ``serializer.save()`` — the same reason
+    ``UserViewSet.perform_create`` replicates them.
+    """
+
+    serializer_class = SetupProgressSerializer
+    queryset = SetupProgress.objects.all()
+    write_permission = "identity.setup.manage"
+
+    def _step_summary(self, step_key: str, row: SetupProgress | None) -> dict:
+        """One wizard step's canonical representation (SET-001, SET-008).
+
+        A step with no stored row renders as the model default — ``pending``,
+        no payload, not complete — so the list built from this helper always
+        covers the full wizard. Rows reuse the serializer so the ``complete``
+        flag is computed in exactly one place; an absent row has nothing to
+        serialize, so its defaults are spelled out here.
+        """
+        if row is None:
+            return {
+                "step_key": step_key,
+                "status": SetupProgress.Status.PENDING,
+                "payload": None,
+                "complete": False,
+                "updated_at": None,
+            }
+        return self.get_serializer(row).data
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="incomplete",
+                description=(
+                    "When exactly 'true', return only steps whose status is "
+                    "not 'complete' (SET-008)."
+                ),
+                required=False,
+            ),
+        ],
+        responses={200: SetupProgressSerializer(many=True)},
+    )
+    def list(self, request):
+        """The ordered wizard, each step flagged complete or not (SET-001, SET-008).
+
+        ``incomplete=true`` filters the same orchestrated list to the steps a
+        resumed session still has to finish; the flag on each item is what
+        the frontend stepper keys off either way. Only the literal ``true``
+        opts in, so an arbitrary or malformed value cannot silently truncate
+        what the UI shows.
+        """
+        rows = {row.step_key: row for row in self.get_queryset()}
+        only_incomplete = request.query_params.get("incomplete", "").lower() == "true"
+
+        items = []
+        for step_key in SETUP_STEPS:
+            item = self._step_summary(step_key, rows.get(step_key))
+            if only_incomplete and item["complete"]:
+                continue
+            items.append(item)
+        return Response(items)
+
+    @extend_schema(
+        request=SetupProgressSerializer,
+        responses={200: SetupProgressSerializer},
+    )
+    def update(self, request, pk=None):
+        """Upsert one step's saved state; re-PUT updates the same row (SET-001).
+
+        The step key is validated against the declared wizard before any write
+        so a typo 404s instead of minting a row the orchestrated list would
+        never render. ``update_or_create`` turns a resumed session's PUT into
+        an update of the existing row (the unique ``(tenant_id, step_key)``
+        contract), and the answer is 200 whether the row was created or
+        refreshed — PUT is idempotent, so the client never needs to branch on
+        201 vs 200. The audit event records ``create`` or ``update`` per the
+        row's actual fate (SET-012).
+        """
+        if pk not in SETUP_STEPS:
+            raise NotFound(f"Unknown setup step: {pk!r}.")
+        serializer = self.get_serializer(data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+
+        tenant_id = self.get_tenant_id()
+        if not tenant_id:
+            raise PermissionDenied(TENANT_REQUIRED_MESSAGE)
+
+        step, created = SetupProgress.objects.update_or_create(
+            tenant_id=tenant_id,
+            step_key=pk,
+            defaults=serializer.validated_data,
+        )
+        self._write_audit_log(step, "create" if created else "update")
+        return Response(
+            self._step_summary(pk, step), status=status.HTTP_200_OK
+        )
