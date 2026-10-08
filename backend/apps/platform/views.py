@@ -48,7 +48,7 @@ class PlatformFileViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         serializer.save(**{"tenant_id": tenant_id})
 
 
-class ScheduledJobViewSet(viewsets.ReadOnlyModelViewSet):
-    """Background job visibility (PLT-004)."""
+class ScheduledJobViewSet(TenantScopedQuerysetMixin, viewsets.ReadOnlyModelViewSet):
+    """Background job visibility (PLT-004), scoped to the request's tenant (TEN-002)."""
     serializer_class = ScheduledJobSerializer
     queryset = ScheduledJob.objects.all()

@@ -25,7 +25,16 @@ class Command(BaseCommand):
                 tenant=None,
                 name="platform_admin",
                 defaults={
-                    "permissions": ["all"],
+                    # "all" is a human marker; the RBAC gate introduced with
+                    # TEN-004 reads explicit codes only, so the seeded
+                    # platform admin carries each one it needs.
+                    "permissions": [
+                        "all",
+                        "platform.tenants.manage",
+                        "identity.roles.write",
+                        "identity.memberships.write",
+                        "quality.catalogue.manage",
+                    ],
                     "allows_break_glass": True,
                     "require_mfa": False,  # Ease of dev
                 }

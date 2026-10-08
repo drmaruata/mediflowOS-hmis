@@ -8,6 +8,7 @@ empty result rather than every tenant's rows.
 import uuid
 
 import pytest
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db]
@@ -85,6 +86,52 @@ class TestTenantScopedReads:
         response = _client_for(TENANT_B, user).get("/api/v1/patients/")
 
         assert [row["uhid"] for row in response.json()["results"]] == ["UH0002"]
+
+    def test_role_list_is_tenant_scoped(self, two_tenants, user):
+        """Tenant A's role names must never appear in tenant B's GET /roles/ (TEN-004).
+
+        RoleViewSet had no queryset scoping at all before TEN-004, so any
+        authenticated tenant could enumerate every hospital's role catalogue —
+        names and permission bundles alike. The owning tenant's own role must
+        still be visible, otherwise an empty list would pass for isolation.
+        """
+        from apps.identity_tenancy.models import Role
+
+        Role.objects.create(tenant_id=TENANT_A, name="alpha-only-clinicians")
+        Role.objects.create(tenant_id=TENANT_B, name="beta-only-clinicians")
+
+        response = _client_for(TENANT_B, user).get("/api/v1/roles/")
+
+        assert response.status_code == 200
+        body = str(response.json())
+        assert "alpha-only-clinicians" not in body
+        assert "beta-only-clinicians" in body
+
+    def test_scheduled_job_list_is_tenant_scoped(self, two_tenants, user):
+        """ScheduledJob rows of tenant A must never appear in tenant B's list (TEN-002).
+
+        ScheduledJob is tenant-owned (PLT-004) but its viewset was unscoped,
+        so job types and run results leaked across tenants. Job type doubles
+        as the row marker: each tenant gets a distinct one so the assertion
+        tells the two rows apart rather than only counting them.
+        """
+        from apps.platform.models import ScheduledJob
+
+        ScheduledJob.objects.create(
+            tenant_id=TENANT_A, job_type="report_generation",
+            scheduled_at=timezone.now(),
+        )
+        ScheduledJob.objects.create(
+            tenant_id=TENANT_B, job_type="indicator_computation",
+            scheduled_at=timezone.now(),
+        )
+
+        response = _client_for(TENANT_B, user).get("/api/v1/scheduled-jobs/")
+
+        assert response.status_code == 200
+        body = str(response.json())
+        assert "report_generation" not in body
+        assert "indicator_computation" in body
 
 
 class TestUnresolvedTenantFailsClosed:

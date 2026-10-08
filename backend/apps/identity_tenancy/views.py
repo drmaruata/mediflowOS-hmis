@@ -6,6 +6,7 @@ from rest_framework.response import Response
 
 from common.tenant import TenantScopedQuerysetMixin
 from .models import BreakGlassAccess, Department, Facility, Role, ServiceUnit, StaffPosition, Tenant, Ward, Bed, UserMembership
+from .permissions import RequirePermission, WritePermissionMixin
 from .serializers import (
     BreakGlassAccessSerializer, DepartmentSerializer, FacilitySerializer,
     RoleSerializer, ServiceUnitSerializer, StaffPositionSerializer,
@@ -14,9 +15,22 @@ from .serializers import (
 
 
 class TenantViewSet(viewsets.ModelViewSet):
-    """Tenants are the tenancy root, so they are not tenant-scoped."""
+    """Tenants are the tenancy root, so they are not tenant-scoped.
+
+    They are platform-owned instead: every method — list, detail, create and
+    the onboard action — requires the ``platform.tenants.manage`` claim
+    (TEN-004, TEN-010), which the platform-scope role (``Role.tenant is None``)
+    is expected to hold. A tenant administrator must be able to neither
+    enumerate other hospitals' tenants nor mint new ones.
+    """
     serializer_class = TenantSerializer
     queryset = Tenant.objects.all()
+
+    def get_permissions(self):
+        # Appended after the defaults, so anonymous requests still fail as 401
+        # (IsAuthenticated first) and the MFA gate stays in force — see
+        # common/mfa.py on views replacing DEFAULT_PERMISSION_CLASSES.
+        return [*super().get_permissions(), RequirePermission("platform.tenants.manage")]
 
     @action(detail=False, methods=["post"])
     def onboard(self, request):
@@ -57,24 +71,31 @@ class StaffPositionViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
     queryset = StaffPosition.objects.all()
 
 
-class RoleViewSet(viewsets.ModelViewSet):
-    """Role management (TEN-004)."""
+class RoleViewSet(WritePermissionMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet):
+    """Role management (TEN-004).
+
+    Scoping keeps each hospital's role catalogue — names and permission
+    bundles — out of every other tenant's list. Platform-scope roles
+    (``tenant is None``) belong to no tenant's list either: exposing them
+    here would let a tenant administrator edit the platform's own roles.
+    Writes require the ``identity.roles.write`` claim.
+    """
     serializer_class = RoleSerializer
     queryset = Role.objects.all()
+    write_permission = "identity.roles.write"
 
 
-class UserMembershipViewSet(viewsets.ModelViewSet):
-    """Tenant membership assignment (TEN-004)."""
+class UserMembershipViewSet(WritePermissionMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet):
+    """Tenant membership assignment (TEN-004).
+
+    Tenant stamping and the audit trail (AUD-001) both come from
+    ``TenantScopedQuerysetMixin``'s ``perform_*`` hooks — the local
+    ``perform_create`` this viewset used to carry duplicated the stamping and
+    wrote no audit row. Writes require the ``identity.memberships.write`` claim.
+    """
     serializer_class = UserMembershipSerializer
     queryset = UserMembership.objects.all()
-
-    def perform_create(self, serializer):
-        """Stamp the tenant from the request."""
-        tenant_id = getattr(self.request, "tenant_id", None)
-        if not tenant_id:
-            from rest_framework.exceptions import PermissionDenied
-            raise PermissionDenied("A tenant must be resolved before creating a membership.")
-        serializer.save(**{"tenant_id": tenant_id})
+    write_permission = "identity.memberships.write"
 
 
 class BreakGlassViewSet(viewsets.ViewSet):

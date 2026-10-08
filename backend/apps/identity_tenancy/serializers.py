@@ -59,14 +59,17 @@ class RoleSerializer(serializers.ModelSerializer):
     class Meta:
         model = Role
         fields = "__all__"
-        read_only_fields = ["id", "created_at"]
+        # tenant is server-owned: TenantScopedQuerysetMixin stamps it on
+        # create, and a writable tenant on update would let a caller move a
+        # role into another tenant (common/tenant.py states this contract).
+        read_only_fields = ["id", "created_at", "tenant"]
 
 
 class UserMembershipSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserMembership
         fields = "__all__"
-        read_only_fields = ["id", "active"]
+        read_only_fields = ["id", "active", "tenant"]
 
 
 class BreakGlassAccessSerializer(serializers.ModelSerializer):

@@ -48,7 +48,9 @@ class TestIdentityTenancyAPI:
             abdm_hip_id="HIP-TEST-001",
         )
         self.client, self.user, self.role = _make_client(
-            "admin", self.tenant, self.facility, "admin", ["all"],
+            # platform.tenants.manage: tenant list/onboard are gated on it
+            # since TEN-004; "all" is a marker no permission class reads.
+            "admin", self.tenant, self.facility, "admin", ["all", "platform.tenants.manage"],
         )
         self.department = Department.objects.create(
             tenant=self.tenant, facility=self.facility, name="Medicine", effective_from="2026-01-01",
