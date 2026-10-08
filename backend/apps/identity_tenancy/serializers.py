@@ -206,9 +206,12 @@ class UserCreateSerializer(serializers.ModelSerializer):
     :meth:`to_representation`).
     """
     password = serializers.CharField(write_only=True)
-    #: Resolved to a Role instance, then tenant-checked in validate_role_id —
-    #: a bare existence check would accept another hospital's role.
-    role_id = serializers.PrimaryKeyRelatedField(queryset=Role.objects.all())
+    #: A bare UUID resolved through ONE tenant-scoped lookup in
+    #: validate_role_id — the field itself must not fetch, or an unknown pk
+    #: would fail with PrimaryKeyRelatedField's global "does not exist" while
+    #: a foreign tenant's role failed with the scoped message, disclosing
+    #: which pks exist anywhere. Same shape as validate_facility_id below.
+    role_id = serializers.UUIDField()
     #: A bare UUID on the model (no FK), so tenant-checking happens here.
     facility_id = serializers.UUIDField(required=False, allow_null=True)
 
@@ -254,13 +257,18 @@ class UserCreateSerializer(serializers.ModelSerializer):
         ``role.permissions`` verbatim, so a membership wired to another
         hospital's role — or to a platform-scoped role with ``tenant is
         None`` — would grant that role's permission bundle inside this
-        tenant. The comparison is the authorisation decision; the field has
-        already fetched the instance by primary key.
+        tenant. The scoped lookup IS the authorisation decision, and running
+        it as one filter (as ``validate_facility_id`` does below) answers
+        "unknown pk" and "foreign pk" with the same refusal — a distinct
+        "does not exist" error would confirm that a role pk exists somewhere
+        in the installation, which is the disclosure ``validate_facility_id``
+        documents avoiding. Returns the resolved instance for ``create()``.
         """
         tenant_id = self._require_tenant()
-        if value.tenant_id is None or str(value.tenant_id) != str(tenant_id):
+        role = Role.objects.filter(pk=value, tenant_id=tenant_id).first()
+        if role is None:
             raise serializers.ValidationError("Role does not exist in this tenant.")
-        return value
+        return role
 
     def validate_facility_id(self, value):
         """The facility must belong to the caller's tenant (TEN-008, TEN-002).

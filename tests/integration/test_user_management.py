@@ -277,6 +277,63 @@ class TestUserManagement:
         after = APIClient().post("/api/v1/auth/token/", credentials, format="json")
         assert after.status_code == 401, after.content
 
+    def test_deactivation_refuses_token_refresh(self, roles, manager_client):
+        """TEN-008 fail-closed at *refresh*: an offboarded session must not survive rotation.
+
+        The obtain-path refusal only bites at the next login. With
+        ``REFRESH_TOKEN_LIFETIME`` of a day and rotation carrying the tenant
+        claims forward, a live refresh token would otherwise keep minting
+        fully-claimed access tokens for a membership that has been switched
+        off — deactivation would never actually take effect for a session
+        already in progress. Two controls pin the pre-conditions: a second,
+        independently issued refresh token is refreshed *before* the
+        deactivation (200), proving the refresh route works and that only the
+        membership flag changes the outcome — the post-deactivation attempt
+        uses a different token because rotation blacklists the one the
+        control consumed. The membership row is re-read from the database
+        afterwards: a 401 for an unrelated reason (e.g. a blacklisted token)
+        must not pass this test while the refusal never fires.
+        """
+        from apps.identity_tenancy.models import UserMembership
+
+        created = manager_client.post(
+            "/api/v1/users/", _payload(roles, username="leaver-refresh"), format="json"
+        )
+        assert created.status_code == 201, created.content
+        user_id = created.json()["id"]
+        credentials = {"username": "leaver-refresh", "password": TEST_PASSWORD}
+
+        first_pair = APIClient().post(
+            "/api/v1/auth/token/", credentials, format="json"
+        )
+        assert first_pair.status_code == 200, first_pair.content
+        second_pair = APIClient().post(
+            "/api/v1/auth/token/", credentials, format="json"
+        )
+        assert second_pair.status_code == 200, second_pair.content
+        control_refresh = first_pair.json()["refresh"]
+        held_refresh = second_pair.json()["refresh"]
+
+        # Control: a refresh token for this user works while the membership
+        # is active — without it the 401 below could come from a broken route.
+        control = APIClient().post(
+            "/api/v1/auth/token/refresh/", {"refresh": control_refresh}, format="json"
+        )
+        assert control.status_code == 200, control.content
+
+        deactivated = manager_client.post(f"/api/v1/users/{user_id}/deactivate/")
+        assert deactivated.status_code == 200, deactivated.content
+
+        response = APIClient().post(
+            "/api/v1/auth/token/refresh/", {"refresh": held_refresh}, format="json"
+        )
+        assert response.status_code == 401, response.content
+
+        membership = UserMembership.objects.get(
+            user__username="leaver-refresh", tenant_id=TENANT_A
+        )
+        assert membership.active is False
+
     def test_create_without_users_manage_permission_returns_403(
         self, roles, clerk
     ):
@@ -337,6 +394,41 @@ class TestUserManagement:
         assert response.status_code == 400, response.content
         assert not get_user_model().objects.filter(username="foreign-role-user").exists()
 
+    def test_role_id_failures_do_not_disclose_existence(self, roles, manager_client):
+        """A foreign-tenant role_id and an unknown role_id must fail identically (TEN-008).
+
+        If "exists in another hospital" were answered with the tenant-scoped
+        refusal while "exists nowhere" fell through to PrimaryKeyRelatedField's
+        global "does not exist", the difference between the two 400s would be
+        an oracle: a caller could enumerate which role primary keys exist
+        anywhere in the installation. That is exactly the disclosure
+        ``validate_facility_id``'s single scoped filter avoids for facilities,
+        so both payloads must come back with the same class of answer — the
+        identical refusal body — and neither may confirm the other's existence.
+        """
+        foreign_payload = _payload(roles, username="foreign-role-probe")
+        foreign_payload["role_id"] = str(roles["foreign"].id)
+        unknown_payload = _payload(roles, username="unknown-role-probe")
+        unknown_payload["role_id"] = str(uuid.uuid4())
+
+        foreign = manager_client.post("/api/v1/users/", foreign_payload, format="json")
+        unknown = manager_client.post("/api/v1/users/", unknown_payload, format="json")
+
+        assert foreign.status_code == 400, foreign.content
+        assert unknown.status_code == 400, unknown.content
+        # Same status AND same body: "exists elsewhere" and "exists nowhere"
+        # must be indistinguishable from the response alone.
+        assert foreign.json() == unknown.json(), (
+            f"role_id failures differ ({foreign.json()} vs {unknown.json()}): "
+            "the delta discloses whether a role pk exists in another tenant"
+        )
+        assert not get_user_model().objects.filter(
+            username="foreign-role-probe"
+        ).exists()
+        assert not get_user_model().objects.filter(
+            username="unknown-role-probe"
+        ).exists()
+
     def test_create_with_unknown_facility_is_rejected(self, roles, manager_client):
         """facility_id must resolve inside the tenant (TEN-008).
 
@@ -395,3 +487,140 @@ class TestUserManagement:
         assert response.status_code == 200, response.content
         refreshed = get_user_model().objects.get(username="contact-change")
         assert refreshed.email == "new-address@example.org"
+
+    def test_duplicate_username_is_rejected(self, roles, manager_client):
+        """A second create with an existing username must 400 (TEN-008).
+
+        Pins the UniqueValidator DRF derives from ``auth.User.username`` being
+        unique: without it the create would either raise IntegrityError as a
+        500 or — worse — reach ``create()`` and attach a second membership to
+        an account it could not name.
+        """
+        from apps.identity_tenancy.models import UserMembership
+
+        first = manager_client.post(
+            "/api/v1/users/", _payload(roles, username="dup-user"), format="json"
+        )
+        assert first.status_code == 201, first.content
+
+        second = manager_client.post(
+            "/api/v1/users/", _payload(roles, username="dup-user"), format="json"
+        )
+
+        assert second.status_code == 400, second.content
+        assert "username" in second.json()
+        # One account, one membership — the refused create wrote nothing.
+        assert get_user_model().objects.filter(username="dup-user").count() == 1
+        assert UserMembership.objects.filter(
+            user__username="dup-user", tenant_id=TENANT_A
+        ).count() == 1
+
+    def test_missing_role_id_is_rejected(self, roles, manager_client):
+        """role_id is required: a membership without a role could never be
+        granted or checked a permission (TEN-008).
+
+        Pins the field's ``required`` — a default of ``None`` would let the
+        create through to ``UserMembership(role=None)``, producing a member
+        whose token claim set is undefined.
+        """
+        payload = _payload(roles, username="no-role-user")
+        del payload["role_id"]
+
+        response = manager_client.post("/api/v1/users/", payload, format="json")
+
+        assert response.status_code == 400, response.content
+        assert "role_id" in response.json()
+        assert not get_user_model().objects.filter(username="no-role-user").exists()
+
+    def test_re_deactivate_is_idempotent_without_second_audit_row(
+        self, roles, manager_client
+    ):
+        """Deactivating twice must 200 and add no second audit row (TEN-008).
+
+        The guard in ``UserViewSet.deactivate`` skips the write when the
+        membership is already inactive. Pinning both halves of that contract:
+        the retry is an idempotent success (200, not 409) because a client
+        retrying an offboarding must not be told the state is conflicting,
+        and the AUD-001 trail must still show exactly one deactivation —
+        an audit row per retry would misstate how often an account was cut off.
+        """
+        from apps.audit.models import AuditEvent
+        from apps.identity_tenancy.models import UserMembership
+
+        created = manager_client.post(
+            "/api/v1/users/", _payload(roles, username="twice-off"), format="json"
+        )
+        assert created.status_code == 201, created.content
+        user_id = created.json()["id"]
+
+        first = manager_client.post(f"/api/v1/users/{user_id}/deactivate/")
+        assert first.status_code == 200, first.content
+        assert first.json()["active"] is False
+        audit_rows = AuditEvent.objects.filter(
+            tenant_id=TENANT_A,
+            action="deactivate",
+            entity_type="auth_user",
+            entity_id=str(user_id),
+        ).count()
+        assert audit_rows == 1
+
+        second = manager_client.post(f"/api/v1/users/{user_id}/deactivate/")
+
+        assert second.status_code == 200, second.content
+        assert second.json()["active"] is False
+        assert (
+            AuditEvent.objects.filter(
+                tenant_id=TENANT_A,
+                action="deactivate",
+                entity_type="auth_user",
+                entity_id=str(user_id),
+            ).count()
+            == audit_rows
+        )
+        assert UserMembership.objects.get(
+            user__username="twice-off", tenant_id=TENANT_A
+        ).active is False
+
+    def test_patch_and_deactivate_require_users_manage(self, roles, clerk, manager_client):
+        """PATCH and deactivate must 403 naming identity.users.manage (TEN-008).
+
+        Both are non-safe methods, so ``WritePermissionMixin`` appends the
+        ``RequirePermission`` gate to them the same way it does for create —
+        asserted the way ``test_rbac_enforcement`` does after Task 2's fix:
+        the detail must name the missing code, or a 403 from a different gate
+        (MFA, authentication) would look identical to a claim denial. The
+        target's state is re-read afterwards, so a refusal that still wrote
+        cannot pass.
+        """
+        from apps.identity_tenancy.models import UserMembership
+
+        created = manager_client.post(
+            "/api/v1/users/", _payload(roles, username="guarded"), format="json"
+        )
+        assert created.status_code == 201, created.content
+        user_id = created.json()["id"]
+
+        access = _login(clerk.username)
+        assert "identity.users.manage" not in AccessToken(access).payload[
+            "permissions"
+        ]
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        patch = client.patch(
+            f"/api/v1/users/{user_id}/",
+            {"email": "sneaky@example.org"},
+            format="json",
+        )
+        assert patch.status_code == 403, patch.content
+        assert "identity.users.manage" in patch.json()["detail"]
+
+        deactivate = client.post(f"/api/v1/users/{user_id}/deactivate/")
+        assert deactivate.status_code == 403, deactivate.content
+        assert "identity.users.manage" in deactivate.json()["detail"]
+
+        unchanged = get_user_model().objects.get(username="guarded")
+        assert unchanged.email == "guarded@example.org"
+        assert UserMembership.objects.get(
+            user__username="guarded", tenant_id=TENANT_A
+        ).active is True

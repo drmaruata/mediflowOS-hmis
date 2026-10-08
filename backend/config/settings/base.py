@@ -161,6 +161,12 @@ SPECTACULAR = {
 # client-supplied header. See apps/identity_tenancy/tokens.py.
 SIMPLE_JWT = {
     "TOKEN_OBTAIN_SERIALIZER": "apps.identity_tenancy.tokens.TenantAwareTokenSerializer",
+    # Fail-closed deactivation (TEN-008): the obtain serializer refuses a
+    # switched-off membership only at the *next* login, so without a matching
+    # refresh-time refusal a live refresh token outruns deactivation — tenant
+    # and permission claims survive rotation, and an offboarded user would
+    # keep minting fully-claimed access tokens until REFRESH_TOKEN_LIFETIME.
+    "TOKEN_REFRESH_SERIALIZER": "apps.identity_tenancy.tokens.TenantAwareTokenRefreshSerializer",
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
     # Tenants hold clinical records, so a leaked refresh token should not stay

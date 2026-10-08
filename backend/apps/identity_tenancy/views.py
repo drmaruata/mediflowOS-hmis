@@ -7,7 +7,7 @@ from rest_framework.exceptions import NotFound, PermissionDenied
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
-from common.tenant import TenantScopedQuerysetMixin
+from common.tenant import TENANT_REQUIRED_MESSAGE, TenantScopedQuerysetMixin
 from .models import BreakGlassAccess, Department, Facility, Role, ServiceUnit, StaffPosition, Tenant, Ward, Bed, UserMembership
 from .permissions import RequirePermission, WritePermissionMixin
 from .serializers import (
@@ -157,9 +157,7 @@ class UserViewSet(WritePermissionMixin, TenantScopedQuerysetMixin, viewsets.Mode
         """
         tenant_id = self.get_tenant_id()
         if not tenant_id:
-            raise PermissionDenied(
-                "A tenant must be resolved before tenant-owned data can be written."
-            )
+            raise PermissionDenied(TENANT_REQUIRED_MESSAGE)
         serializer.save(tenant_id=tenant_id)
         self._write_audit_log(serializer.instance, "create")
 
