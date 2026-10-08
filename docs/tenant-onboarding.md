@@ -76,8 +76,12 @@ code, which is illegal on tenant-scoped roles (TEN-004).
 
 | Role | Seeds |
 | --- | --- |
-| `platform_admin` (tenant-scoped) | `identity.users.manage`, `identity.roles.write`, `identity.memberships.write`, `identity.break_glass.revoke` |
-| `tenant_admin` (tenant-scoped) | `identity.users.manage`, `identity.roles.write`, `identity.memberships.write` |
+| `platform_admin` (tenant-scoped) | `identity.users.manage`, `identity.roles.write`, `identity.memberships.write`, `identity.break_glass.revoke`, `identity.setup.manage` |
+| `tenant_admin` (tenant-scoped) | `identity.users.manage`, `identity.roles.write`, `identity.memberships.write`, `identity.setup.manage` |
+
+Both seeds carry `identity.setup.manage` (SET-001): onboarding exits into the
+setup wizard, so the seeded admins can read and write wizard state immediately
+instead of waiting for someone to mint a gated role first.
 
 The platform operator's own account and role are seeded separately by
 `manage.py seed_dev_data`; onboarding only seeds **this** tenant's roles.
