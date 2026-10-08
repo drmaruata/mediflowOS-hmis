@@ -103,9 +103,9 @@ class TestTenantScopedReads:
         response = _client_for(TENANT_B, user).get("/api/v1/roles/")
 
         assert response.status_code == 200
-        body = str(response.json())
-        assert "alpha-only-clinicians" not in body
-        assert "beta-only-clinicians" in body
+        rows = response.json()["results"]
+        assert [row["name"] for row in rows] == ["beta-only-clinicians"]
+        assert {row["tenant"] for row in rows} == {str(TENANT_B)}
 
     def test_scheduled_job_list_is_tenant_scoped(self, two_tenants, user):
         """ScheduledJob rows of tenant A must never appear in tenant B's list (TEN-002).
@@ -129,9 +129,9 @@ class TestTenantScopedReads:
         response = _client_for(TENANT_B, user).get("/api/v1/scheduled-jobs/")
 
         assert response.status_code == 200
-        body = str(response.json())
-        assert "report_generation" not in body
-        assert "indicator_computation" in body
+        rows = response.json()["results"]
+        assert [row["job_type"] for row in rows] == ["indicator_computation"]
+        assert {row["tenant_id"] for row in rows} == {str(TENANT_B)}
 
 
 class TestUnresolvedTenantFailsClosed:

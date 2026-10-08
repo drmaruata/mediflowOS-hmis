@@ -79,10 +79,13 @@ KNOWN_GAPS = {
     "TEN-004": (
         "partial",
         "RequirePermission reads the token's `permissions` claim and gates the "
-        "role/membership writes, tenant CRUD and the quality catalogue, and "
-        "role/membership/scheduled-job querysets are tenant-scoped — but most "
-        "endpoints still authorise by authentication alone, and "
-        "facility/department-scoped permissions (TEN-005) are unimplemented",
+        "role/membership writes, tenant CRUD and the quality catalogue, "
+        "RoleSerializer rejects `platform.` codes on tenant-scoped roles at "
+        "the write path (platform scope = Role.tenant is None; token-level "
+        "scope binding deferred), and role/membership/scheduled-job "
+        "querysets are tenant-scoped — but most endpoints still authorise "
+        "by authentication alone, and facility/department-scoped "
+        "permissions (TEN-005) are unimplemented",
     ),
     "TEN-006": (
         "partial",

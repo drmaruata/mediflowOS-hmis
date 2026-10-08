@@ -25,10 +25,17 @@ from apps.audit.models import AuditEvent
 pytestmark = [pytest.mark.integration, pytest.mark.django_db]
 
 
-def _make_client(username, tenant, facility, role_name, permissions):
-    """Helper: create user, membership, and return APIClient with token."""
+def _make_client(username, tenant, facility, role_name, permissions, platform_scoped=False):
+    """Helper: create user, membership, and return APIClient with token.
+
+    ``platform_scoped=True`` creates the role with ``tenant=None`` — the only
+    legitimate shape for a role holding ``platform.*`` codes, since
+    ``RoleSerializer`` refuses them on tenant-scoped roles (TEN-004).
+    """
     user = get_user_model().objects.create_user(username=username, password="testpass123")
-    role = Role.objects.create(tenant=tenant, name=role_name, permissions=permissions)
+    role = Role.objects.create(
+        tenant=None if platform_scoped else tenant, name=role_name, permissions=permissions
+    )
     UserMembership.objects.create(user=user, tenant=tenant, role=role, active=True)
     refresh = TenantAwareTokenSerializer.get_token(user)
     access_token = str(refresh.access_token)
@@ -48,9 +55,14 @@ class TestIdentityTenancyAPI:
             abdm_hip_id="HIP-TEST-001",
         )
         self.client, self.user, self.role = _make_client(
-            # platform.tenants.manage: tenant list/onboard are gated on it
-            # since TEN-004; "all" is a marker no permission class reads.
-            "admin", self.tenant, self.facility, "admin", ["all", "platform.tenants.manage"],
+            # The tenant list/onboard tests are gated on platform.tenants.manage
+            # since TEN-004, and a platform claim is only legitimate on a
+            # platform-scoped role (Role.tenant is None) — RoleSerializer now
+            # refuses platform.* codes on tenant-scoped roles. "all" is a
+            # marker no permission class reads.
+            "admin", self.tenant, self.facility, "admin",
+            ["all", "platform.tenants.manage"],
+            platform_scoped=True,
         )
         self.department = Department.objects.create(
             tenant=self.tenant, facility=self.facility, name="Medicine", effective_from="2026-01-01",

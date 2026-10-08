@@ -10,6 +10,10 @@ any authenticated user could write memberships and read or mint tenancy
 roots. The claim assertions in each test matter: the permission reads claims,
 so a 403 from a token that never carried them would prove nothing about
 which check fired.
+
+``TestPlatformScopeConstraint`` covers the other half of the constraint: not
+only *which* code a token carries, but *which role scope* may carry
+platform-scope codes at all (platform scope = ``Role.tenant is None``).
 """
 import uuid
 
@@ -106,6 +110,10 @@ class TestWriteClaimEnforcement:
         )
 
         assert response.status_code == 403, response.content
+        # The detail must name the missing code, or a 403 from some other gate
+        # (MFA, tenant resolution) would look identical to a claim denial.
+        # Message format: RequirePermission.message in permissions.py.
+        assert "identity.memberships.write" in response.json()["detail"]
 
     def test_tenant_crud_denied_for_tenant_admin(self, admin_access, admin_client):
         """GET and POST /tenants/ must 403 without platform.tenants.manage.
@@ -130,3 +138,72 @@ class TestWriteClaimEnforcement:
             format="json",
         )
         assert create_response.status_code == 403, create_response.content
+
+
+class TestPlatformScopeConstraint:
+    """Platform scope is ``Role.tenant is None`` — enforced on every role write.
+
+    The constraint was binding in the brief but had no code behind it: a
+    tenant admin holding ``identity.roles.write`` could PATCH
+    ``platform.tenants.manage`` onto their own role, re-login, and pass the
+    ``TenantViewSet`` gate that enumerates and mints hospitals.
+    ``RoleSerializer.validate_permissions`` is what now refuses that write.
+    """
+
+    def test_platform_claim_rejected_on_tenant_role_write(
+        self, tenant, admin_access, admin_client
+    ):
+        """Role writes carrying ``platform.*`` codes must 4xx and change nothing.
+
+        Both write paths are asserted: PATCH (the privilege-escalation path
+        from the review) and POST, which creates a tenant-owned role because
+        ``RoleViewSet`` is tenant-scoped. In both cases the stored role is
+        checked afterwards — a rejection that still persisted the code, or
+        created the role, would be no protection at all.
+        """
+        from apps.identity_tenancy.models import Role
+
+        assert "identity.roles.write" in AccessToken(admin_access).payload["permissions"]
+        role = Role.objects.get(tenant=tenant, name="tenant-admin")
+
+        patch_response = admin_client.patch(
+            f"/api/v1/roles/{role.id}/",
+            {"permissions": ["identity.roles.write", "platform.tenants.manage"]},
+            format="json",
+        )
+        assert patch_response.status_code == 400, patch_response.content
+        role.refresh_from_db()
+        assert role.permissions == ["identity.roles.write"]
+
+        post_response = admin_client.post(
+            "/api/v1/roles/",
+            {"name": "escalated", "permissions": ["platform.tenants.manage"]},
+            format="json",
+        )
+        assert post_response.status_code == 400, post_response.content
+        assert not Role.objects.filter(tenant=tenant, name="escalated").exists()
+
+    def test_platform_roles_excluded_from_tenant_list(self, admin_client):
+        """A tenant's ``GET /roles/`` must never contain a platform-scoped role.
+
+        Platform roles (``tenant is None``) belong to no tenant, so the
+        tenant-scoped queryset must filter them out — otherwise a tenant admin
+        could read the platform's role names and permission bundles. The
+        admin's own tenant role must still be listed, so an empty list cannot
+        pass for isolation.
+        """
+        from apps.identity_tenancy.models import Role
+
+        platform_role = Role.objects.create(
+            tenant=None,
+            name="platform-superadmin",
+            permissions=["platform.tenants.manage"],
+        )
+
+        response = admin_client.get("/api/v1/roles/")
+
+        assert response.status_code == 200
+        rows = response.json()["results"]
+        assert str(platform_role.id) not in [row["id"] for row in rows]
+        assert "platform-superadmin" not in [row["name"] for row in rows]
+        assert "tenant-admin" in [row["name"] for row in rows]

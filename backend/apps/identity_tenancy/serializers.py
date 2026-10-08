@@ -64,6 +64,58 @@ class RoleSerializer(serializers.ModelSerializer):
         # role into another tenant (common/tenant.py states this contract).
         read_only_fields = ["id", "created_at", "tenant"]
 
+    def validate_permissions(self, value):
+        """Refuse platform-scope codes on tenant-scoped roles (TEN-004).
+
+        Platform scope is defined as ``Role.tenant is None``, but until now
+        nothing enforced it: a tenant admin holding ``identity.roles.write``
+        could PATCH ``platform.tenants.manage`` onto their own role, re-login,
+        and pass the ``TenantViewSet`` gate that enumerates and mints
+        hospitals. This is the write-path half of that constraint —
+        token-level scope binding (checking the role's scope at claim
+        issuance) is deliberately deferred.
+
+        Updates consult the stored role's tenant. Creates are refused
+        outright rather than consulted: ``RoleViewSet`` is tenant-scoped and
+        stamps the request's tenant in ``perform_create``, so a role created
+        through the API is always tenant-owned — a platform-scoped create
+        would need a platform-level viewset, which does not exist.
+
+        Only codes literally starting with ``platform.`` are rejected, which
+        is exactly the set ``RequirePermission`` can ever match (exact list
+        membership), so a padded or non-string entry grants nothing.
+
+        List elements and dict keys are both checked because ``tokens.py``
+        builds the claim with ``list(role.permissions or [])`` — ``list()`` on
+        a dict yields its *keys*, so a dict key carrying a platform code would
+        grant it just as a list element would. Any other JSON shape passes
+        through untouched: a non-list claim can never satisfy
+        ``RequirePermission``, so nothing in it can grant.
+        """
+        if isinstance(value, list):
+            candidates = value
+        elif isinstance(value, dict):
+            candidates = list(value.keys())
+        else:
+            # See the docstring: a string iterates to single characters when
+            # the claim is built, so no non-list shape can ever satisfy
+            # RequirePermission — pass it through instead of raising here.
+            return value
+        platform_codes = [
+            code
+            for code in candidates
+            if isinstance(code, str) and code.startswith("platform.")
+        ]
+        if not platform_codes:
+            return value
+        # A create (self.instance is None) is always tenant-owned — see above.
+        if self.instance is None or self.instance.tenant is not None:
+            raise serializers.ValidationError(
+                f"Platform-scope permissions {platform_codes} are reserved for "
+                "platform-scoped roles (Role.tenant is None)."
+            )
+        return value
+
 
 class UserMembershipSerializer(serializers.ModelSerializer):
     class Meta:

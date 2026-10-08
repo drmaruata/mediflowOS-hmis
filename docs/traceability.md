@@ -70,7 +70,7 @@ this file is regenerated):
 - **AUD-002** (partial) - AuditEvent.hash_chain exists but is never computed — the log is append-only in practice, not tamper-evident
 - **PLT-004** (not implemented) - every Celery task body is `pass` and there is no CELERY_BEAT_SCHEDULE — no background job can run
 - **QOS-001** (not implemented) - indicator catalogue exists in docs/ but no loader has been written; the 406 records are not in the database
-- **TEN-004** (partial) - RequirePermission reads the token's `permissions` claim and gates the role/membership writes, tenant CRUD and the quality catalogue, and role/membership/scheduled-job querysets are tenant-scoped — but most endpoints still authorise by authentication alone, and facility/department-scoped permissions (TEN-005) are unimplemented
+- **TEN-004** (partial) - RequirePermission reads the token's `permissions` claim and gates the role/membership writes, tenant CRUD and the quality catalogue, RoleSerializer rejects `platform.` codes on tenant-scoped roles at the write path (platform scope = Role.tenant is None; token-level scope binding deferred), and role/membership/scheduled-job querysets are tenant-scoped — but most endpoints still authorise by authentication alone, and facility/department-scoped permissions (TEN-005) are unimplemented
 - **TEN-006** (partial) - TOTP enrol/confirm works and MFARequiredIfConfigured is installed after IsAuthenticated in DEFAULT_PERMISSION_CLASSES, with the token carrying `requires_mfa`/`mfa_verified` claims — but no POST /auth/mfa/verify endpoint exists, so mfa_verified can never become True after login and require_mfa roles are denied every default-permission endpoint (fail-closed)
 
 ## Per-requirement detail
