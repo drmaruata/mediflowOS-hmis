@@ -16,6 +16,12 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    # SimpleJWT's blacklist app. ROTATE_REFRESH_TOKENS and
+    # BLACKLIST_AFTER_ROTATION are already enabled below, but SimpleJWT skips
+    # blacklisting (it catches the missing-method AttributeError) while this
+    # app is absent — a replayed refresh token would stay valid for its whole
+    # lifetime (TEN-006). Its migrations only create new tables.
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "django_otp",
     # The TOTP plugin carries the device model used for second-factor
@@ -109,8 +115,14 @@ REST_FRAMEWORK = {
     # explicitly (see apps/common/urls.py for the health probe). Leaving
     # this unset makes DRF fall back to AllowAny, which would expose every
     # tenant-owned resource to unauthenticated CRUD.
+    # TEN-006: the MFA gate is appended after IsAuthenticated, never before
+    # it — an anonymous request must fail authentication (401), not be told
+    # about an MFA requirement it cannot satisfy. Views that declare their
+    # own permission_classes replace this list wholesale; the health probe,
+    # the ABDM callback and the TOTP enrolment endpoints do so deliberately.
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
+        "common.mfa.MFARequiredIfConfigured",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
         # Binds the tenant from the token's signed claims, overriding the

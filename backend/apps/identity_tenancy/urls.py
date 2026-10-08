@@ -1,6 +1,7 @@
 """URLs for identity and tenancy (v1)."""
 from django.urls import path, re_path
 from rest_framework.routers import DefaultRouter
+from rest_framework_simplejwt.views import TokenBlacklistView, TokenRefreshView
 
 from . import views
 from .auth_views import (
@@ -29,6 +30,17 @@ _mfa_destroy = TOTPEnrolViewSet.as_view({"delete": "destroy"})
 
 urlpatterns = [
     path("auth/token/", TenantTokenObtainPairView.as_view(), name="token-obtain"),
+    # Refresh and blacklist authorise themselves with the refresh token in the
+    # request body, not a bearer header, so SimpleJWT's views ship empty
+    # authentication_classes/permission_classes (no AllowAny is added here).
+    # The claims on that refresh token — tenant scope included — survive
+    # rotation, which is what makes refresh safe to use (TEN-006).
+    path("auth/token/refresh/", TokenRefreshView.as_view(), name="token-refresh"),
+    path(
+        "auth/token/blacklist/",
+        TokenBlacklistView.as_view(),
+        name="token-blacklist",
+    ),
     path("auth/me/", MeView.as_view(), name="me"),
     path("auth/break-glass/", BreakGlassView.as_view(), name="break-glass"),
     path("mfa-devices/", _mfa_list, name="mfadevice-list"),

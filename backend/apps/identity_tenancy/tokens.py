@@ -31,6 +31,7 @@ TENANT_CLAIM = "tenant_id"
 FACILITY_CLAIM = "facility_id"
 ROLE_CLAIM = "role"
 PERMISSIONS_CLAIM = "permissions"
+REQUIRES_MFA_CLAIM = "requires_mfa"
 MFA_CLAIM = "mfa_verified"
 BREAK_GLASS_CLAIM = "allows_break_glass"
 
@@ -50,11 +51,20 @@ def active_membership(user):
 
 
 class TenantAwareTokenSerializer(TokenObtainPairSerializer):
-    """Adds the tenant, facility, role and permissions to the access token."""
+    """Adds the tenant, facility, role, permissions and MFA claims to the token."""
 
     @classmethod
     def get_token(cls, user):
         token = super().get_token(user)
+
+        # TEN-006: both MFA claims are written before the membership branch,
+        # because MFARequiredIfConfigured reads them from every authenticated
+        # token — including one from a membership-less account. mfa_verified
+        # mirrors django-otp state: the library attaches the verified device
+        # as user.otp_device, and a password-only login has none, so it reads
+        # False. Fail closed — a token that has not proven a second factor
+        # never claims it has.
+        token[MFA_CLAIM] = getattr(user, "otp_device", None) is not None
 
         membership = active_membership(user)
         if membership is None:
@@ -68,6 +78,7 @@ class TenantAwareTokenSerializer(TokenObtainPairSerializer):
             token[ROLE_CLAIM] = None
             token[PERMISSIONS_CLAIM] = []
             token[BREAK_GLASS_CLAIM] = False
+            token[REQUIRES_MFA_CLAIM] = False
             return token
 
         token[TENANT_CLAIM] = str(membership.tenant_id)
@@ -75,6 +86,7 @@ class TenantAwareTokenSerializer(TokenObtainPairSerializer):
         token[ROLE_CLAIM] = membership.role.name
         token[PERMISSIONS_CLAIM] = list(membership.role.permissions or [])
         token[BREAK_GLASS_CLAIM] = bool(membership.role.allows_break_glass)
+        token[REQUIRES_MFA_CLAIM] = bool(membership.role.require_mfa)
         return token
 
     def validate(self, attrs):

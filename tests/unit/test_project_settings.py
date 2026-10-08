@@ -33,10 +33,30 @@ def test_requests_are_transactional(module):
 
 
 def test_deny_by_default_permissions():
-    """The data plane must not fall back to DRF's implicit AllowAny."""
+    """The data plane must not fall back to DRF's implicit AllowAny.
+
+    TEN-006 appends the MFA gate behind ``IsAuthenticated``; both entries are
+    pinned exactly so neither can be reordered or dropped without failing
+    here. ``IsAuthenticated`` must stay first so authentication failures
+    remain 401s and only token-authenticated requests are ever judged
+    against the MFA claims.
+    """
     permissions = settings.REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"]
 
-    assert permissions == ["rest_framework.permissions.IsAuthenticated"]
+    assert permissions == [
+        "rest_framework.permissions.IsAuthenticated",
+        "common.mfa.MFARequiredIfConfigured",
+    ]
+
+
+def test_mfa_permission_is_installed(settings):
+    """TEN-006 enforcement must be a default permission, not a per-view opt-in.
+
+    Only views that declare their own ``permission_classes`` are then exempt;
+    every tenant-owned viewset inherits the gate.
+    """
+    permissions = settings.REST_FRAMEWORK["DEFAULT_PERMISSION_CLASSES"]
+    assert "common.mfa.MFARequiredIfConfigured" in permissions
 
 
 def test_authentication_is_configured():

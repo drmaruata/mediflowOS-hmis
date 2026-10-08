@@ -12,6 +12,7 @@ import uuid
 import pytest
 from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import AccessToken
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db]
 
@@ -341,3 +342,106 @@ class TestMfaDeviceManagement:
             f"/api/v1/mfa-devices/{device['persistent_id']}/"
         ).status_code == 204
         assert client.get("/api/v1/mfa-devices/").json() == []
+
+
+class TestTokenRefresh:
+    """Refresh must carry the tenant context forward, then burn the old token."""
+
+    def test_refresh_preserves_tenant_claims(self, users):
+        """Refresh must re-bind tenant/facility/role claims — a bare refresh that
+        drops them would silently un-scope every follow-up request (TEN-006)."""
+        client = APIClient()
+        issued = client.post(
+            "/api/v1/auth/token/",
+            {"username": "clerk-a", "password": "pw-for-tests-only"},
+            format="json",
+        ).json()
+        original = AccessToken(issued["access"])
+
+        refreshed = client.post(
+            "/api/v1/auth/token/refresh/",
+            {"refresh": issued["refresh"]},
+            format="json",
+        )
+
+        assert refreshed.status_code == 200, refreshed.content
+        new_access = AccessToken(refreshed.json()["access"])
+        for claim in ("tenant_id", "facility_id", "role", "permissions"):
+            assert new_access.payload[claim] == original.payload[claim], (
+                f"refresh dropped the {claim} claim; every request made with the "
+                "new access token would lose its tenant scope"
+            )
+
+    def test_old_refresh_token_rejected_after_rotation(self, users):
+        """A consumed refresh token must be dead, not merely expired.
+
+        ``BLACKLIST_AFTER_ROTATION`` silently no-ops while the blacklist app is
+        absent from ``INSTALLED_APPS`` (SimpleJWT catches the missing method),
+        so replaying the pre-refresh token returning 401 is what proves the app
+        is actually installed and migrated (TEN-006).
+        """
+        client = APIClient()
+        issued = client.post(
+            "/api/v1/auth/token/",
+            {"username": "clerk-a", "password": "pw-for-tests-only"},
+            format="json",
+        ).json()
+        refresh = issued["refresh"]
+
+        rotated = client.post(
+            "/api/v1/auth/token/refresh/", {"refresh": refresh}, format="json"
+        )
+        assert rotated.status_code == 200, rotated.content
+        assert rotated.json()["refresh"] != refresh
+
+        replay = client.post(
+            "/api/v1/auth/token/refresh/", {"refresh": refresh}, format="json"
+        )
+        assert replay.status_code == 401, (
+            "the blacklisted refresh token was accepted again — the token_blacklist "
+            "app is not doing its job"
+        )
+
+
+class TestMfaEnforcement:
+    """TEN-006: the second factor is enforced through the signed token claims."""
+
+    @pytest.mark.parametrize("endpoint", ["/api/v1/patients/", "/api/v1/roles/"])
+    def test_mfa_claim_blocks_unverified_session(self, users, endpoint):
+        """requires_mfa without mfa_verified must deny an authenticated endpoint.
+
+        The token's claims are asserted first: the permission reads claims, so
+        a token that never carried them would make the 403 below prove nothing
+        about which check fired.
+        """
+        client = APIClient()
+        access = _token(client, "admin-a")
+        payload = AccessToken(access).payload
+        assert payload["requires_mfa"] is True
+        assert payload["mfa_verified"] is False
+
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+        response = client.get(endpoint)
+
+        assert response.status_code == 403, response.content
+        assert response.json()["code"] == "mfa_required"
+
+    def test_mfa_verified_claim_unblocks_access(self, users):
+        """The other half of the gate: a token that proves the factor passes.
+
+        The claim is set by hand because the backend has no MFA-verify
+        endpoint yet (``POST /auth/mfa/verify`` in the UI spec) — this is
+        exactly the token that endpoint will mint, and it pins that the
+        permission denies only when ``mfa_verified`` is absent, not for every
+        ``requires_mfa`` role.
+        """
+        from apps.identity_tenancy.tokens import TenantAwareTokenSerializer
+
+        refresh = TenantAwareTokenSerializer.get_token(users["admin"])
+        refresh["mfa_verified"] = True
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+
+        response = client.get("/api/v1/patients/")
+
+        assert response.status_code == 200, response.content
