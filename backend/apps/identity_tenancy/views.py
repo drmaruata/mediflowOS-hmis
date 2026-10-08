@@ -196,7 +196,9 @@ class BedViewSet(
         description=(
             "Import beds from a CSV upload (SET-013). Every row is validated "
             "against the bed serializer and this tenant's wards before any "
-            "row is written; a single bad row writes nothing."
+            "row is written; a single bad row writes nothing. Updated rows "
+            "archive a ConfigRevision (SET-010) and every written row lands "
+            "an AuditEvent (SET-012), mirroring the config viewsets."
         ),
     )
     @action(detail=False, methods=["post"], url_path="import")
@@ -209,7 +211,12 @@ class BedViewSet(
         writing any — the atomicity is explicit in code because
         ``ATOMIC_REQUESTS`` is False in the test profile. The tenant guard
         mirrors ``TenantScopedQuerysetMixin.perform_create``: without a
-        resolved tenant there is nothing to scope the writes to.
+        resolved tenant there is nothing to scope the writes to. Imports do
+        not route through the mixin hooks (that is why no double-audit is
+        possible), so ``import_beds`` mirrors them itself: updated rows first
+        archive their pre-update state via ``record_revision`` (SET-010) and
+        every written row lands one ``AuditEvent`` (SET-012), attributed to
+        the acting ``request.user``.
         """
         tenant_id = self.get_tenant_id()
         if not tenant_id:
@@ -217,7 +224,7 @@ class BedViewSet(
         upload = csv_io.CsvImportFileSerializer(data=request.data)
         upload.is_valid(raise_exception=True)
         rows = csv_io.parse_rows(upload.validated_data["file"], csv_io.BED_COLUMNS)
-        return Response(csv_io.import_beds(tenant_id, rows))
+        return Response(csv_io.import_beds(tenant_id, rows, self.request.user))
 
 
 class ServiceUnitViewSet(
@@ -275,7 +282,8 @@ class StaffPositionViewSet(
             "Import staff positions from a CSV upload (SET-013). Every row is "
             "validated against the position serializer and this tenant's "
             "departments before any row is written; a single bad row writes "
-            "nothing."
+            "nothing. Updated rows archive a ConfigRevision (SET-010) and "
+            "every written row lands an AuditEvent (SET-012)."
         ),
     )
     @action(detail=False, methods=["post"], url_path="import")
@@ -286,7 +294,10 @@ class StaffPositionViewSet(
         for a malformed document, row-by-row validation through
         ``StaffPositionSerializer`` with department resolution scoped to the
         caller's tenant, then one explicit transaction only when every row is
-        valid.
+        valid. The history contract is mirrored from the beds surface too:
+        updated rows archive their pre-update state via ``record_revision``
+        (SET-010) and every written row lands one ``AuditEvent`` (SET-012),
+        attributed to the acting ``request.user``.
         """
         tenant_id = self.get_tenant_id()
         if not tenant_id:
@@ -296,7 +307,7 @@ class StaffPositionViewSet(
         rows = csv_io.parse_rows(
             upload.validated_data["file"], csv_io.STAFF_POSITION_COLUMNS
         )
-        return Response(csv_io.import_staff_positions(tenant_id, rows))
+        return Response(csv_io.import_staff_positions(tenant_id, rows, self.request.user))
 
 
 class ConfigRevisionViewSet(TenantScopedQuerysetMixin, viewsets.ReadOnlyModelViewSet):

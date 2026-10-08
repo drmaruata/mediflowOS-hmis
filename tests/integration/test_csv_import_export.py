@@ -16,9 +16,16 @@ duplicating beds; a row whose ward does not exist in the tenant lands in
 ``errors`` with zero rows written — even the valid rows of the same file;
 a malformed upload answers 422 before any parsing; and a ward or department
 name that belongs to another hospital is an error, never a silent cross-write.
+
+An import is also a config mutation like any other (SET-013): every updated
+row archives its pre-update state into ``ConfigRevision`` (SET-010) and every
+written row — created or updated — lands an ``AuditEvent`` (SET-012), so a
+bulk load leaves the same per-entity history an admin screen reads after a
+PATCH. The file-level natural key must be unique within a file: a repeat is a
+row error and, because one error aborts the request, nothing is written.
 """
 import csv
-from datetime import date
+from datetime import date, timedelta
 import io
 import uuid
 
@@ -29,6 +36,7 @@ from rest_framework.test import APIClient
 
 from apps.identity_tenancy.models import (
     Bed,
+    ConfigRevision,
     Department,
     Facility,
     StaffPosition,
@@ -332,7 +340,8 @@ class TestBedCsv:
         Both shapes — undecodable bytes and a header row that does not match
         the fixed column set — are document-level failures, answered before
         any row is inspected, so an import can never silently proceed on a
-        subset of the file.
+        subset of the file. The body is DRF's parseable ``{"detail": ...}``
+        shape, so a client can surface the reason.
         """
         ward_a = _seed_ward(TENANT_A, facility.id, "Ward A")
         _seed_bed(TENANT_A, ward_a, "A1")
@@ -344,7 +353,187 @@ class TestBedCsv:
                 format="multipart",
             )
             assert response.status_code == 422, response.content
+            body = response.json()
+            assert isinstance(body.get("detail"), str) and body["detail"]
         assert Bed.objects.filter(tenant_id=TENANT_A).count() == 1
+
+    def test_import_without_file_answers_400(self, config_client, facility):
+        """An import with no file field is refused 400 by the wrapper serializer.
+
+        ``CsvImportFileSerializer`` owns the upload: a multipart request that
+        carries no ``file`` fails its required check, so the failure surfaces
+        as a 400 before any parsing or row inspection can start.
+        """
+        _seed_ward(TENANT_A, facility.id, "Ward A")
+
+        response = config_client.post("/api/v1/beds/import/", {}, format="multipart")
+
+        assert response.status_code == 400, response.content
+        assert "file" in response.json()
+
+    def test_import_records_revision_for_updates_and_audit_for_all_writes(
+        self, config_client, facility
+    ):
+        """Updates archive the pre-update row; every written row lands an audit event.
+
+        An import is a config mutation like any other (SET-013): the
+        natural-key update must snapshot the row's *pre-update* state via
+        ``record_revision`` exactly as a PATCH does (SET-010), and a created
+        row must not mint a revision — Task 8 semantics — while every written
+        row, created or updated, must be traceable to an ``AuditEvent``
+        (SET-012). Both are asserted from the database, so a response that
+        merely looks right cannot pass.
+        """
+        from apps.audit.models import AuditEvent
+
+        ward_a = _seed_ward(TENANT_A, facility.id, "Ward A")
+        # Seeded functional=False so the snapshot can prove it holds the
+        # pre-import state rather than the imported value.
+        _seed_bed(TENANT_A, ward_a, "A1", functional=False, active=True)
+
+        imported = _upload_csv(
+            config_client,
+            "/api/v1/beds/import/",
+            "ward,bed_number,functional,active\n"
+            "Ward A,A1,true,true\n"
+            "Ward A,A9,false,true\n",
+        )
+        assert imported.status_code == 200, imported.content
+        assert imported.json() == {"created": 1, "updated": 1, "errors": []}
+
+        updated = Bed.objects.get(tenant_id=TENANT_A, bed_number="A1")
+        revision = ConfigRevision.objects.get(
+            tenant_id=TENANT_A, entity="identity.bed", entity_id=updated.id
+        )
+        assert revision.snapshot["functional"] is False
+        assert revision.snapshot["bed_number"] == "A1"
+        assert revision.effective_from == date.today()
+        assert revision.effective_to is None
+        assert revision.created_by is not None
+
+        created = Bed.objects.get(tenant_id=TENANT_A, bed_number="A9")
+        assert ConfigRevision.objects.filter(
+            tenant_id=TENANT_A, entity="identity.bed", entity_id=created.id
+        ).count() == 0
+
+        events = {
+            event.entity_id: event
+            for event in AuditEvent.objects.filter(
+                tenant_id=TENANT_A, entity_type="identity.bed"
+            )
+        }
+        assert {event.action for event in events.values()} == {"create", "update"}
+        assert events[str(updated.id)].action == "update"
+        assert events[str(created.id)].action == "create"
+        # The history is tenant-bound: nothing landed for the other hospital.
+        assert not AuditEvent.objects.filter(tenant_id=TENANT_B).exists()
+        assert not ConfigRevision.objects.filter(tenant_id=TENANT_B).exists()
+
+    def test_sequential_imports_close_prior_revision_per_row(
+        self, config_client, facility
+    ):
+        """The next import closes the previous revision; history stays per row.
+
+        SET-010 revisions are per (entity, row) windows: a second import of
+        the same bed must close the open revision (``effective_to = yesterday``)
+        and open a new pre-update snapshot rather than stacking two open
+        revisions — a locked indicator period re-reads the closed window.
+        Discrimination is by ``effective_to``, matching the config-versioning
+        suite's convention: both snapshots share today's ``effective_from``.
+        """
+        ward_a = _seed_ward(TENANT_A, facility.id, "Ward A")
+        _seed_bed(TENANT_A, ward_a, "A1", functional=False, active=True)
+
+        first = _upload_csv(
+            config_client,
+            "/api/v1/beds/import/",
+            "ward,bed_number,functional,active\nWard A,A1,true,true\n",
+        )
+        assert first.status_code == 200, first.content
+        second = _upload_csv(
+            config_client,
+            "/api/v1/beds/import/",
+            "ward,bed_number,functional,active\nWard A,A1,false,true\n",
+        )
+        assert second.status_code == 200, second.content
+
+        bed = Bed.objects.get(tenant_id=TENANT_A, bed_number="A1")
+        by_window = {
+            row.effective_to is None: row
+            for row in ConfigRevision.objects.filter(
+                tenant_id=TENANT_A, entity="identity.bed", entity_id=bed.id
+            )
+        }
+        assert by_window[False].snapshot["functional"] is False  # pre-first import
+        assert by_window[True].snapshot["functional"] is True  # pre-second import
+        assert by_window[False].effective_to == date.today() - timedelta(days=1)
+
+    def test_blank_and_invalid_cell_rows_error_and_write_nothing(
+        self, config_client, facility
+    ):
+        """Empty or wrongly-typed cells refuse their rows with useful reasons.
+
+        An empty ``bed_number`` fails the required check and
+        ``functional=maybe`` is not a valid boolean — each row lands in
+        ``errors`` with its field's reason, and because one bad row aborts the
+        file, the fully-valid row is not written either (SET-013 all-or-nothing).
+        """
+        ward_a = _seed_ward(TENANT_A, facility.id, "Ward A")
+        _seed_bed(TENANT_A, ward_a, "A1")
+
+        imported = _upload_csv(
+            config_client,
+            "/api/v1/beds/import/",
+            "ward,bed_number,functional,active\n"
+            "Ward A,A2,true,true\n"
+            "Ward A,,true,true\n"
+            "Ward A,A3,maybe,true\n",
+        )
+        assert imported.status_code == 200, imported.content
+        body = imported.json()
+        assert body["created"] == 0 and body["updated"] == 0
+        reasons = [row["reason"] for row in body["errors"]]
+        assert any("bed_number" in reason for reason in reasons)
+        assert any("boolean" in reason for reason in reasons)
+        # Even the fully-valid A2 row was refused by its file-mates.
+        assert Bed.objects.filter(tenant_id=TENANT_A).count() == 1
+
+    def test_duplicate_natural_key_in_file_errors_and_writes_nothing(
+        self, config_client, facility
+    ):
+        """A file repeating a (ward, bed_number) refuses the duplicate row.
+
+        The model has only an index on the natural key, not a unique
+        constraint, so two rows for the same bed would both plan a create and
+        double-write. The repeat is an explicit row error — explicit beats
+        silent — and the file's all-or-nothing rule means nothing is written.
+        Round-trip exports are naturally unique, so this never fires on a
+        re-import.
+        """
+        _seed_ward(TENANT_A, facility.id, "Ward A")
+
+        imported = _upload_csv(
+            config_client,
+            "/api/v1/beds/import/",
+            "ward,bed_number,functional,active\n"
+            "Ward A,A9,true,true\n"
+            "Ward A,A9,false,true\n",
+        )
+        assert imported.status_code == 200, imported.content
+        assert imported.json() == {
+            "created": 0,
+            "updated": 0,
+            "errors": [
+                {
+                    "row": 2,
+                    "reason": (
+                        "duplicate row: ward 'Ward A', bed_number 'A9' "
+                        "already appears earlier in this file."
+                    ),
+                }
+            ],
+        }
+        assert not Bed.objects.filter(tenant_id=TENANT_A, bed_number="A9").exists()
 
     def test_cross_tenant_ward_name_is_an_error_not_a_cross_write(self, config_client, facility):
         """A ward that exists only in tenant B is invisible to tenant A's import.
@@ -521,7 +710,11 @@ class TestStaffPositionCsv:
         assert [s.designation for s in StaffPosition.objects.filter(tenant_id=TENANT_A)] == ["Medical Officer"]
 
     def test_malformed_staff_csv_answers_422(self, config_client, facility):
-        """A staff import with the wrong header shape is refused 422."""
+        """A staff import with the wrong header shape is refused 422.
+
+        The body is DRF's parseable ``{"detail": ...}`` shape, pinned the same
+        way as the beds import so a client can surface the reason.
+        """
         department = _seed_department(TENANT_A, facility.id, "OPD")
         _seed_position(TENANT_A, department, "Medical Officer")
 
@@ -531,4 +724,99 @@ class TestStaffPositionCsv:
             format="multipart",
         )
         assert response.status_code == 422, response.content
+        body = response.json()
+        assert isinstance(body.get("detail"), str) and body["detail"]
         assert StaffPosition.objects.filter(tenant_id=TENANT_A).count() == 1
+
+    def test_staff_import_records_revision_and_audit_for_updates(
+        self, config_client, facility
+    ):
+        """A staff import archives pre-update state and audits every write.
+
+        Same SET-010/012 contract as the beds import, keyed on the
+        (department, designation) natural key: the updated position's revision
+        snapshot holds the pre-import sanctioned count (3, not 5), the created
+        position mints no revision, and both rows are traceable to one
+        ``AuditEvent`` each — asserted from the database.
+        """
+        from apps.audit.models import AuditEvent
+
+        department = _seed_department(TENANT_A, facility.id, "OPD")
+        _seed_position(
+            TENANT_A, department, "Medical Officer", sanctioned=3, in_position=2
+        )
+
+        imported = _upload_csv(
+            config_client,
+            "/api/v1/staff-positions/import/",
+            "department,designation,specialty,sanctioned,in_position\n"
+            "OPD,Medical Officer,General Medicine,5,4\n"
+            "OPD,Nurse,General,2,1\n",
+        )
+        assert imported.status_code == 200, imported.content
+        assert imported.json() == {"created": 1, "updated": 1, "errors": []}
+
+        updated = StaffPosition.objects.get(
+            tenant_id=TENANT_A, designation="Medical Officer"
+        )
+        revision = ConfigRevision.objects.get(
+            tenant_id=TENANT_A, entity="identity.staff_position", entity_id=updated.id
+        )
+        assert revision.snapshot["sanctioned"] == 3
+        assert revision.snapshot["in_position"] == 2
+        assert revision.effective_from == date.today()
+        assert revision.effective_to is None
+
+        created = StaffPosition.objects.get(tenant_id=TENANT_A, designation="Nurse")
+        assert ConfigRevision.objects.filter(
+            tenant_id=TENANT_A,
+            entity="identity.staff_position",
+            entity_id=created.id,
+        ).count() == 0
+
+        events = {
+            event.entity_id: event
+            for event in AuditEvent.objects.filter(
+                tenant_id=TENANT_A, entity_type="identity.staff_position"
+            )
+        }
+        assert {event.action for event in events.values()} == {"create", "update"}
+        assert events[str(updated.id)].action == "update"
+        assert events[str(created.id)].action == "create"
+
+    def test_duplicate_staff_natural_key_errors_and_writes_nothing(
+        self, config_client, facility
+    ):
+        """A file repeating (department, designation) refuses the duplicate row.
+
+        Mirrors the beds duplicate rule: the second row errors with the
+        natural key named, and the file's all-or-nothing rule means nothing is
+        written, so a duplicated position cannot double-create.
+        """
+        department = _seed_department(TENANT_A, facility.id, "OPD")
+        _seed_position(TENANT_A, department, "Medical Officer")
+
+        imported = _upload_csv(
+            config_client,
+            "/api/v1/staff-positions/import/",
+            "department,designation,specialty,sanctioned,in_position\n"
+            "OPD,Nurse,General,1,1\n"
+            "OPD,Nurse,General,2,2\n",
+        )
+        assert imported.status_code == 200, imported.content
+        assert imported.json() == {
+            "created": 0,
+            "updated": 0,
+            "errors": [
+                {
+                    "row": 2,
+                    "reason": (
+                        "duplicate row: department 'OPD', designation 'Nurse' "
+                        "already appears earlier in this file."
+                    ),
+                }
+            ],
+        }
+        assert not StaffPosition.objects.filter(
+            tenant_id=TENANT_A, designation="Nurse"
+        ).exists()

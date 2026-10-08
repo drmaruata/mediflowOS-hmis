@@ -19,6 +19,18 @@ natural key per tenant — ``(ward, bed_number)`` for beds and
 ``(department, designation)`` for staff positions — so re-importing an export
 updates in place rather than duplicating rows, and a name that belongs to
 another hospital resolves to nothing and errors.
+
+Import writes carry the same history as the config viewsets (SET-010,
+SET-012): every updated row archives its pre-update state into
+``ConfigRevision`` via :func:`apps.identity_tenancy.services.record_revision`
+before the new values land — a bulk load must never silently erase the window
+a locked indicator period re-reads — and every written row, created or
+updated, lands one ``AuditEvent`` whose ``entity_type`` is the model's
+``db_table``, matching ``TenantScopedQuerysetMixin``'s shape. Created rows mint
+no revision, exactly like the viewsets. The natural key must also be unique
+*within a file*: the model has only an index, not a constraint, so a repeated
+``(ward, bed_number)`` or ``(department, designation)`` is rejected as a row
+error and the whole file writes nothing.
 """
 import csv
 import io
@@ -29,6 +41,7 @@ from rest_framework.exceptions import APIException
 
 from .models import Bed, Department, StaffPosition, Ward
 from .serializers import BedSerializer, StaffPositionSerializer
+from .services import record_revision
 
 #: Fixed export/import columns for beds (SET-013). ``ward`` is the ward's
 #: *name* — a human-readable token the import resolves back within the tenant.
@@ -199,21 +212,80 @@ def _resolve_exactly_one(matches_by_name, name, label, index, errors):
     return matches[0]
 
 
-def import_beds(tenant_id, rows) -> dict:
+def _claim_natural_key(claimed, key, index, errors, natural_key_label) -> bool:
+    """Refuse a natural key that repeats an earlier row of the same file.
+
+    The model has only an index on the natural key, not a unique constraint,
+    so without this check two rows for the same ``(ward, bed_number)`` would
+    both plan a create and double-write. A repeat is an explicit row error
+    rather than a silent duplicate; because one error aborts the file
+    (all-or-nothing), nothing is written either way. Round-trip exports are
+    naturally unique, so a re-imported export can never trip this.
+    """
+    if key in claimed:
+        errors.append(
+            {
+                "row": index,
+                "reason": (
+                    f"duplicate row: {natural_key_label} already appears "
+                    "earlier in this file."
+                ),
+            }
+        )
+        return False
+    claimed.add(key)
+    return True
+
+
+def _write_audit_event(tenant_id, instance, action, user) -> None:
+    """One ``AuditEvent`` per import-written row, mirroring the tenant mixin (SET-012).
+
+    ``TenantScopedQuerysetMixin._write_audit_log`` records ``entity_type`` as
+    the model's ``db_table`` and ``entity_id`` as the stringified pk; this
+    helper writes the same shape so an admin screen filtering the trail by
+    entity sees import-driven changes exactly where it sees PATCH/POST ones.
+    The helper deliberately omits the source IP and break-glass reason the
+    mixin also records: those live on the request, which the bulk file layer
+    does not carry. The import passes the acting ``request.user``, so the
+    event is attributed to the same account the mixin would have used.
+    """
+    from apps.audit.models import AuditEvent
+
+    user_id = user.pk if getattr(user, "is_authenticated", False) else None
+    AuditEvent.objects.create(
+        tenant_id=tenant_id,
+        user_id=user_id,
+        action=action,
+        entity_type=instance._meta.db_table,
+        entity_id=str(instance.pk),
+    )
+
+
+def import_beds(tenant_id, rows, user) -> dict:
     """Validate every bed row, then write all of them atomically (SET-013).
 
     Returns ``{"created": n, "updated": m, "errors": [{"row", "reason"}]}``.
     A row is "an update" when its ``(ward, bed_number)`` natural key already
-    exists in the tenant; otherwise it is a create. Any row error aborts the
-    whole request with zero writes; only an all-valid file enters the atomic
-    block. Wards are resolved once per distinct name in the file rather than
-    per row, so the tenant-scoped lookup cannot fan out a query per CSV row.
+    exists in the tenant; otherwise it is a create. Any row error — validation
+    failure, unknown ward, or a natural key repeated within the file — aborts
+    the whole request with zero writes; only an all-valid file enters the
+    atomic block. Wards are resolved once per distinct name in the file rather
+    than per row, so the tenant-scoped lookup cannot fan out a query per CSV
+    row.
+
+    Writes carry the config history contract (SET-010, SET-012): each update
+    first archives the row's pre-update state via ``record_revision`` — the
+    instance still holds the committed values here, exactly as
+    ``EffectiveDatedConfigMixin.perform_update`` relies on — and every written
+    row, created or updated, lands one ``AuditEvent``. ``user`` is the acting
+    account, used to attribute both trails.
     """
     ward_names = {row["ward"] for row in rows if row["ward"]}
     wards_by_name = {}
     for ward in Ward.objects.filter(tenant_id=tenant_id, name__in=ward_names):
         wards_by_name.setdefault(ward.name, []).append(ward)
 
+    claimed = set()
     plans = []
     errors = []
     for index, row in enumerate(rows, start=1):
@@ -221,6 +293,14 @@ def import_beds(tenant_id, rows) -> dict:
             wards_by_name, row["ward"], "ward", index, errors
         )
         if ward is None:
+            continue
+        if not _claim_natural_key(
+            claimed,
+            (ward.id, row["bed_number"]),
+            index,
+            errors,
+            f"ward '{ward.name}', bed_number '{row['bed_number']}'",
+        ):
             continue
         data = {
             "ward": ward.id,
@@ -247,21 +327,32 @@ def import_beds(tenant_id, rows) -> dict:
         for _index, action, serializer in plans:
             if action == "create":
                 serializer.save(tenant_id=tenant_id)
+                _write_audit_event(tenant_id, serializer.instance, "create", user)
                 created += 1
             else:
+                # SET-010: archive the pre-update state before the new values
+                # land — serializer.instance still holds the committed row.
+                record_revision(serializer.instance, user)
                 serializer.save()
+                _write_audit_event(tenant_id, serializer.instance, "update", user)
                 updated += 1
     return {"created": created, "updated": updated, "errors": []}
 
 
-def import_staff_positions(tenant_id, rows) -> dict:
+def import_staff_positions(tenant_id, rows, user) -> dict:
     """Validate every staff-position row, then write all atomically (SET-013).
 
     Same contract as :func:`import_beds`, keyed on the model's
     ``(tenant_id, department, designation)`` index: a position whose
     ``(department, designation)`` natural key already exists is updated,
     otherwise created. Departments resolve exactly like wards — within the
-    caller's tenant, with unknown and ambiguous names both refused.
+    caller's tenant, with unknown and ambiguous names both refused, and a
+    natural key repeated within the file refused as a duplicate row — so a
+    duplicated position can never double-create.
+
+    The history contract mirrors :func:`import_beds`: updates archive their
+    pre-update state into ``ConfigRevision`` (SET-010) and every written row
+    lands one ``AuditEvent`` (SET-012), both attributed to ``user``.
     """
     department_names = {
         row["department"] for row in rows if row["department"]
@@ -272,6 +363,7 @@ def import_staff_positions(tenant_id, rows) -> dict:
     ):
         departments_by_name.setdefault(department.name, []).append(department)
 
+    claimed = set()
     plans = []
     errors = []
     for index, row in enumerate(rows, start=1):
@@ -283,6 +375,14 @@ def import_staff_positions(tenant_id, rows) -> dict:
             errors,
         )
         if department is None:
+            continue
+        if not _claim_natural_key(
+            claimed,
+            (department.id, row["designation"]),
+            index,
+            errors,
+            f"department '{department.name}', designation '{row['designation']}'",
+        ):
             continue
         data = {
             "department": department.id,
@@ -312,8 +412,13 @@ def import_staff_positions(tenant_id, rows) -> dict:
         for _index, action, serializer in plans:
             if action == "create":
                 serializer.save(tenant_id=tenant_id)
+                _write_audit_event(tenant_id, serializer.instance, "create", user)
                 created += 1
             else:
+                # SET-010: archive the pre-update state before the new values
+                # land — serializer.instance still holds the committed row.
+                record_revision(serializer.instance, user)
                 serializer.save()
+                _write_audit_event(tenant_id, serializer.instance, "update", user)
                 updated += 1
     return {"created": created, "updated": updated, "errors": []}
