@@ -23,6 +23,7 @@ router.register(r"service-units", views.ServiceUnitViewSet, basename="serviceuni
 router.register(r"staff-positions", views.StaffPositionViewSet, basename="staffposition")
 router.register(r"roles", views.RoleViewSet, basename="role")
 router.register(r"memberships", views.UserMembershipViewSet, basename="membership")
+router.register(r"users", views.UserViewSet, basename="user")
 
 _mfa_list = TOTPEnrolViewSet.as_view({"get": "list", "post": "create"})
 _mfa_confirm = TOTPEnrolViewSet.as_view({"post": "confirm"})

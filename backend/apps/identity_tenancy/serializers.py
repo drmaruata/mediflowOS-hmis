@@ -1,5 +1,8 @@
 """Serializers for identity and tenancy."""
+from django.contrib.auth import get_user_model
+from django.db import transaction
 from rest_framework import serializers
+from rest_framework.exceptions import PermissionDenied
 from .models import (
     BreakGlassAccess, Department, Facility, Role, ServiceUnit, StaffPosition,
     Tenant, Ward, Bed, UserMembership,
@@ -129,3 +132,192 @@ class BreakGlassAccessSerializer(serializers.ModelSerializer):
         model = BreakGlassAccess
         fields = "__all__"
         read_only_fields = ["id", "granted_at", "tenant_id"]
+
+
+class UserSerializer(serializers.ModelSerializer):
+    """Read shape of a tenant-managed user (TEN-008).
+
+    ``auth.User`` carries no tenant column, so membership state is read from
+    the membership joining this user to the *request's* tenant — the same
+    join ``UserViewSet`` scopes its queryset with, which is why the fields
+    below are membership-scoped rather than global. The password hash is
+    absent by construction: ``password`` is not among ``fields``, so neither
+    a read nor a create response can serialise it.
+
+    Only ``username`` and ``email`` are writable (PATCH); ``is_active`` is
+    deliberately not exposed, because deactivation is membership state
+    (``UserMembership.active``), not the Django account flag — two
+    overlapping deactivation paths would disagree the moment one was used.
+    """
+    role_id = serializers.SerializerMethodField()
+    facility_id = serializers.SerializerMethodField()
+    active = serializers.SerializerMethodField()
+
+    class Meta:
+        model = get_user_model()
+        fields = [
+            "id", "username", "email", "date_joined",
+            "role_id", "facility_id", "active",
+        ]
+        # role_id/facility_id/active are method fields and therefore already
+        # read-only; they are listed so the writable surface of PATCH reads
+        # as exactly [username, email] without having to know that.
+        read_only_fields = ["id", "date_joined", "role_id", "facility_id", "active"]
+
+    def _membership(self, obj):
+        """This user's membership in the request's tenant, if any.
+
+        Iterates ``obj.memberships.all()`` instead of filtering, so the
+        viewset's ``prefetch_related("memberships")`` is honoured on list
+        reads — a per-row ``.filter()`` would fan out one query per user.
+        """
+        request = self.context.get("request")
+        tenant_id = getattr(request, "tenant_id", None) if request else None
+        if not tenant_id:
+            return None
+        return next(
+            (m for m in obj.memberships.all() if str(m.tenant_id) == str(tenant_id)),
+            None,
+        )
+
+    def get_role_id(self, obj) -> str | None:
+        membership = self._membership(obj)
+        return str(membership.role_id) if membership else None
+
+    def get_facility_id(self, obj) -> str | None:
+        membership = self._membership(obj)
+        if membership is None or membership.facility_id is None:
+            return None
+        return str(membership.facility_id)
+
+    def get_active(self, obj) -> bool | None:
+        membership = self._membership(obj)
+        return membership.active if membership else None
+
+
+class UserCreateSerializer(serializers.ModelSerializer):
+    """Create payload for user management (TEN-008).
+
+    Produces an ``auth.User`` and its active ``UserMembership`` in one
+    transaction — see :meth:`create`. ``password`` is write-only and is
+    hashed by ``create_user``; the repository rule that a password hash is
+    never exposed holds by construction, since the only representation this
+    serializer ever yields is :class:`UserSerializer`'s (see
+    :meth:`to_representation`).
+    """
+    password = serializers.CharField(write_only=True)
+    #: Resolved to a Role instance, then tenant-checked in validate_role_id —
+    #: a bare existence check would accept another hospital's role.
+    role_id = serializers.PrimaryKeyRelatedField(queryset=Role.objects.all())
+    #: A bare UUID on the model (no FK), so tenant-checking happens here.
+    facility_id = serializers.UUIDField(required=False, allow_null=True)
+
+    class Meta:
+        model = get_user_model()
+        fields = ["username", "password", "email", "role_id", "facility_id"]
+
+    def _request_tenant_id(self):
+        request = self.context.get("request")
+        return getattr(request, "tenant_id", None) if request else None
+
+    def _require_tenant(self):
+        """The caller's resolved tenant, or a refusal when there is none.
+
+        Serializer validation runs *before* the viewset's
+        ``perform_create``, so without this guard a tenant-less request would
+        be answered with a misleading 400 ("role does not exist in this
+        tenant") instead of the mixin's canonical 403.
+        """
+        tenant_id = self._request_tenant_id()
+        if tenant_id is None:
+            raise PermissionDenied(
+                "A tenant must be resolved before tenant-owned data can be written."
+            )
+        return tenant_id
+
+    def validate_password(self, value):
+        """Minimal password policy: at least 12 characters (TEN-008).
+
+        Length only — no composition rules — but enforced server-side,
+        because client-side validation is advisory.
+        """
+        if len(value) < 12:
+            raise serializers.ValidationError(
+                "Password must be at least 12 characters long."
+            )
+        return value
+
+    def validate_role_id(self, value):
+        """The role must belong to the caller's tenant (TEN-008, TEN-002).
+
+        Existence alone is not enough: the access token copies
+        ``role.permissions`` verbatim, so a membership wired to another
+        hospital's role — or to a platform-scoped role with ``tenant is
+        None`` — would grant that role's permission bundle inside this
+        tenant. The comparison is the authorisation decision; the field has
+        already fetched the instance by primary key.
+        """
+        tenant_id = self._require_tenant()
+        if value.tenant_id is None or str(value.tenant_id) != str(tenant_id):
+            raise serializers.ValidationError("Role does not exist in this tenant.")
+        return value
+
+    def validate_facility_id(self, value):
+        """The facility must belong to the caller's tenant (TEN-008, TEN-002).
+
+        ``UserMembership.facility_id`` is an unconstrained UUID, so this is
+        the only place a pointer into another hospital's facility tree is
+        refused. One scoped filter answers both "unknown" and "foreign" the
+        same way, so neither response confirms the other's existence.
+        """
+        if value is None:
+            return value
+        tenant_id = self._require_tenant()
+        if not Facility.objects.filter(pk=value, tenant_id=tenant_id).exists():
+            raise serializers.ValidationError("Facility does not exist in this tenant.")
+        return value
+
+    def create(self, validated_data):
+        """Create the user and its active membership in ONE transaction (TEN-008).
+
+        The atomicity is explicit rather than inherited from
+        ``ATOMIC_REQUESTS``: that setting is False in the test profile, and
+        a non-atomic caller would otherwise risk a user row without its
+        membership — an account no token can ever scope. Any failure rolls
+        both rows back together.
+
+        ``tenant_id`` arrives as a ``serializer.save()`` kwarg from
+        ``UserViewSet.perform_create``, mirroring how
+        ``TenantScopedQuerysetMixin`` stamps other tenant-owned models.
+        """
+        tenant_id = validated_data.pop("tenant_id", None)
+        if not tenant_id:
+            # perform_create always supplies it; refusing here means a save()
+            # from any other path cannot mint an unscoped membership.
+            raise PermissionDenied(
+                "A tenant must be resolved before tenant-owned data can be written."
+            )
+        role = validated_data.pop("role_id")
+        facility_id = validated_data.pop("facility_id", None)
+        password = validated_data.pop("password")
+        with transaction.atomic():
+            user = get_user_model().objects.create_user(
+                password=password, **validated_data
+            )
+            UserMembership.objects.create(
+                user=user,
+                tenant_id=tenant_id,
+                role=role,
+                facility_id=facility_id,
+                active=True,
+            )
+        return user
+
+    def to_representation(self, instance):
+        """The canonical read shape, so create responses match GET responses.
+
+        Delegating to :class:`UserSerializer` keeps exactly one
+        representation of a user regardless of the verb that produced it;
+        this serializer is write-only plumbing.
+        """
+        return UserSerializer(instance, context=self.context).data

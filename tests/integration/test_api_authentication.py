@@ -23,6 +23,7 @@ PROTECTED_ENDPOINTS = [
     "/api/v1/patients/search/",
     "/api/v1/intake-points/",
     "/api/v1/qr-codes/",
+    "/api/v1/users/",
 ]
 
 

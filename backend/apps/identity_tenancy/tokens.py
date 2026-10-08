@@ -25,6 +25,7 @@ different tenant than the token, the token wins and the header is ignored.
 """
 from django.contrib.auth import get_user_model
 from django.db.models import F, Prefetch
+from rest_framework_simplejwt.exceptions import AuthenticationFailed
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 
 TENANT_CLAIM = "tenant_id"
@@ -94,6 +95,19 @@ class TenantAwareTokenSerializer(TokenObtainPairSerializer):
 
         user = self.user
         membership = active_membership(user)
+
+        # TEN-008: deactivation flips UserMembership.active, and this is the
+        # point where that must bite. active_membership() above already
+        # ignores inactive rows, so without this check a deactivated account
+        # would still be issued the null-claim token below - logged in, just
+        # unscoped. A user with NO membership keeps the existing fail-closed
+        # semantics (the account may be mid-onboarding; see get_token): only
+        # a membership that exists and has been switched off refuses the
+        # login. Running after super().validate means the password has
+        # already been verified, so this cannot be used to probe which
+        # accounts are deactivated.
+        if membership is None and user.memberships.exists():
+            raise AuthenticationFailed("This account's membership has been deactivated.")
 
         # The claim is an enforcement input, not just display data: the
         # MFARequiredIfConfigured default permission reads requires_mfa and
