@@ -520,6 +520,36 @@ class TestBreakGlassAuditAndRevocation:
         assert "identity.break_glass.revoke" in response.json()["detail"]
         assert BreakGlassAccess.objects.get(pk=grant_id).revoked_at is None
 
+    def test_break_revoke_without_mfa_verification_is_denied(self, users):
+        """A password-only privileged token must not revoke a grant (TEN-006).
+
+        ``BreakGlassViewSet`` must inherit the project default gates instead of
+        replacing them wholesale the way a view that declares its own
+        ``permission_classes`` does. Admin-a's role demands MFA *and* carries
+        ``identity.break_glass.revoke``, so with only IsAuthenticated and the
+        appended claim check a stolen password would reach the write: the
+        ``MFARequiredIfConfigured`` default must deny first, with the
+        ``mfa_required`` code the frontend routes on, and the grant must stay
+        open. The negative path deliberately mints the token the way
+        ``test_mfa_claim_blocks_unverified_session`` does — no
+        ``mfa_verified`` claim — unlike :meth:`_admin_access`.
+        """
+        from apps.identity_tenancy.models import BreakGlassAccess
+
+        grant_id = self._grant()
+        client = APIClient()
+        access = _token(client, "admin-a")
+        payload = AccessToken(access).payload
+        assert payload["requires_mfa"] is True
+        assert payload["mfa_verified"] is False
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        response = client.get(f"/api/v1/break-glass/{grant_id}/revoke/")
+
+        assert response.status_code == 403, response.content
+        assert response.json()["code"] == "mfa_required"
+        assert BreakGlassAccess.objects.get(pk=grant_id).revoked_at is None
+
     def test_break_revoke_of_foreign_tenant_grant_404s(self, users):
         """Another hospital's grant id must not resolve to a revocable row.
 

@@ -34,6 +34,14 @@ class Command(BaseCommand):
                         "identity.roles.write",
                         "identity.memberships.write",
                         "quality.catalogue.manage",
+                        # TEN-007: grants are available out of the box
+                        # (allows_break_glass), so the revoke half must ship
+                        # too — a platform admin who can open an emergency
+                        # read but never close it is the grant-without-revoke
+                        # asymmetry TEN-007 exists to prevent, and RoleViewSet
+                        # excludes platform-scope roles, so the API cannot
+                        # repair the gap later.
+                        "identity.break_glass.revoke",
                     ],
                     "allows_break_glass": True,
                     "require_mfa": False,  # Ease of dev

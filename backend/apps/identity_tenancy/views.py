@@ -5,7 +5,6 @@ from drf_spectacular.utils import extend_schema
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied
-from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
 
 from common.tenant import TENANT_REQUIRED_MESSAGE, TenantScopedQuerysetMixin
@@ -213,8 +212,12 @@ class BreakGlassViewSet(TenantScopedQuerysetMixin, viewsets.GenericViewSet):
 
     serializer_class = BreakGlassAccessSerializer
     queryset = BreakGlassAccess.objects.all()
-    permission_classes = [IsAuthenticated]
 
+    # No ``permission_classes`` attribute: declaring one would replace the
+    # project defaults (IsAuthenticated + MFARequiredIfConfigured) wholesale —
+    # see base.py on views that declare their own. Inheriting them keeps the
+    # TEN-006 MFA gate in force over list and revoke exactly as TenantViewSet
+    # does, and ``get_permissions`` below appends the claim check after them.
     def get_permissions(self):
         return [*super().get_permissions(), RequirePermission("identity.break_glass.revoke")]
 
