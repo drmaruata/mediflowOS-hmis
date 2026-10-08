@@ -1,4 +1,4 @@
-"""Identity, tenancy and administration models (TEN-001 to TEN-011, SET-001, SET-008, SET-009)."""
+"""Identity, tenancy and administration models (TEN-001 to TEN-011, SET-001, SET-006 to SET-009)."""
 import uuid
 
 from django.conf import settings
@@ -259,3 +259,75 @@ class SetupProgress(models.Model):
         # declaration of both the constraint and the index.
         unique_together = [["tenant_id", "step_key"]]
         indexes = [models.Index(fields=["tenant_id", "step_key"])]
+
+
+class ReferenceData(models.Model):
+    """Indicator-denominator reference data (SET-006).
+
+    Reference data is what indicator denominators divide by: catchment
+    population, ambulance availability and the essential-commodity list the
+    hospital commits to keeping. ``kind`` declares which of the three a row
+    is so the indicator engine never has to guess from the payload's shape;
+    ``key`` is the row's name within that kind (a place, a vehicle, a
+    commodity); ``value`` is the parameterised payload itself, deliberately
+    free-form JSON because each kind's shape differs and depends on what the
+    indicator engine needs (AGENTS.md models rule).
+
+    ``active`` exists so deactivation is a soft flip, never a delete
+    (SET-011): an indicator period locked against this data stays resolvable,
+    and the audit history keeps pointing at the same row.
+    """
+
+    class Kind(models.TextChoices):
+        CATCHMENT_POPULATION = "catchment_population", "Catchment population"
+        AMBULANCE = "ambulance", "Ambulance"
+        ESSENTIAL_COMMODITY = "essential_commodity", "Essential commodity"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
+    kind = models.CharField(max_length=32, choices=Kind.choices)
+    key = models.CharField(max_length=128)
+    value = models.JSONField()
+    active = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = "identity.reference_data"
+        # The unique constraint is per tenant — two hospitals may both define
+        # "deoni" as their catchment — so it leads with tenant_id.
+        unique_together = [["tenant_id", "kind", "key"]]
+        # The unique index above already covers the leftmost prefixes used by
+        # the list filter (tenant_id, kind) and the duplicate probe
+        # (tenant_id, kind, key); the declared index mirrors Role's and
+        # SetupProgress's explicit declaration of both the constraint and the
+        # index, and keeps the intent visible without relying on PG behaviour.
+        indexes = [models.Index(fields=["tenant_id", "kind", "key"])]
+
+
+class BaselineInput(models.Model):
+    """Baseline/manual indicator inputs collected by the wizard (SET-007).
+
+    One row per indicator-source code per period: the value the wizard files
+    for a locked reporting window, keyed by the source code the indicator
+    catalogue assigns. ``period`` is deliberately a short string (a month like
+    ``2026-10`` or a year) rather than a date range — the indicator engine
+    defines the period shape, and the wizard echoes it back verbatim.
+    ``source`` records provenance: ``manual`` is the wizard entry path,
+    ``imported`` an external bulk load.
+    """
+
+    class Source(models.TextChoices):
+        MANUAL = "manual", "Manual"
+        IMPORTED = "imported", "Imported"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
+    indicator_source_code = models.CharField(max_length=64)
+    period = models.CharField(max_length=16)
+    value = models.FloatField()
+    source = models.CharField(max_length=16, choices=Source.choices, default=Source.MANUAL)
+
+    class Meta:
+        db_table = "identity.baseline_input"
+        # The list filter leads with tenant_id; the (indicator_source_code,
+        # period) suffix is what a later indicator screen filters on (SET-007).
+        indexes = [models.Index(fields=["tenant_id", "indicator_source_code", "period"])]

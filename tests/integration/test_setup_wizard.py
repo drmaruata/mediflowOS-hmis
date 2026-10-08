@@ -23,7 +23,12 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken
 
-from apps.identity_tenancy.models import SETUP_STEPS, SetupProgress
+from apps.identity_tenancy.models import (
+    BaselineInput,
+    ReferenceData,
+    SETUP_STEPS,
+    SetupProgress,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db]
 
@@ -33,6 +38,8 @@ TENANT_B = uuid.UUID("b2222222-0000-4000-8000-000000000002")
 TEST_PASSWORD = "pw-for-tests-only"
 
 SETUP_MANAGE = "identity.setup.manage"
+REFERENCE_WRITE = "identity.reference_data.write"
+BASELINE_WRITE = "identity.baseline_input.write"
 
 
 def _login(username, password=TEST_PASSWORD):
@@ -54,10 +61,9 @@ def _login(username, password=TEST_PASSWORD):
 def _make_client(tenant_id, username, slug, permissions):
     """An authenticated client whose token carries ``permissions``.
 
-    The returned token is asserted to actually carry the setup claim when it
-    is seated: a 200 from a token that never held the code would prove nothing
-    about which gate fired (same claim-assertion discipline as the RBAC
-    suites).
+    The returned token is asserted to actually carry every seated claim: a
+    200 from a token that never held the code would prove nothing about which
+    gate fired (same claim-assertion discipline as the RBAC suites).
     """
     from apps.identity_tenancy.models import Role, Tenant, UserMembership
 
@@ -73,8 +79,9 @@ def _make_client(tenant_id, username, slug, permissions):
     )
 
     access = _login(username)
-    if "identity.setup.manage" in permissions:
-        assert "identity.setup.manage" in AccessToken(access).payload["permissions"]
+    seated = AccessToken(access).payload["permissions"]
+    for code in permissions:
+        assert code in seated, f"token for {username} lacks the {code} claim"
     client = APIClient()
     client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
     return client
@@ -90,6 +97,34 @@ def client():
 def other_client():
     """A tenant administrator of tenant B with the same claim."""
     return _make_client(TENANT_B, "setup-admin-b", "tenant-b", [SETUP_MANAGE])
+
+
+@pytest.fixture
+def reference_client():
+    """A tenant administrator of tenant A with the indicator claims.
+
+    Reference data and baseline inputs are the last two wizard steps
+    (SET-006, SET-007), so the one fixture holds both write claims the new
+    endpoints gate on.
+    """
+    return _make_client(
+        TENANT_A, "indicator-admin-a", "tenant-a", [REFERENCE_WRITE, BASELINE_WRITE]
+    )
+
+
+@pytest.fixture
+def reference_other_client():
+    """A tenant administrator of tenant B with the same indicator claims.
+
+    A write claim is required to reach the tenant-scoped object lookup; a
+    claim-less B caller would 403 at the permission gate before scoping ever
+    ran, which tests the gate, not the isolation. This fixture seats the
+    claims so an assertion like "B's DELETE of A's row 404s" exercises the
+    scoping itself.
+    """
+    return _make_client(
+        TENANT_B, "indicator-admin-b", "tenant-b", [REFERENCE_WRITE, BASELINE_WRITE]
+    )
 
 
 class TestSetupWizardState:
@@ -334,3 +369,379 @@ class TestSetupWizardAudit:
             action="update",
         )
         assert event.entity_id == str(row.pk)
+
+
+#: The reference-data kinds the API accepts (SET-006). The choices live on the
+#: model; the duplicates here are what the tests send, so a kind that strays
+#: from the brief's list fails loudly in two places instead of one.
+CATCHMENT = "catchment_population"
+COMMODITY = "essential_commodity"
+
+
+class TestReferenceDataApi:
+    """Indicator-denominator reference data (SET-006)."""
+
+    def test_catchment_population_saved_and_returned_for_the_wizard(self, reference_client):
+        """A catchment population row must round-trip: 201 with the stored
+        shape, then a kind-filtered GET returns it.
+
+        This is the reference-data step of the wizard (SET-006): the stored
+        row is what the indicator engine later divides by. Asserting the
+        create response AND the list response pins both halves of the
+        contract — a row that only appeared in one would not serve the
+        wizard.
+        """
+        create = reference_client.post(
+            "/api/v1/reference-data/",
+            {"kind": CATCHMENT, "key": "deoni", "value": {"population": 125000}},
+            format="json",
+        )
+        assert create.status_code == 201, create.content
+        body = create.json()
+        assert body["kind"] == CATCHMENT
+        assert body["key"] == "deoni"
+        assert body["value"] == {"population": 125000}
+        assert body["active"] is True
+        assert body["tenant_id"] == str(TENANT_A)
+
+        listing = reference_client.get(
+            "/api/v1/reference-data/", {"kind": CATCHMENT}
+        ).json()["results"]
+        assert [item["key"] for item in listing] == ["deoni"]
+
+    def test_kind_filter_limits_the_list(self, reference_client):
+        """``?kind=`` must narrow the list to that kind alone (SET-006).
+
+        The wizard writes one kind at a time; an unfiltered list mixing kinds
+        would make the response ambiguous about which denominator it carries.
+        """
+        for kind, key in (
+            ("ambulance", "state-ambulance"),
+            (COMMODITY, "oxygen"),
+            (CATCHMENT, "deoni"),
+        ):
+            post = reference_client.post(
+                "/api/v1/reference-data/",
+                {"kind": kind, "key": key, "value": {"count": 1}},
+                format="json",
+            )
+            assert post.status_code == 201, post.content
+
+        listing = reference_client.get(
+            "/api/v1/reference-data/", {"kind": "ambulance"}
+        ).json()["results"]
+        assert [item["key"] for item in listing] == ["state-ambulance"]
+
+    def test_duplicate_kind_key_returns_409(self, reference_client):
+        """A second POST of the same ``(kind, key)`` in this tenant is 409.
+
+        ``(tenant_id, kind, key)`` is unique; a duplicate is a state conflict
+        the caller must reconcile, not a malformed payload (400) and not a
+        crash (500). One row must remain in the database.
+        """
+        payload = {"kind": CATCHMENT, "key": "deoni", "value": {"population": 1}}
+
+        first = reference_client.post("/api/v1/reference-data/", payload, format="json")
+        assert first.status_code == 201, first.content
+
+        second = reference_client.post("/api/v1/reference-data/", payload, format="json")
+        assert second.status_code == 409, second.content
+        assert (
+            ReferenceData.objects.filter(tenant_id=TENANT_A, kind=CATCHMENT, key="deoni").count()
+            == 1
+        )
+
+    def test_deactivate_keeps_row_and_excludes_from_default_list(self, reference_client):
+        """DELETE deactivates, never hard-deletes (SET-011).
+
+        The row must survive with ``active`` false — audit history and locked
+        indicator periods keep pointing at it — while the default (and
+        kind-filtered) list excludes it. Read back from the database, not the
+        response, so a response that merely looked deleted cannot pass.
+        """
+        create = reference_client.post(
+            "/api/v1/reference-data/",
+            {"kind": "ambulance", "key": "district", "value": {"count": 3}},
+            format="json",
+        )
+        assert create.status_code == 201, create.content
+        row_id = create.json()["id"]
+
+        delete = reference_client.delete(f"/api/v1/reference-data/{row_id}/")
+        assert delete.status_code == 204, delete.content
+
+        row = ReferenceData.objects.get(pk=row_id)
+        assert str(row.tenant_id) == str(TENANT_A)
+        assert row.active is False
+
+        assert [item["key"] for item in reference_client.get("/api/v1/reference-data/").json()["results"]] == []
+        assert (
+            reference_client.get("/api/v1/reference-data/", {"kind": "ambulance"}).json()["results"]
+            == []
+        )
+
+    def test_invalid_kind_is_rejected(self, reference_client):
+        """A kind outside the three declared values must 400, not store.
+
+        The indicator engine keys its denominator lookups off exactly the
+        declared kinds; a fourth value would be stored yet unreachable.
+        """
+        response = reference_client.post(
+            "/api/v1/reference-data/",
+            {"kind": "not-a-kind", "key": "x", "value": {"count": 1}},
+            format="json",
+        )
+        assert response.status_code == 400, response.content
+        assert ReferenceData.objects.count() == 0
+
+    def test_write_requires_the_reference_data_write_claim(self):
+        """POST without ``identity.reference_data.write`` 403s naming the code.
+
+        Reads stay authorised by authentication plus tenant scoping (TEN-002);
+        writes are gated on the claim, and the 403 must name the missing code
+        so the refusal is distinguishable from the MFA gate's.
+        """
+        from apps.identity_tenancy.models import Role, Tenant, UserMembership
+
+        Tenant.objects.create(id=TENANT_A, name="tenant-a", slug="tenant-a")
+        user = get_user_model().objects.create_user(
+            username="reference-reader", password=TEST_PASSWORD
+        )
+        role = Role.objects.create(
+            tenant_id=TENANT_A,
+            name="role-readonly",
+            permissions=["identity.users.manage"],
+        )
+        UserMembership.objects.create(
+            user=user, tenant_id=TENANT_A, role=role, active=True
+        )
+        access = _login(user.username)
+        assert REFERENCE_WRITE not in AccessToken(access).payload["permissions"]
+        reader = APIClient()
+        reader.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        assert reader.get("/api/v1/reference-data/").status_code == 200
+        response = reader.post(
+            "/api/v1/reference-data/",
+            {"kind": CATCHMENT, "key": "deoni", "value": {"population": 1}},
+            format="json",
+        )
+        assert response.status_code == 403, response.content
+        assert REFERENCE_WRITE in response.json()["detail"]
+        assert ReferenceData.objects.count() == 0
+
+
+class TestBaselineInputApi:
+    """Baseline/manual indicator inputs collected by the wizard (SET-007)."""
+
+    def test_baseline_input_saved_and_returned(self, reference_client):
+        """A baseline input must round-trip: 201 with the stored shape, then a
+        GET returns it.
+
+        SET-007's wizard step files the value with the indicator's source code
+        and the period it locks; the default ``source`` is ``manual`` because
+        the wizard collects by hand and ``imported`` is the bulk-import path.
+        """
+        create = reference_client.post(
+            "/api/v1/baseline-inputs/",
+            {"indicator_source_code": "HMI-10", "period": "2026-10", "value": 85.5},
+            format="json",
+        )
+        assert create.status_code == 201, create.content
+        body = create.json()
+        assert body["indicator_source_code"] == "HMI-10"
+        assert body["period"] == "2026-10"
+        assert body["value"] == 85.5
+        assert body["source"] == "manual"
+        assert body["tenant_id"] == str(TENANT_A)
+
+        listing = reference_client.get("/api/v1/baseline-inputs/").json()["results"]
+        assert [item["indicator_source_code"] for item in listing] == ["HMI-10"]
+
+    def test_negative_value_is_rejected(self, reference_client):
+        """A negative baseline value must 400 and store nothing.
+
+        A negative count or rate is meaningless for every indicator the
+        baseline step collects, so it is refused at the serializer (AGENTS §4
+        puts business rules there), before any row is written.
+        """
+        response = reference_client.post(
+            "/api/v1/baseline-inputs/",
+            {"indicator_source_code": "HMI-10", "period": "2026-10", "value": -1},
+            format="json",
+        )
+        assert response.status_code == 400, response.content
+        assert BaselineInput.objects.count() == 0
+
+    def test_invalid_source_is_rejected(self, reference_client):
+        """A source outside ``manual``/``imported`` must 400.
+
+        The two sources are the only provenance a baseline value can have;
+        anything else would be stored yet explainable by nothing.
+        """
+        response = reference_client.post(
+            "/api/v1/baseline-inputs/",
+            {
+                "indicator_source_code": "HMI-10",
+                "period": "2026-10",
+                "value": 3,
+                "source": "exported",
+            },
+            format="json",
+        )
+        assert response.status_code == 400, response.content
+        assert BaselineInput.objects.count() == 0
+
+    def test_write_requires_the_baseline_input_write_claim(self):
+        """POST without ``identity.baseline_input.write`` 403s naming the code."""
+        from apps.identity_tenancy.models import Role, Tenant, UserMembership
+
+        Tenant.objects.create(id=TENANT_A, name="tenant-a", slug="tenant-a")
+        user = get_user_model().objects.create_user(
+            username="baseline-reader", password=TEST_PASSWORD
+        )
+        role = Role.objects.create(
+            tenant_id=TENANT_A,
+            name="role-readonly",
+            permissions=["identity.users.manage"],
+        )
+        UserMembership.objects.create(
+            user=user, tenant_id=TENANT_A, role=role, active=True
+        )
+        access = _login(user.username)
+        assert BASELINE_WRITE not in AccessToken(access).payload["permissions"]
+        reader = APIClient()
+        reader.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        assert reader.get("/api/v1/baseline-inputs/").status_code == 200
+        response = reader.post(
+            "/api/v1/baseline-inputs/",
+            {"indicator_source_code": "HMI-10", "period": "2026-10", "value": 1},
+            format="json",
+        )
+        assert response.status_code == 403, response.content
+        assert BASELINE_WRITE in response.json()["detail"]
+        assert BaselineInput.objects.count() == 0
+
+
+class TestReferenceBaselineTenantIsolation:
+    """Reference data and baseline inputs are tenant state, like every row."""
+
+    def test_tenant_b_sees_none_of_tenant_a_reference_data(
+        self, reference_client, reference_other_client
+    ):
+        """Another hospital's reference data must be invisible and untouchable.
+
+        The mixin scopes the queryset to the request tenant, so B's list is
+        empty and B's DELETE of A's row resolves nothing — 404, not 403, so
+        the existence of A's row is not disclosed. The database layer is
+        covered independently by ``test_rls_isolation`` once the migration's
+        policy is applied.
+        """
+        create = reference_client.post(
+            "/api/v1/reference-data/",
+            {"kind": CATCHMENT, "key": "deoni", "value": {"population": 125000}},
+            format="json",
+        )
+        assert create.status_code == 201, create.content
+        row_id = create.json()["id"]
+
+        assert reference_other_client.get("/api/v1/reference-data/").json()["results"] == []
+        assert ReferenceData.objects.filter(tenant_id=TENANT_B).count() == 0
+        assert (
+            reference_other_client.delete(f"/api/v1/reference-data/{row_id}/").status_code
+            == 404
+        )
+        assert ReferenceData.objects.get(pk=row_id).active is True
+
+    def test_tenant_b_sees_none_of_tenant_a_baseline_inputs(
+        self, reference_client, other_client
+    ):
+        """Another hospital's baseline values must be invisible (SET-007)."""
+        create = reference_client.post(
+            "/api/v1/baseline-inputs/",
+            {"indicator_source_code": "HMI-10", "period": "2026-10", "value": 85.5},
+            format="json",
+        )
+        assert create.status_code == 201, create.content
+
+        assert other_client.get("/api/v1/baseline-inputs/").json()["results"] == []
+        assert BaselineInput.objects.filter(tenant_id=TENANT_B).count() == 0
+
+    def test_same_kind_key_in_another_tenant_is_not_a_conflict(
+        self, reference_client, reference_other_client
+    ):
+        """Uniqueness is per tenant, so B may reuse A's ``(kind, key)``.
+
+        The unique constraint leads with ``tenant_id``; a global duplicate
+        check would let one hospital's row block another's configuration.
+        """
+        payload = {"kind": CATCHMENT, "key": "deoni", "value": {"population": 1}}
+        first = reference_client.post("/api/v1/reference-data/", payload, format="json")
+        assert first.status_code == 201, first.content
+
+        second = reference_other_client.post(
+            "/api/v1/reference-data/", payload, format="json"
+        )
+        assert second.status_code == 201, second.content
+        assert ReferenceData.objects.filter(tenant_id=TENANT_A).count() == 1
+        assert ReferenceData.objects.filter(tenant_id=TENANT_B).count() == 1
+
+    def test_anonymous_requests_are_refused_on_both(self):
+        """Anonymous callers must 401 on reads and writes of both resources.
+
+        Deny by default: indicator denominators and baseline values are
+        hospital configuration, so an anonymous surface would leak them and
+        let strangers mutate them.
+        """
+        anon = APIClient()
+        for url in ("/api/v1/reference-data/", "/api/v1/baseline-inputs/"):
+            assert anon.get(url).status_code == 401
+            assert anon.post(url, {}, format="json").status_code == 401
+
+
+class TestReferenceBaselineAudit:
+    """Every reference-data and baseline-input write is audited (SET-012)."""
+
+    def test_writes_land_audit_events(self, reference_client):
+        """Creates and the deactivate must each land an AUD-001 event.
+
+        SET-012 audits all configuration changes; the indicator denominators
+        and baseline values are exactly the kind of configuration a locked
+        reporting period later needs to be able to justify. The entity type
+        is the table name, matching the mixin's convention.
+        """
+        from apps.audit.models import AuditEvent
+
+        def events(entity_type):
+            return AuditEvent.objects.filter(
+                tenant_id=TENANT_A, entity_type=entity_type
+            ).count()
+
+        created = reference_client.post(
+            "/api/v1/reference-data/",
+            {"kind": CATCHMENT, "key": "deoni", "value": {"population": 125000}},
+            format="json",
+        )
+        assert created.status_code == 201, created.content
+        assert events("identity.reference_data") == 1
+
+        baseline = reference_client.post(
+            "/api/v1/baseline-inputs/",
+            {"indicator_source_code": "HMI-10", "period": "2026-10", "value": 85.5},
+            format="json",
+        )
+        assert baseline.status_code == 201, baseline.content
+        assert events("identity.baseline_input") == 1
+
+        delete = reference_client.delete(
+            f"/api/v1/reference-data/{created.json()['id']}/"
+        )
+        assert delete.status_code == 204, delete.content
+        assert events("identity.reference_data") == 2
+        event = AuditEvent.objects.get(
+            tenant_id=TENANT_A,
+            entity_type="identity.reference_data",
+            action="delete",
+        )
+        assert event.entity_id == created.json()["id"]

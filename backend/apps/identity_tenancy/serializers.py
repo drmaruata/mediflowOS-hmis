@@ -4,9 +4,11 @@ from django.db import transaction
 from rest_framework import serializers
 from rest_framework.exceptions import PermissionDenied
 from .models import (
+    BaselineInput,
     BreakGlassAccess,
     Department,
     Facility,
+    ReferenceData,
     Role,
     ServiceUnit,
     SetupProgress,
@@ -440,3 +442,42 @@ class SetupProgressSerializer(serializers.ModelSerializer):
 
     def get_complete(self, obj) -> bool:
         return obj.status == SetupProgress.Status.COMPLETE
+
+
+class ReferenceDataSerializer(serializers.ModelSerializer):
+    """Indicator-denominator reference data row (SET-006).
+
+    ``kind`` is restricted by the model's choices, so a fourth kind is a 400
+    before any row exists; ``value`` maps to the JSONField and is validated
+    by DRF as JSON. ``active`` is server-owned: the interface deactivates via
+    DELETE (SET-011) and never creates an inactive row, so it is read-only —
+    a writable flag would let a client side-step the audited deactivate path
+    (SET-012). ``tenant_id`` is stamped by ``TenantScopedQuerysetMixin``.
+    """
+
+    class Meta:
+        model = ReferenceData
+        fields = ["id", "tenant_id", "kind", "key", "value", "active"]
+        read_only_fields = ["id", "tenant_id", "active"]
+
+
+class BaselineInputSerializer(serializers.ModelSerializer):
+    """Baseline/manual indicator input (SET-007).
+
+    ``value`` is validated here — a negative baseline is refused before any
+    row is written (AGENTS §4 puts business rules in the serializer). ``source``
+    is restricted by the model's choices; ``tenant_id`` is stamped by the
+    mixin, never accepted from the body.
+    """
+
+    class Meta:
+        model = BaselineInput
+        fields = ["id", "tenant_id", "indicator_source_code", "period", "value", "source"]
+        read_only_fields = ["id", "tenant_id"]
+
+    def validate_value(self, value):
+        # The field is required and non-nullable, so ``value`` is always a
+        # number here; the rule is exactly "negative is refused".
+        if value < 0:
+            raise serializers.ValidationError("Baseline values cannot be negative.")
+        return value

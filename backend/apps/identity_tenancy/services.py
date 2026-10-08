@@ -21,6 +21,12 @@ PLATFORM_ADMIN_SEED_PERMISSIONS = [
     # onboarding (UI_UX: onboarding exits to setup), so the seeded admin must
     # be able to drive it without asking someone to mint a gated role first.
     "identity.setup.manage",
+    # SET-006/SET-007: the wizard's reference-data and baseline-input steps
+    # are the last two of the same exit — the seeded admin collects
+    # denominators and baseline values with the same "just onboarded, keep
+    # going" authority as the step-state claim above.
+    "identity.reference_data.write",
+    "identity.baseline_input.write",
 ]
 
 TENANT_ADMIN_SEED_PERMISSIONS = [
@@ -28,6 +34,8 @@ TENANT_ADMIN_SEED_PERMISSIONS = [
     "identity.roles.write",
     "identity.memberships.write",
     "identity.setup.manage",
+    "identity.reference_data.write",
+    "identity.baseline_input.write",
 ]
 
 

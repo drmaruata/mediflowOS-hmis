@@ -11,9 +11,11 @@ from rest_framework.response import Response
 from common.tenant import TENANT_REQUIRED_MESSAGE, TenantScopedQuerysetMixin
 from .models import (
     SETUP_STEPS,
+    BaselineInput,
     BreakGlassAccess,
     Department,
     Facility,
+    ReferenceData,
     Role,
     ServiceUnit,
     SetupProgress,
@@ -25,9 +27,11 @@ from .models import (
 )
 from .permissions import RequirePermission, WritePermissionMixin
 from .serializers import (
+    BaselineInputSerializer,
     BreakGlassAccessSerializer,
     DepartmentSerializer,
     FacilitySerializer,
+    ReferenceDataSerializer,
     RoleSerializer,
     ServiceUnitSerializer,
     SetupProgressSerializer,
@@ -411,3 +415,124 @@ class SetupProgressViewSet(
         return Response(
             self._step_summary(pk, step), status=status.HTTP_200_OK
         )
+
+
+class ReferenceDataViewSet(
+    WritePermissionMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet
+):
+    """Indicator-denominator reference data: catchment, ambulances, commodities (SET-006).
+
+    The list defaults to *active* rows only, optionally narrowed by ``?kind=``:
+    deactivated rows (SET-011) stay in the table — audit history and locked
+    indicator periods keep pointing at them — but leave the default surface.
+    DELETE is the deactivate verb: it flips ``active`` off and records an
+    AUD-001 ``delete`` event (SET-012) instead of removing the row, so the
+    audit trail outlives the row's presence in the wizard. PUT/PATCH are not
+    routed: the interface is GET/POST/DELETE(deactivate), and a writable
+    ``active`` flag is refused at the serializer anyway (see
+    ``ReferenceDataSerializer``), which is why re-activation has no path.
+
+    Writes are gated on the ``identity.reference_data.write`` claim via
+    ``WritePermissionMixin``; reads stay authorised by authentication plus
+    tenant scoping like every other tenant-owned resource. A duplicate
+    ``(tenant_id, kind, key)`` is a state conflict answered 409 — checked
+    against the tenant-scoped queryset first, with the unique constraint as
+    the race guard.
+    """
+
+    serializer_class = ReferenceDataSerializer
+    queryset = ReferenceData.objects.all()
+    write_permission = "identity.reference_data.write"
+    #: GET/POST/DELETE only; see the docstring for why PUT/PATCH never route.
+    http_method_names = ["get", "post", "delete", "head", "options"]
+
+    def get_queryset(self):
+        queryset = super().get_queryset().filter(active=True)
+        kind = self.request.query_params.get("kind")
+        if kind:
+            # The kind enum was validated on write, so a filter here cannot
+            # match a stored value outside it; the filter is a narrowing, not
+            # a validation point.
+            queryset = queryset.filter(kind=kind)
+        return queryset
+
+    def create(self, request, *args, **kwargs):
+        """A duplicate ``(kind, key)`` in this tenant answers 409, not 400/500.
+
+        The check runs against the *tenant-scoped* queryset: uniqueness is a
+        ``(tenant_id, kind, key)`` constraint, so another hospital's identical
+        key is not this tenant's conflict (the constraint, not a global
+        UniqueValidator, is what enforces that). The check deliberately does
+        not filter ``active`` — the constraint does not either, so a
+        deactivated row blocks its own re-POST the same way (re-activation is
+        not part of the interface). Excepting IntegrityError mirrors the
+        onboarding endpoint's duplicate-slug handling — a race between the
+        pre-check and the insert lands the same 409 instead of a 500.
+        """
+        tenant_id = self.get_tenant_id()
+        if not tenant_id:
+            raise PermissionDenied(TENANT_REQUIRED_MESSAGE)
+        kind = request.data.get("kind")
+        key = request.data.get("key")
+        if ReferenceData.objects.filter(
+            tenant_id=tenant_id, kind=kind, key=key
+        ).exists():
+            return Response(
+                {
+                    "detail": (
+                        f"Reference data '{key}' of kind '{kind}' already "
+                        "exists in this tenant."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+        try:
+            return super().create(request, *args, **kwargs)
+        except IntegrityError:
+            # Lost race: the unique (tenant_id, kind, key) constraint fired
+            # between the pre-check and the insert.
+            return Response(
+                {
+                    "detail": (
+                        f"Reference data '{key}' of kind '{kind}' already "
+                        "exists in this tenant."
+                    )
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+    def destroy(self, request, pk=None):
+        """Deactivate, never hard-delete (SET-011).
+
+        ``self.get_object()`` resolves through the tenant-scoped queryset, so
+        a foreign or unknown id answers 404 before any write. The row keeps
+        its data and its audit history; only its ``active`` flag flips, which
+        is what removes it from the default list. The audit event uses the
+        ``delete`` action (AUD-001) because that is the semantic the caller
+        invoked, matching the mixin's ``perform_destroy`` convention.
+        """
+        instance = self.get_object()
+        instance.active = False
+        instance.save(update_fields=["active"])
+        self._write_audit_log(instance, "delete")
+        return Response(status=status.HTTP_204_NO_CONTENT)
+
+
+class BaselineInputViewSet(
+    WritePermissionMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet
+):
+    """Baseline/manual indicator inputs collected by the wizard (SET-007).
+
+    GET lists the tenant's filed inputs; POST files one for an
+    indicator-source code and period. The interface is deliberately
+    GET/POST-only: a baseline value files a locked reporting period, and
+    silent edits or hard deletes would divorce the stored number from the
+    audit trail that justifies it (SET-010 later closes periods against these
+    rows). Writes are gated on the ``identity.baseline_input.write`` claim;
+    the serializer rejects negative values before any row is written.
+    """
+
+    serializer_class = BaselineInputSerializer
+    queryset = BaselineInput.objects.all()
+    write_permission = "identity.baseline_input.write"
+    http_method_names = ["get", "post", "head", "options"]

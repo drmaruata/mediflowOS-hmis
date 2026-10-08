@@ -76,12 +76,16 @@ code, which is illegal on tenant-scoped roles (TEN-004).
 
 | Role | Seeds |
 | --- | --- |
-| `platform_admin` (tenant-scoped) | `identity.users.manage`, `identity.roles.write`, `identity.memberships.write`, `identity.break_glass.revoke`, `identity.setup.manage` |
-| `tenant_admin` (tenant-scoped) | `identity.users.manage`, `identity.roles.write`, `identity.memberships.write`, `identity.setup.manage` |
+| `platform_admin` (tenant-scoped) | `identity.users.manage`, `identity.roles.write`, `identity.memberships.write`, `identity.break_glass.revoke`, `identity.setup.manage`, `identity.reference_data.write`, `identity.baseline_input.write` |
+| `tenant_admin` (tenant-scoped) | `identity.users.manage`, `identity.roles.write`, `identity.memberships.write`, `identity.setup.manage`, `identity.reference_data.write`, `identity.baseline_input.write` |
 
 Both seeds carry `identity.setup.manage` (SET-001): onboarding exits into the
 setup wizard, so the seeded admins can read and write wizard state immediately
-instead of waiting for someone to mint a gated role first.
+instead of waiting for someone to mint a gated role first. The reference-data
+and baseline-input write claims (SET-006, SET-007) ride the same rationale —
+those are the last two steps of the same wizard exit, and a freshly onboarded
+admin must be able to file denominators and baseline values without a detour
+to mint a role.
 
 The platform operator's own account and role are seeded separately by
 `manage.py seed_dev_data`; onboarding only seeds **this** tenant's roles.
