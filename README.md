@@ -22,7 +22,7 @@ The application is built around the following principles:
 - Python 3.11+
 - Django 5.2 LTS
 - Django REST Framework
-- PostgreSQL
+- PostgreSQL 15+
 - Redis
 - Celery + django-celery-beat
 - Django Channels
@@ -248,7 +248,11 @@ Before setting up the project locally, install the following:
 
 - Python 3.11 or newer
 - Node.js 22.22.2+ or 24.15+ and npm (required by the frontend test environment)
-- PostgreSQL 14+ or 15+
+- PostgreSQL 15+ (16 recommended). The schema relies on row-level security
+  and on `NULLS NOT DISTINCT` unique constraints, both of which require
+  PostgreSQL 15+; `docker/compose.yaml` and CI run PostgreSQL 16. On 14 or
+  earlier Django silently omits the `NULLS NOT DISTINCT` constraint
+  (system check `models.W047`), leaving token-series uniqueness unenforced.
 - Redis
 - Git
 - A terminal such as PowerShell, Bash, or zsh

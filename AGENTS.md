@@ -158,7 +158,7 @@ be honoured):
 
 ## 3. Tech stack (pinned — do not drift)
 
-**Backend:** Python 3.11+, Django 5.2 LTS, DRF 3.18, PostgreSQL (psycopg 3),
+**Backend:** Python 3.11+, Django 5.2 LTS, DRF 3.18, PostgreSQL 15+ (psycopg 3),
 Redis, Celery 5.6 + django-celery-beat, Channels 4.3, **daphne 4.2** (ASGI
 server), SimpleJWT, django-otp, drf-spectacular, OpenTelemetry + Sentry.
 

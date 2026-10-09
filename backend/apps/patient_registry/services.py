@@ -64,5 +64,9 @@ def generate_uhid(*, tenant_id: uuid.UUID) -> str:
             if "locked" not in str(exc):
                 raise
             continue
+        # ``:06d`` zero-pads to six digits, a stated interface (REG-001,
+        # ``UHID-YYYYMM-NNNNNN``); past 999,999 UHIDs in one tenant-month the
+        # field widens rather than wrapping. Guarding that ceiling is a product
+        # decision, so the format is documented here, not enforced.
         return f"UHID-{period.replace('-', '')}-{next_value:06d}"
     raise RuntimeError("Could not allocate a UHID after retries")

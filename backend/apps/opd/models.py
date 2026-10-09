@@ -72,6 +72,10 @@ class TokenSeries(models.Model):
             models.UniqueConstraint(
                 fields=["tenant_id", "facility_id", "department_id"],
                 name="opd_token_series_tenant_facility_department_uniq",
+                # PostgreSQL 15+ only: Django gates the feature on a runtime
+                # version check, and on an older server silently omits this
+                # whole constraint (system check models.W047), reopening the
+                # GEN null-series race the docstring describes.
                 nulls_distinct=False,
             ),
         ]

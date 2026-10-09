@@ -103,6 +103,9 @@ class TestServerGeneratedUHID:
         assert UHID_RE.fullmatch(uhid), uhid
         assert response.data["verification_status"] == "pending"
         assert Patient.objects.get(id=response.data["id"]).uhid == uhid
+        # No intake department was named, so no token may be fabricated: the
+        # view only sets one when an intake resolves (REG-010).
+        assert "token" not in response.data
 
     def test_client_supplied_uhid_is_ignored(self):
         """A caller cannot squat on a chosen UHID; the server value wins."""
@@ -112,6 +115,9 @@ class TestServerGeneratedUHID:
         assert response.status_code == status.HTTP_201_CREATED
         assert UHID_RE.fullmatch(response.data["uhid"])
         assert response.data["uhid"] != "UH999999-999999"
+        # Plain registration with no intake: the response must not carry a
+        # fabricated token.
+        assert "token" not in response.data
 
     def test_uhid_sequence_is_per_tenant(self):
         """Two tenants each start their own UHID series at one (REG-001)."""
@@ -276,6 +282,35 @@ class TestUHIDService:
             tenant_id=self.tenant.id, kind="uhid"
         )
         assert sequence.next_value == 2
+
+    def test_generate_uhid_fails_closed_when_sequence_cannot_be_created(
+        self, monkeypatch
+    ):
+        """Retry exhaustion fails closed and writes no sequence row (REG-001).
+
+        The retry test above pins the recoverable half of the first-create
+        race. This pins the far side: when the ``(tenant, kind, period)`` row
+        can never be written, the service must not guess a number or leave a
+        half-written sequence behind — after the bounded retries it raises the
+        documented ``RuntimeError`` (fail closed, AGENTS §4) and no
+        ``PatientSequence`` row exists for the tenant. Without this pin a
+        refactor could swallow the final ``IntegrityError`` or persist a stray
+        row and still pass the recoverable-race test above.
+        """
+        from apps.patient_registry.services import generate_uhid
+
+        def _always_conflicting_create(**kwargs):
+            raise IntegrityError("unique constraint")
+
+        monkeypatch.setattr(
+            PatientSequence.objects, "create", _always_conflicting_create
+        )
+
+        with pytest.raises(RuntimeError, match="Could not allocate a UHID"):
+            generate_uhid(tenant_id=self.tenant.id)
+        assert PatientSequence.objects.filter(
+            tenant_id=self.tenant.id, kind="uhid"
+        ).count() == 0
 
     def test_uhid_period_rolls_over_monthly(self, monkeypatch):
         """The UHID carries its issue month; a new month restarts at 000001."""
