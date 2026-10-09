@@ -1,6 +1,8 @@
 """Patient registry serializers."""
 from rest_framework import serializers
 
+from apps.identity_tenancy.models import Department
+from common.tenant import REQUEST_TENANT_ATTR
 from .models import Patient, IntakePoint, QRCode
 from .validation import MOBILE_RE, normalise_mobile
 
@@ -141,10 +143,38 @@ class IntakePointSerializer(serializers.ModelSerializer):
 
 
 class QRCodeSerializer(serializers.ModelSerializer):
+    # Explicitly declared rather than the field ModelSerializer would generate,
+    # because the generated PrimaryKeyRelatedField's queryset is unscoped and
+    # would accept another hospital's department id. ``validate_department``
+    # pins the FK inside the request's tenant; the reading side stays the
+    # plain UUID the generated field would have produced.
+    department = serializers.PrimaryKeyRelatedField(
+        queryset=Department.objects.all(), required=False, allow_null=True
+    )
+
     class Meta:
         model = QRCode
         fields = "__all__"
-        read_only_fields = ["id", "tenant_id"]
+        # encode_data is minted by QRCodeViewSet._encode_data from the row's
+        # own facility/intake_point/department (REG-013); client-supplied
+        # values must be ignored, never stored.
+        read_only_fields = ["id", "tenant_id", "encode_data"]
+
+    def validate_department(self, value):
+        """A QR's department must belong to the tenant making the request.
+
+        The QR names the department the scan should route to, so an accepted
+        foreign id would mint callbacks into another hospital's queues.
+        """
+        if value is None:
+            return value
+        request = self.context.get("request")
+        tenant_id = getattr(request, REQUEST_TENANT_ATTR, None) if request else None
+        if tenant_id and str(value.tenant_id) != str(tenant_id):
+            raise serializers.ValidationError(
+                "Department must belong to the current tenant."
+            )
+        return value
 
 
 class OpSlipTokenSerializer(serializers.Serializer):

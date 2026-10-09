@@ -5,6 +5,8 @@ from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 
+from apps.abdm_gateway.client import require_sandbox_base_url
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "change-me")
 DEBUG = os.getenv("DJANGO_DEBUG", "false") == "true"
@@ -26,6 +28,17 @@ if not DEBUG and not PATIENT_FIELDS_KEY:
         "missing master key. dev.py/test.py set a value; production must export "
         "one."
     )
+
+# REG-009: outbound ABDM sandbox root for the ABHA create/verify adapter.
+# Sandbox-only by design: the gate refuses anything but an https "sbx" URL, so
+# a mis-typed value fails at import rather than later when the first counter
+# request would reach the production ABDM endpoint. Unset means the adapter is
+# unavailable and the patient ABHA actions answer 503 (never a fake 200);
+# dev.py/test.py leave it unset, and a local sandbox run exports it.
+_abdm_sandbox_url = os.getenv("ABDM_SANDBX_BASE_URL", "")
+ABDM_SANDBX_BASE_URL = (
+    require_sandbox_base_url(_abdm_sandbox_url) if _abdm_sandbox_url else ""
+)
 
 INSTALLED_APPS = [
     "django.contrib.admin",

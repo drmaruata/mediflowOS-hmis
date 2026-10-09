@@ -76,6 +76,16 @@ KNOWN_GAPS = {
         "the link token is `secrets.token_urlsafe(32)` and discarded — "
         "no encryption, no storage (placeholder comment for KMS)",
     ),
+    "REG-009": (
+        "deferred",
+        "the outbound ABDM sandbox ABHA adapter shipped (create/verify actions "
+        "on the patient endpoint, `apps/abdm_gateway/client.py`, 503 "
+        "`ABDM_SANDBOX_UNCONFIGURED` fail-closed path, env + IntegrationAdapter "
+        "base-URL resolution) but the official sandbox create/verify spec "
+        "(endpoint paths, payloads, OTP flow) is unresolved — the enrollment "
+        "paths are patterned on the community-mirrored sandbox v1 spec and "
+        "must be re-verified before production",
+    ),
     "TEN-004": (
         "partial",
         "RequirePermission reads the token's `permissions` claim and gates the "

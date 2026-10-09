@@ -187,10 +187,12 @@ do not apply to this repo.
   `docker/Dockerfile.backend` does.
 - Before adding any dependency, check `README.md` §"Dependency version
   guidance", then verify via Context7, then justify it in your report.
-- Unused **backend** dependencies (`Pillow`, `openpyxl`, `reportlab`, `httpx`,
+- Unused **backend** dependencies (`Pillow`, `openpyxl`, `reportlab`,
   `opentelemetry-sdk`, `opentelemetry-instrumentation-django`, `sentry-sdk`) are
   declared but not imported; each backs a documented requirement that is not
-  implemented. On the **frontend**, `react-hook-form` and `zod` are wired
+  implemented. `httpx` was wired by `apps/abdm_gateway/client.py` (outbound
+  ABDM sandbox ABHA create/verify, REG-009) and is an ordinary imported
+  dependency now. On the **frontend**, `react-hook-form` and `zod` are wired
   (login form); `@ant-design/charts` was removed with the shadcn migration.
   The frontend dependencies that are declared but never imported are the
   shadcn prerequisites for components not yet vendored — nine Radix packages

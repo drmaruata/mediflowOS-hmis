@@ -1,7 +1,16 @@
 """Patient registry views."""
+import logging
+
+import httpx
+from django.core.exceptions import ImproperlyConfigured
 from django.db.models import Q
 from django.utils import timezone
-from drf_spectacular.utils import extend_schema, inline_serializer
+from drf_spectacular.types import OpenApiTypes
+from drf_spectacular.utils import (
+    OpenApiResponse,
+    extend_schema,
+    inline_serializer,
+)
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action
 from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
@@ -9,6 +18,11 @@ from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
 from rest_framework.views import APIView
 
+from apps.abdm_gateway.client import (
+    ABDMClient,
+    ABDMRequestError,
+    resolve_sandbox_base_url,
+)
 from common.crypto import search_index
 from common.tenant import TENANT_REQUIRED_MESSAGE, TenantScopedQuerysetMixin
 from .models import Patient, IntakePoint, QRCode, field_keys
@@ -20,6 +34,23 @@ from .serializers import (
 )
 from .services import birth_year, find_duplicates
 from .validation import normalise_mobile
+
+logger = logging.getLogger(__name__)
+
+
+class AbdmErrorResponseSerializer(serializers.Serializer):
+    """Structured error body the ABDM ABHA actions answer (REG-009).
+
+    Every failure shape — 400 validation misses, the 502 sandbox-unreachable
+    path and both 503s — is ``{status, code, detail}``, and the whole point of
+    the shape is that it is stable, so one shared component is used for all of
+    them in the schema. The ``code`` values are the stable machine keys
+    (``ABDM_SANDBOX_UNCONFIGURED``, ``ABHA_NOT_LINKED``, ...).
+    """
+
+    status = serializers.CharField()
+    code = serializers.CharField()
+    detail = serializers.CharField()
 
 
 class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
@@ -309,6 +340,148 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         queryset = self.get_queryset().filter(verification_status="pending")
         return Response(PatientSerializer(queryset, many=True).data)
 
+    # --- ABDM outbound ABHA actions (REG-009) ---------------------------
+
+    def _abdm_dispatch(self, method, *args):
+        """Run an ABDMClient method, or answer the structured 503.
+
+        With no sandbox configured the action must fail closed: there is no
+        request the adapter could make, so a fabricated 200 would be a lie
+        (REG-009). A non-2xx sandbox response is mirrored with its status; a
+        failure before any response answers 502.
+        """
+        tenant_id = self.get_tenant_id()
+        try:
+            base_url = resolve_sandbox_base_url(tenant_id)
+        except ImproperlyConfigured as exc:
+            return Response(
+                {
+                    "status": "unavailable",
+                    "code": "ABDM_SANDBOX_MISCONFIGURED",
+                    "detail": str(exc),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        if not base_url:
+            return Response(
+                {
+                    "status": "unavailable",
+                    "code": "ABDM_SANDBOX_UNCONFIGURED",
+                    "detail": (
+                        "The ABDM sandbox is not configured: set "
+                        "ABDM_SANDBX_BASE_URL or the tenant's ABDM "
+                        "IntegrationAdapter config.base_url."
+                    ),
+                },
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+        try:
+            result = getattr(ABDMClient(base_url), method)(*args)
+        except ABDMRequestError as exc:
+            mirror = (
+                exc.status_code
+                if exc.status_code is not None and 400 <= exc.status_code < 600
+                else status.HTTP_502_BAD_GATEWAY
+            )
+            return Response(
+                {"status": "error", "code": "ABDM_REQUEST_FAILED", "detail": str(exc)},
+                status=mirror,
+            )
+        except httpx.TransportError:
+            logger.warning(
+                "ABDM sandbox unreachable for tenant %s (%s)", tenant_id, method
+            )
+            return Response(
+                {
+                    "status": "error",
+                    "code": "ABDM_SANDBOX_UNREACHABLE",
+                    "detail": "The ABDM sandbox could not be reached.",
+                },
+                status=status.HTTP_502_BAD_GATEWAY,
+            )
+        return Response(result)
+
+    @extend_schema(
+        request=None,
+        responses={
+            200: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description=(
+                    "The sandbox's create response, passed through verbatim. "
+                    "The create spec is unresolved (REG-009) so the exact "
+                    "shape is not pinned."
+                ),
+            ),
+            503: AbdmErrorResponseSerializer,
+        },
+        description=(
+            "Create a new ABHA for this patient through the ABDM sandbox "
+            "(REG-009). The request body is passed through to the sandbox "
+            "enrollment API verbatim; the sandbox create spec is unresolved, "
+            "so the schema is deliberately not pinned. Answers 503 with code "
+            "`ABDM_SANDBOX_UNCONFIGURED` when the sandbox is not configured "
+            "- never a fabricated success. Tenant-scoped: a patient of another "
+            "tenant answers 404."
+        ),
+    )
+    @action(detail=True, methods=["post"], url_path="abha/create")
+    def abha_create(self, request, pk=None):
+        """Create a new ABHA at the counter (REG-009)."""
+        self.get_object()
+        payload = request.data if isinstance(request.data, dict) else {}
+        return self._abdm_dispatch("create_abha", payload)
+
+    @extend_schema(
+        request=inline_serializer(
+            name="AbhaVerifyRequest",
+            fields={"otp": serializers.CharField(allow_blank=True)},
+        ),
+        responses={
+            200: OpenApiResponse(
+                response=OpenApiTypes.OBJECT,
+                description=(
+                    "The sandbox's verify response, passed through verbatim. "
+                    "The verify spec is unresolved (REG-009) so the exact "
+                    "shape is not pinned."
+                ),
+            ),
+            400: AbdmErrorResponseSerializer,
+            503: AbdmErrorResponseSerializer,
+        },
+        description=(
+            "Verify this patient's existing ABHA with the mobile OTP they "
+            "received (REG-009). Answers 400 when the patient has no ABHA or "
+            "no OTP was sent, and 503 with code `ABDM_SANDBOX_UNCONFIGURED` "
+            "when the sandbox is not configured. Tenant-scoped: a patient of "
+            "another tenant answers 404."
+        ),
+    )
+    @action(detail=True, methods=["post"], url_path="abha/verify")
+    def abha_verify(self, request, pk=None):
+        """Verify an existing ABHA at the counter (REG-009)."""
+        patient = self.get_object()
+        if not patient.abha_number:
+            return Response(
+                {
+                    "status": "error",
+                    "code": "ABHA_NOT_LINKED",
+                    "detail": "This patient has no ABHA number to verify.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        data = request.data if isinstance(request.data, dict) else {}
+        otp = str(data.get("otp") or "")
+        if not otp:
+            return Response(
+                {
+                    "status": "error",
+                    "code": "OTP_REQUIRED",
+                    "detail": "An OTP is required to verify the ABHA.",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        return self._abdm_dispatch("verify_abha", patient.abha_number, otp)
+
 
 class IntakePointViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
     serializer_class = IntakePointSerializer
@@ -316,7 +489,7 @@ class IntakePointViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
 
 
 class QRCodeViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
-    """Facility and counter QR codes for ABDM Scan and Share.
+    """Facility, counter and department QR codes for ABDM Scan and Share.
 
     ``encode_data`` carries the facility's HIP ID, which is tenant-identifying,
     so this resource is tenant-scoped like any other patient-registry row.
@@ -325,35 +498,76 @@ class QRCodeViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
     serializer_class = QRCodeSerializer
     queryset = QRCode.objects.all()
 
-    def perform_create(self, serializer):
-        from rest_framework.exceptions import PermissionDenied, ValidationError
+    @staticmethod
+    def _encode_data(facility, intake_point, department):
+        """The ABDM Scan-and-Share string: ``HIP[-counter][-department_id]``.
 
+        This is what the scanning app reads and sends back in the callback
+        payload. The department segment is the row's own UUID: Department has
+        no machine code column yet, so the id is the stable token the callback
+        resolves by — the same lookahead ``opd/services.py`` uses for a future
+        additive code column.
+        """
+        parts = [facility.abdm_hip_id]
+        if intake_point is not None and intake_point.counter_id:
+            parts.append(intake_point.counter_id)
+        if department is not None:
+            parts.append(str(department.id))
+        return "-".join(parts)
+
+    def perform_create(self, serializer):
         tenant_id = self.get_tenant_id()
         if not tenant_id:
             raise PermissionDenied("A tenant must be resolved.")
-        
+
         facility = serializer.validated_data.get("facility")
         if not facility or not facility.abdm_hip_id:
-            raise ValidationError({"facility": "Facility must have an ABDM HIP ID to generate a QR code."})
-            
-        intake_point = serializer.validated_data.get("intake_point")
-        counter_code = intake_point.counter_id if intake_point and intake_point.counter_id else ""
-        
-        # Format: HIP_ID + optional counter code. This is what the ABDM scanning app reads
-        # and sends back in the callback payload.
-        encode_data = f"{facility.abdm_hip_id}-{counter_code}" if counter_code else facility.abdm_hip_id
-        
+            raise ValidationError(
+                {"facility": "Facility must have an ABDM HIP ID to generate a QR code."}
+            )
+
+        # ``department`` is a validated in-tenant Department instance (see
+        # validate_department in the serializer); encoding it here routes the
+        # scan to that department when the ABDM flow permits (REG-013).
         serializer.save(
             tenant_id=tenant_id,
-            encode_data=encode_data
+            encode_data=self._encode_data(
+                facility,
+                serializer.validated_data.get("intake_point"),
+                serializer.validated_data.get("department"),
+            ),
         )
 
     @action(detail=True, methods=["post"])
     def regenerate(self, request, pk=None):
+        """Rebuild ``encode_data`` from the row's own relationships (REG-013).
+
+        A regenerate re-derives the encoding from the *stored* facility, intake
+        point and department so the QR matches the department it now points at,
+        stamps ``regenerated_at``, and records the change in the audit trail
+        (AUD-001): an encode_data change is a queue-routing change and has to
+        be traceable. The audit row is written directly to ``audit.event`` with
+        the ``source`` marker because the mixin's write path cannot express a
+        machine-initiated event.
+        """
         qr = self.get_object()
+        qr.encode_data = self._encode_data(qr.facility, qr.intake_point, qr.department)
         qr.regenerated_at = timezone.now()
-        qr.save(update_fields=["regenerated_at"])
-        return Response({"status": "regenerated"})
+        qr.save(update_fields=["encode_data", "regenerated_at"])
+
+        from apps.audit.models import AuditEvent
+
+        AuditEvent.objects.create(
+            tenant_id=self.get_tenant_id(),
+            user_id=(
+                request.user.pk if request.user.is_authenticated else None
+            ),
+            action="update",
+            entity_type="qr_code",
+            entity_id=str(qr.id),
+            source="qr.regenerate",
+        )
+        return Response(QRCodeSerializer(qr).data)
 
 
 class OpSlipView(APIView):

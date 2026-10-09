@@ -134,7 +134,7 @@ animation utilities.
 | openpyxl | 3.1.5 | 3.1.5 | Current latest in the supported 3.1 line; currently unused — see below. |
 | Pillow | 12.3.0 | 12.3.0 | Current latest; currently unused — see below. |
 | reportlab | 5.0.1 | 5.0.1 | Current latest; currently unused — see below. |
-| httpx | 0.28.1 | 0.28.1 | Current latest in the supported 0.28 line; currently unused — see below. |
+| httpx | 0.28.1 | 0.28.1 | Current latest in the supported 0.28 line. Wired via `apps/abdm_gateway/client.py` — outbound ABDM sandbox ABHA create/verify (REG-009). |
 | opentelemetry-sdk | 1.45.0 | 1.45.0 | Current latest; keep aligned with instrumentation. Currently unwired. |
 | opentelemetry-instrumentation-django | 0.66b0 | 0.66b0 | Prerelease; keep exactly pinned and upgrade with matching OTel packages. Currently unwired. |
 | sentry-sdk | 2.71.0 | 2.71.0 | Current latest in v2. Currently unwired. |
@@ -166,7 +166,7 @@ Django's ASGI handler, but it is not what the container uses.
 
 ### Dependencies that are declared but not yet used
 
-`Pillow`, `openpyxl`, `reportlab`, `httpx`, `opentelemetry-sdk`,
+`Pillow`, `openpyxl`, `reportlab`, `opentelemetry-sdk`,
 `opentelemetry-instrumentation-django` and `sentry-sdk` are declared but not
 imported anywhere in `backend/`. Each backs a documented requirement that is not
 implemented yet:
@@ -175,7 +175,6 @@ implemented yet:
 | --- | --- |
 | `Pillow` | printable facility/counter QR codes (architecture doc 8.4) |
 | `openpyxl`, `reportlab` | Quality OS regulatory exports (9.9) |
-| `httpx` | ABDM gateway, HL7 v2 bridge and payer adapters (12) |
 | `opentelemetry-*`, `sentry-sdk` | observability (16) — entirely unimplemented |
 
 They are kept pinned rather than removed so the versions are not re-resolved

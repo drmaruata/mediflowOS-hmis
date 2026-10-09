@@ -318,13 +318,27 @@ class IntakePoint(models.Model):
 
 
 class QRCode(models.Model):
-    """Facility/counter/department QR codes for ABDM Scan and Share."""
+    """Facility/counter/department QR codes for ABDM Scan and Share.
+
+    ``department`` (REG-013) is nullable so a facility-wide or counter-level
+    code still exists; when set, the ``encode_data`` the scanning app reads
+    gains the department segment so the ABDM flow can route the scan back to
+    the intended department.
+    """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     tenant_id = models.UUIDField(db_index=True)
     facility = models.ForeignKey("identity_tenancy.Facility", on_delete=models.CASCADE, related_name="qr_codes", db_index=True)
     intake_point = models.ForeignKey(IntakePoint, on_delete=models.SET_NULL, null=True, blank=True, related_name="qr_codes")
-    encode_data = models.TextField()  # ABDM HIP ID + intake code
+    department = models.ForeignKey(
+        "identity_tenancy.Department",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="qr_codes",
+        db_index=True,
+    )
+    encode_data = models.TextField()  # ABDM HIP ID + intake code + department id
     active = models.BooleanField(default=True)
     regenerated_at = models.DateTimeField(null=True, blank=True)
     revoked_at = models.DateTimeField(null=True, blank=True)
