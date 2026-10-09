@@ -145,3 +145,33 @@ class QRCodeSerializer(serializers.ModelSerializer):
         model = QRCode
         fields = "__all__"
         read_only_fields = ["id", "tenant_id"]
+
+
+class OpSlipTokenSerializer(serializers.Serializer):
+    """The token block of the OP slip print contract (REG-011, REG-012).
+
+    ``series``/``number`` are printed on the paper slip verbatim; they come
+    from the ``opd.Token`` row ``OpSlipView`` selects for the visit.
+    """
+
+    series = serializers.CharField()
+    number = serializers.IntegerField()
+
+
+class OpSlipSerializer(serializers.Serializer):
+    """JSON print contract for an OPD visit slip (REG-011, REG-012).
+
+    A response-only serializer: every field is the denormalised value a paper
+    slip shows — the patient's UHID and name, the department and facility
+    display names, the token block, and the issue/visit dates. ``token`` and
+    ``issued_at`` are null when the visit has no issued token (an encounter
+    without a token still has a printable patient + visit core).
+    """
+
+    uhid = serializers.CharField()
+    patient_name = serializers.CharField()
+    token = OpSlipTokenSerializer(required=False, allow_null=True)
+    department = serializers.CharField()
+    facility = serializers.CharField()
+    issued_at = serializers.DateTimeField(required=False, allow_null=True)
+    visit_date = serializers.DateField()

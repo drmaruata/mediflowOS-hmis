@@ -144,9 +144,39 @@ class DepartmentViewSet(
     Creates and PATCHes land the tenant mixin's audit event (SET-012) and
     effective-date the pre-update state (SET-010); DELETE is refused 405
     (SET-011) — deactivation is ``PATCH {active: false}``.
+
+    ``GET ?opd_enabled=true`` narrows the list to departments the OPD token
+    picker can select (REG-012).
     """
     serializer_class = DepartmentSerializer
     queryset = Department.objects.all()
+
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="opd_enabled",
+                description=(
+                    "When 'true', list only departments the OPD picker can "
+                    "select (REG-012, the model's existing opd_enabled "
+                    "flag). Any other or absent value leaves the list "
+                    "unfiltered."
+                ),
+                required=False,
+            ),
+        ],
+        responses={200: DepartmentSerializer(many=True)},
+    )
+    def list(self, request, *args, **kwargs):
+        return super().list(request, *args, **kwargs)
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+        # Only the literal "true" opts the filter in (mirrors SET-008's
+        # ``incomplete=`` parse): an ambiguous value must not silently empty
+        # the picker, which would look like a working filter.
+        if self.request.query_params.get("opd_enabled", "").lower() == "true":
+            queryset = queryset.filter(opd_enabled=True)
+        return queryset
 
 
 class WardViewSet(

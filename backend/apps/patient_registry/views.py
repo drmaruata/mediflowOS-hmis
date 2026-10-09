@@ -4,13 +4,20 @@ from django.utils import timezone
 from drf_spectacular.utils import extend_schema, inline_serializer
 from rest_framework import serializers, viewsets, status
 from rest_framework.decorators import action
-from rest_framework.exceptions import PermissionDenied, ValidationError
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
+from rest_framework.generics import get_object_or_404
 from rest_framework.response import Response
+from rest_framework.views import APIView
 
 from common.crypto import search_index
 from common.tenant import TENANT_REQUIRED_MESSAGE, TenantScopedQuerysetMixin
 from .models import Patient, IntakePoint, QRCode, field_keys
-from .serializers import PatientSerializer, IntakePointSerializer, QRCodeSerializer
+from .serializers import (
+    IntakePointSerializer,
+    OpSlipSerializer,
+    PatientSerializer,
+    QRCodeSerializer,
+)
 from .services import birth_year, find_duplicates
 from .validation import normalise_mobile
 
@@ -347,3 +354,87 @@ class QRCodeViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         qr.regenerated_at = timezone.now()
         qr.save(update_fields=["regenerated_at"])
         return Response({"status": "regenerated"})
+
+
+class OpSlipView(APIView):
+    """OP slip print payload for an OPD encounter (REG-011, REG-012).
+
+    ``visit_id`` is the OPD encounter's primary key — the product calls the
+    encounter a "visit", and there is no separate visit-table row. Every
+    lookup is tenant-scoped because the payload carries PHI (the patient's
+    UHID and name): a visit that does not exist in this tenant answers 404
+    exactly like an unknown id, so the endpoint cannot be used to probe for
+    another hospital's encounters.
+    """
+
+    @extend_schema(
+        responses={200: OpSlipSerializer},
+        description=(
+            "The JSON print contract for an OP slip (REG-011, REG-012): "
+            "denormalised patient, token, department and facility values. "
+            "``token``/``issued_at`` are null when the visit has no issued "
+            "token."
+        ),
+    )
+    def get(self, request, visit_id):
+        tenant_id = getattr(request, "tenant_id", None)
+        if not tenant_id:
+            # Mirror TenantScopedQuerysetMixin: an unresolved tenant resolves
+            # to an empty queryset, so its detail lookups answer 404. Same
+            # fail-closed shape here, so a membership-less token probes nothing.
+            raise NotFound()
+
+        from apps.identity_tenancy.models import Department, Facility
+        from apps.opd.models import OPDEncounter, Token
+
+        encounter = get_object_or_404(
+            OPDEncounter.objects.filter(tenant_id=tenant_id), pk=visit_id
+        )
+        patient = get_object_or_404(
+            Patient.objects.filter(tenant_id=tenant_id), pk=encounter.patient_id
+        )
+        department = get_object_or_404(
+            Department.objects.filter(tenant_id=tenant_id),
+            pk=encounter.department_id,
+        )
+        # The encounter and token carry no facility id; the department is the
+        # row that names its facility (Department.facility is a required FK,
+        # so the slip resolves through it rather than duplicating the id).
+        facility = get_object_or_404(
+            Facility.objects.filter(tenant_id=tenant_id),
+            pk=department.facility_id,
+        )
+
+        # There is no FK joining Token to the encounter, so the slip's token is
+        # keyed by the same (tenant, patient, department) triple the encounter
+        # carries. ``-issued_at`` picks the latest row: a re-issued token is
+        # the one the queue is now showing for this patient, not the first one
+        # minted for the visit.
+        token = (
+            Token.objects.filter(
+                tenant_id=tenant_id,
+                patient_id=encounter.patient_id,
+                department_id=encounter.department_id,
+            )
+            .order_by("-issued_at")
+            .first()
+        )
+
+        demographics = patient.demographics or {}
+        payload = {
+            "uhid": patient.uhid,
+            # REG-007 requires a name at registration; the blank fallback only
+            # ever renders a legacy/corrupt row instead of 500ing the print
+            # endpoint, and a blank name on the slip is visibly wrong.
+            "patient_name": str(demographics.get("name") or ""),
+            "token": (
+                {"series": token.series, "number": token.number}
+                if token is not None
+                else None
+            ),
+            "department": department.name,
+            "facility": facility.name,
+            "issued_at": token.issued_at if token is not None else None,
+            "visit_date": encounter.registration_time.date(),
+        }
+        return Response(OpSlipSerializer(payload).data)
