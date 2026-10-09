@@ -180,10 +180,12 @@ class TestClientSuppliedTenantIsIgnored:
             "/api/v1/patients/",
             {
                 # Fresh UHID, so the assertion below is about the tenant and not
-                # a uniqueness collision with the fixture.
+                # a uniqueness collision with the fixture. Demographics carry
+                # the fields REG-007 now requires, so this still exercises the
+                # tenant override rather than being refused at validation.
                 "uhid": "UH7777",
                 "tenant_id": str(TENANT_B),
-                "demographics": {"name": "Injected"},
+                "demographics": {"name": "Injected", "gender": "M", "yearOfBirth": 1990},
             },
             format="json",
         )

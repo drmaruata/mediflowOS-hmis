@@ -3,6 +3,18 @@ from django.db import models
 import uuid
 
 
+#: How the patient reached the counter (REG-005). This is a different axis from
+#: :class:`IntakePoint.type`, which is the *kind of service point*
+#: (``opd``/``pharmacy``/``lab``/``billing``); the two sets do not overlap and
+#: are never interchangeable. REG-005 enumerates the channel set, so it lives
+#: here as the single source the serializer validates against.
+INTAKE_CHANNELS = (
+    ("counter", "Counter"),
+    ("abha_qr", "ABHA QR (Scan and Share)"),
+    ("appointment", "Appointment"),
+)
+
+
 class Patient(models.Model):
     """Single patient record per tenant (UHID-based)."""
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
@@ -12,6 +24,13 @@ class Patient(models.Model):
     abha_number = models.CharField(max_length=14, null=True, blank=True, db_index=True)
     verification_status = models.CharField(max_length=16, default="pending")  # pending | verified
     verified_at = models.DateTimeField(null=True, blank=True)
+    # REG-005. ``blank`` + empty default is the expand-only, non-breaking shape:
+    # existing rows predate the column and are backfilled to "unrecorded"
+    # rather than mislabelled as counter registrations. New registrations carry
+    # a real value from the counter UI.
+    intake_channel = models.CharField(
+        max_length=16, blank=True, default="", choices=INTAKE_CHANNELS
+    )
     demographics = models.JSONField()
     contact = models.JSONField(null=True)
     address = models.JSONField(null=True)
