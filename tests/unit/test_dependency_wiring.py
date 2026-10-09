@@ -37,6 +37,7 @@ IMPORT_NAME = {
     "channels": "channels",
     "channels-redis": "channels_redis",
     "daphne": "daphne",
+    "cryptography": "cryptography",
     "Pillow": "PIL",
     "openpyxl": "openpyxl",
     "reportlab": "reportlab",

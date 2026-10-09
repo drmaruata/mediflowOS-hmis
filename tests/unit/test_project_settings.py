@@ -49,6 +49,49 @@ def test_deny_by_default_permissions():
     ]
 
 
+def test_missing_patient_fields_key_fails_closed_outside_debug(monkeypatch):
+    """REG-008: field encryption must never run under a missing master key.
+
+    ``abha_number``, ``abha_address`` and ``contact.mobile`` are encrypted with
+    a key derived from ``PATIENT_FIELDS_KEY``. A published, empty, or guessable
+    key would make the encryption theatre, so any non-DEBUG settings import
+    must refuse to start when the variable is absent rather than encrypting
+    under an empty passphrase. dev.py and test.py supply deterministic values
+    before importing base; this pins base.py's own guard.
+    """
+    import importlib
+    import sys
+
+    import django.core.exceptions as exc
+
+    monkeypatch.delenv("PATIENT_FIELDS_KEY", raising=False)
+    monkeypatch.delenv("DJANGO_DEBUG", raising=False)
+    sys.modules.pop("config.settings.base", None)
+
+    with pytest.raises(exc.ImproperlyConfigured, match="PATIENT_FIELDS_KEY"):
+        importlib.import_module("config.settings.base")
+
+
+def test_patient_fields_key_may_be_absent_in_debug(monkeypatch):
+    """DEBUG=True is the explicit local escape hatch (REG-008).
+
+    base.py defaults to permissive settings so a contributor can run the dev
+    server with no environment at all; the encryption key follows that rule.
+    When DEBUG is on, dev.py still provides a value so a dev database keeps
+    decrypting across restarts — this only checks that the *guard* is debug
+    aware, not that the value is optional in practice.
+    """
+    import importlib
+    import sys
+
+    monkeypatch.setenv("DJANGO_DEBUG", "true")
+    monkeypatch.delenv("PATIENT_FIELDS_KEY", raising=False)
+    sys.modules.pop("config.settings.base", None)
+
+    module = importlib.import_module("config.settings.base")
+    assert module.PATIENT_FIELDS_KEY == ""
+
+
 def test_mfa_permission_is_installed(settings):
     """TEN-006 enforcement must be a default permission, not a per-view opt-in.
 

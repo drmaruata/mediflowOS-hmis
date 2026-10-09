@@ -1,5 +1,16 @@
 """Development settings."""
-from .base import *
+import os
+
+# REG-008: a deterministic dev passphrase so a local database keeps decrypting
+# across restarts (a random value would make every restart a key rotation).
+# setdefault keeps a developer's own PATIENT_FIELDS_KEY when one is exported.
+# Set before importing base, whose non-DEBUG guard needs a value; DEBUG=True
+# below is the escape hatch when no key at all is wanted.
+os.environ.setdefault(
+    "PATIENT_FIELDS_KEY", "mediflow-dev-patient-fields-key-reg-008"
+)
+
+from .base import *  # noqa: E402,F401,F403
 
 DEBUG = True
 ALLOWED_HOSTS = ["*"]

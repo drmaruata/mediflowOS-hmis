@@ -18,6 +18,11 @@ dependencies = [
     # ASGI server required to serve the Channels consumers; a WSGI server
     # cannot run this project. Kept in step with requirements.txt.
     "daphne>=4.2,<5",
+    # REG-008: application-level field encryption at rest (common.crypto:
+    # AES-GCM tokens + keyed-HMAC search indexes). Exact pin — the token format
+    # and key derivation depend on the installed release. Kept in step with
+    # requirements.txt.
+    "cryptography==48.0.0",
     # Declared for specified-but-unimplemented features: printable QR codes and
     # regulatory exports (Pillow, openpyxl, reportlab), external integration
     # clients (httpx), observability (opentelemetry, sentry-sdk). Kept in step

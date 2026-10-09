@@ -98,12 +98,20 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             return None
 
     def _match_patient(self, profile: dict, tenant_id: str):
-        """Match by ABHA number, then demographics (ABD-008, ABD-009)."""
+        """Match by ABHA number, then demographics (ABD-008, ABD-009).
+
+        The ABHA probe crosses the REG-008 ``abha_number_idx`` digest via
+        ``filter_by_abha`` — the gateway carries the plaintext number (the
+        person scanned it), so exact-digest matching finds the encrypted row
+        and never falls back to a ciphertext scan.
+        """
         from apps.patient_registry.models import Patient
         abha_number = profile.get("abhaNumber") or profile.get("healthId")
         if abha_number:
             try:
-                return Patient.objects.get(tenant_id=tenant_id, abha_number=abha_number)
+                return Patient.objects.filter_by_abha(
+                    tenant_id, abha_number
+                ).get()
             except Patient.DoesNotExist:
                 pass
 

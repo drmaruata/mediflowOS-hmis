@@ -20,6 +20,10 @@ VALID = {
     "DJANGO_SECRET_KEY": "x" * 48,
     "DJANGO_ALLOWED_HOSTS": "hmis.example.org",
     "CORS_ALLOWED_ORIGINS": "https://hmis.example.org",
+    # REG-008: patient identifiers are encrypted at rest; the master key has
+    # no default in a non-DEBUG environment, so a valid production import
+    # carries it explicitly.
+    "PATIENT_FIELDS_KEY": "y" * 48,
 }
 
 
@@ -30,9 +34,13 @@ def _load(monkeypatch, **overrides):
             monkeypatch.delenv(key, raising=False)
         else:
             monkeypatch.setenv(key, value)
-    # Drop any cached module so the settings are re-evaluated.
+    # Drop any cached module so the settings are re-evaluated. base.py is
+    # popped too: its PATIENT_FIELDS_KEY guard fires on a fresh import, and
+    # production swaps base's permissive defaults, so an honest production
+    # load has to start from a clean base.
     import sys
 
+    sys.modules.pop("config.settings.base", None)
     sys.modules.pop("config.settings.production", None)
     return importlib.import_module("config.settings.production")
 
@@ -63,6 +71,11 @@ class TestFailsClosed:
     def test_missing_cors_origins_is_refused(self, monkeypatch):
         with pytest.raises(ImproperlyConfigured, match="CORS_ALLOWED_ORIGINS"):
             _load(monkeypatch, CORS_ALLOWED_ORIGINS=None)
+
+    def test_missing_patient_fields_key_is_refused(self, monkeypatch):
+        """REG-008: production never encrypts under an absent master key."""
+        with pytest.raises(ImproperlyConfigured, match="PATIENT_FIELDS_KEY"):
+            _load(monkeypatch, PATIENT_FIELDS_KEY=None)
 
 
 class TestAppliesHardenedDefaults:

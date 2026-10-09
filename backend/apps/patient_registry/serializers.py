@@ -26,6 +26,19 @@ class PatientSerializer(serializers.ModelSerializer):
         write_only=True, required=False, allow_null=True
     )
 
+    # REG-008: ``abha_number``/``abha_address`` are model *properties* over
+    # encrypted storage columns, so DRF's model introspection cannot build
+    # fields for them. Declared explicitly as writable plaintext CharFields:
+    # the encrypting property setters seal the value on assignment, and the
+    # response carries plaintext via the decrypting getter. ``allow_blank`` +
+    # ``allow_null`` mirror the old ``CharField(blank=True, null=True)``.
+    abha_number = serializers.CharField(
+        max_length=128, required=False, allow_null=True, allow_blank=True
+    )
+    abha_address = serializers.CharField(
+        max_length=128, required=False, allow_null=True, allow_blank=True
+    )
+
     class Meta:
         model = Patient
         fields = [

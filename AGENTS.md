@@ -160,7 +160,8 @@ be honoured):
 
 **Backend:** Python 3.11+, Django 5.2 LTS, DRF 3.18, PostgreSQL 15+ (psycopg 3),
 Redis, Celery 5.6 + django-celery-beat, Channels 4.3, **daphne 4.2** (ASGI
-server), SimpleJWT, django-otp, drf-spectacular, OpenTelemetry + Sentry.
+server), SimpleJWT, django-otp, drf-spectacular, **cryptography 48.0** (AES-GCM
+field encryption + keyed-HMAC search indexes, REG-008), OpenTelemetry + Sentry.
 
 **Frontend:** React 18.3, TypeScript 5.9, Vite 6.4, **React Router 7.18**
 (`react-router-dom` — installed and in use), TanStack Query 5.104, Zustand,

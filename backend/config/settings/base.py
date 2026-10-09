@@ -3,10 +3,29 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "change-me")
 DEBUG = os.getenv("DJANGO_DEBUG", "false") == "true"
 ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",")
+
+# REG-008: master passphrase for application-level field encryption
+# (``abha_number``, ``abha_address``, ``contact.mobile``, AES-GCM via
+# ``common.crypto``; PBKDF2-HMAC-SHA256 derives the AES and HMAC-SHA256 index
+# keys). There is deliberately **no default**: encrypting patient identifiers
+# under an empty or guessed passphrase would be theatre, so a non-DEBUG
+# settings import refuses to start without it. dev.py and test.py supply
+# deterministic values *before* they ``from .base import *``; production must
+# set PATIENT_FIELDS_KEY in the environment.
+PATIENT_FIELDS_KEY = os.getenv("PATIENT_FIELDS_KEY", "")
+if not DEBUG and not PATIENT_FIELDS_KEY:
+    raise ImproperlyConfigured(
+        "PATIENT_FIELDS_KEY must be set when DEBUG is off: patient identifiers "
+        "are encrypted at rest (REG-008) and must never be encrypted under a "
+        "missing master key. dev.py/test.py set a value; production must export "
+        "one."
+    )
 
 INSTALLED_APPS = [
     "django.contrib.admin",

@@ -5,7 +5,8 @@ import uuid
 from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
 
-from .models import Patient, PatientSequence
+from common.crypto import search_index
+from .models import Patient, PatientSequence, field_keys
 from .validation import MOBILE_RE, normalise_mobile
 
 #: Bounded retries for the first-create race. Each retry runs in a fresh
@@ -75,22 +76,22 @@ def _mobile_of(patient: Patient) -> str:
 
 
 def _match_by_mobile(tenant_queryset, mobile: str):
-    """Tenant-scoped mobile matches, isolated for the Task 12 index re-route.
+    """Tenant-scoped mobile matches, routed through the HMAC index (REG-008).
 
-    The database prefilter is a portable JSON key substring lookup (SQLite
-    JSON1 ``json_extract`` / PostgreSQL ``->>``) and therefore can only see a
-    substring of the *stored* value. That is why the stored mobile is the
-    canonical bare 10-digit form — written by the registration serializer
-    (``validate_contact``) and brought up to date for older rows by the
-    ``0009`` data migration — and why the probe is normalised the same way
-    before the prefilter runs. The Python ``normalise_mobile`` comparison then
-    confirms, and ``+91``/spacing in the *probe* cannot evade a match. Kept as
-    its own function because Task 12 re-routes mobile matching through an HMAC
-    ``mobile_idx`` column without disturbing the precedence logic in
-    :func:`find_duplicates`.
+    The database prefilter is now an exact-digest match on the keyed-HMAC
+    ``mobile_idx`` column: ``contact.mobile`` is ciphertext, so the pre-REG-008
+    JSON substring lookup (``json_extract``/``->>``) has nothing to scan. The
+    probe is canonicalised exactly like the write path (``normalise_mobile`` in
+    both the field sealer and :func:`find_duplicates`), so ``+91``/spacing in
+    the candidate cannot evade the digest. The Python
+    ``normalise_mobile`` comparison then confirms as defence-in-depth, and
+    ``_MAX_SCAN`` still bounds the refinement loop.
     """
-    last_ten = mobile[-10:]
-    candidates = tenant_queryset.filter(contact__mobile__icontains=last_ten)
+    canonical = normalise_mobile(mobile)
+    _, hmac_key = field_keys()
+    candidates = tenant_queryset.filter(
+        mobile_idx=search_index(canonical, key=hmac_key)
+    )
     for patient in candidates[:_MAX_SCAN]:
         if _mobile_of(patient) == mobile:
             yield patient
@@ -140,8 +141,10 @@ def find_duplicates(*, tenant_id, candidate: dict, limit: int = 5) -> list[Patie
 
     # 1. Exact ABHA — the strongest identifier; the caller-supplied number is
     #    already known to them, so matching it is not an information leak.
+    #    REG-008: the probe goes through the keyed ``abha_number_idx`` digest
+    #    (``filter_by_abha``), never through the ciphertext column.
     if abha:
-        for patient in base.filter(abha_number=abha):
+        for patient in Patient.objects.filter_by_abha(tenant_id, abha):
             ranked[patient.id] = (0, patient)
 
     # 2. Name AND a birth year. Name alone is too weak to warn on.

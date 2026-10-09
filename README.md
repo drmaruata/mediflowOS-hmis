@@ -27,6 +27,8 @@ The application is built around the following principles:
 - Celery + django-celery-beat
 - Django Channels
 - JWT authentication
+- Field-level encryption at rest (`cryptography`, AES-GCM tokens + keyed-HMAC
+  search indexes) for patient identifiers (REG-008)
 - OpenAPI schema generation via drf-spectacular
 - OTP support via django-otp
 
@@ -128,6 +130,7 @@ animation utilities.
 | django-celery-beat | 2.9.0 | 2.9.0 | Current latest. |
 | channels, channels-redis | 4.3.2, 4.3.0 | 4.3.2, 4.3.0 | Current latest; keep the pair aligned. |
 | daphne | 4.2.3 | 4.2.3 | ASGI server; required because the project serves Channels WebSocket consumers. See below. |
+| cryptography | 48.0.0 | 48.0.0 | Application-level field encryption at rest (REG-008): AES-256-GCM tokens + keyed-HMAC search indexes for patient identifiers. **Pinned exactly** — the token format and key derivation depend on the installed release. Wired via `common/crypto.py`. |
 | openpyxl | 3.1.5 | 3.1.5 | Current latest in the supported 3.1 line; currently unused — see below. |
 | Pillow | 12.3.0 | 12.3.0 | Current latest; currently unused — see below. |
 | reportlab | 5.0.1 | 5.0.1 | Current latest; currently unused — see below. |
@@ -318,6 +321,18 @@ $env:PGPORT = "5432"
 $env:REDIS_URL = "redis://localhost:6379/0"
 $env:CELERY_BROKER_URL = "redis://localhost:6379/0"
 ```
+
+> **PATIENT_FIELDS_KEY (REG-008):** patient identifiers (`abha_number`,
+> `abha_address`, `contact.mobile`) are encrypted at rest with a key derived
+> from `PATIENT_FIELDS_KEY`. For local dev this is optional — `config.settings.dev`
+> supplies a deterministic development passphrase when the variable is unset —
+> but it must be explicitly exported in any non-DEBUG environment: `base.py`
+> refuses to start without it so identifiers are never encrypted under an
+> empty or guessed key. Example:
+>
+> ```powershell
+> $env:PATIENT_FIELDS_KEY = "a-long-random-passphrase-only-the-hospital-knows"
+> ```
 
 > The project defaults to PostgreSQL on `localhost` and Redis at `redis://redis:6379/0` in many settings. If you are using local services instead of containers, update these values accordingly.
 

@@ -7,10 +7,12 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
+from common.crypto import search_index
 from common.tenant import TENANT_REQUIRED_MESSAGE, TenantScopedQuerysetMixin
-from .models import Patient, IntakePoint, QRCode
+from .models import Patient, IntakePoint, QRCode, field_keys
 from .serializers import PatientSerializer, IntakePointSerializer, QRCodeSerializer
 from .services import birth_year, find_duplicates
+from .validation import normalise_mobile
 
 
 class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
@@ -155,23 +157,44 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
 
         term = (request.query_params.get("q") or "").strip()
         if term:
-            queryset = queryset.filter(
-                Q(uhid__icontains=term)
-                | Q(abha_number__icontains=term)
-                | Q(abha_address__icontains=term)
-                | Q(demographics__name__icontains=term)
-                | Q(contact__mobile__icontains=term)
+            # REG-008: identifiers are ciphertext, so containment probes are
+            # impossible; the HMAC ``*_idx`` columns only answer exact values.
+            # A `q` hits a row whose *whole* uhid/name matches the old way,
+            # whose ABHA number/address equals ``term`` exactly, or whose mobile
+            # normalises to ``term`` (so a formatted ``+91`` probe still meets
+            # the bare national number — pinned by
+            # tests/integration/test_patient_encryption.py). A fragment such as
+            # ``9876`` deliberately matches nothing, which is the documented
+            # degradation of exact-digest search.
+            _, hmac_key = field_keys()
+            term_q = (
+                Q(uhid__icontains=term) | Q(demographics__name__icontains=term)
             )
+            term_q |= Q(abha_number_idx=search_index(term, key=hmac_key))
+            term_q |= Q(abha_address_idx=search_index(term, key=hmac_key))
+            canonical_mobile = normalise_mobile(term)
+            if canonical_mobile:
+                term_q |= Q(mobile_idx=search_index(canonical_mobile, key=hmac_key))
+            queryset = queryset.filter(term_q)
 
         name = (request.query_params.get("name") or "").strip()
         if name:
             queryset = queryset.filter(demographics__name__icontains=name)
         mobile = (request.query_params.get("mobile") or "").strip()
         if mobile:
-            queryset = queryset.filter(contact__mobile__icontains=mobile)
+            # The probe is canonicalised exactly like the write path, so a
+            # formatted ``+91``/spaced parameter meets the bare national number
+            # stored in the index.
+            _, hmac_key = field_keys()
+            queryset = queryset.filter(
+                mobile_idx=search_index(normalise_mobile(mobile), key=hmac_key)
+            )
         abha = (request.query_params.get("abha_number") or "").strip()
         if abha:
-            queryset = queryset.filter(abha_number__icontains=abha)
+            _, hmac_key = field_keys()
+            queryset = queryset.filter(
+                abha_number_idx=search_index(abha, key=hmac_key)
+            )
 
         year = self._int_query(request, "year_of_birth")
         if year is not None:

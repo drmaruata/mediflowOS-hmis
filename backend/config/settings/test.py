@@ -1,5 +1,14 @@
 """Settings for fast, isolated backend tests."""
-from .base import *
+import os
+
+# REG-008: the test passphrase is a *fixed literal* so the crypto-coupling
+# integration tests (tests/integration/test_patient_encryption.py derives its
+# AES/HMAC keys from exactly this string) stay deterministic regardless of the
+# host environment. Set before importing base, whose non-DEBUG guard would
+# otherwise refuse to start.
+os.environ["PATIENT_FIELDS_KEY"] = "kepi-12-unit-passphrase"
+
+from .base import *  # noqa: E402,F401,F403
 
 DEBUG = False
 SECRET_KEY = "test-only-secret-key"
