@@ -48,7 +48,10 @@ def require_sandbox_base_url(value: str) -> str:
     The sandbox gate: https scheme and an ``sbx`` hostname (covers
     ``healthidsbx.abdm.gov.in``). Rejecting anything else here means a
     mis-typed value fails loudly at settings import instead of silently
-    directing tenant traffic at the production ABDM endpoint.
+    directing tenant traffic at the production ABDM endpoint. The predicate
+    is deliberately fail-closed: a future *legitimate* sandbox host without
+    ``sbx`` in its name would need an explicit operator opt-in here, never a
+    silent widening of the gate.
     """
     parsed = urllib.parse.urlparse(value)
     if parsed.scheme != "https" or "sbx" not in parsed.netloc.lower():
@@ -103,7 +106,11 @@ class ABDMClient:
         """POST ``path`` under the base URL, returning the parsed JSON body.
 
         A non-2xx response raises :class:`ABDMRequestError`; a failure before
-        any response propagates as ``httpx.TransportError``.
+        any response propagates as ``httpx.TransportError``. A 2xx whose body
+        is not JSON (a WAF login page, a proxy error page) also raises
+        :class:`ABDMRequestError` with that 2xx status, so the caller can
+        answer a structured failure instead of letting a raw
+        ``json.JSONDecodeError`` escape as an unstructured 500.
         """
         response = self._client.post(f"{self._base}{path}", json=payload)
         if response.status_code < 200 or response.status_code >= 300:
@@ -116,7 +123,15 @@ class ABDMClient:
             except ValueError:
                 body = response.text
             raise ABDMRequestError(response.status_code, body)
-        return response.json()
+        try:
+            return response.json()
+        except ValueError:
+            #: Same fallback discipline as the error path on a 2xx: a non-JSON
+            #: success body is a malformed sandbox response (WAF/proxy page),
+            #: so it raises with its 2xx status and the raw text. The views
+            #: map any status outside 4xx/5xx to a structured 502
+            #: ``ABDM_REQUEST_FAILED`` body — never an unstructured 500.
+            raise ABDMRequestError(response.status_code, response.text)
 
     def create_abha(self, payload: dict) -> dict:
         """Create a new ABHA (REG-009); the payload is the sandbox spec's.

@@ -130,6 +130,30 @@ class TestABDMClient:
         assert excinfo.value.body == {"details": [{"code": "OTP_INVALID"}]}
         assert "400" in str(excinfo.value)
 
+    def test_2xx_non_json_body_raises_loudly(self):
+        """A 2xx with a non-JSON body raises as loudly as the error path.
+
+        A 200 that is an HTML page (WAF login, proxy error) is not a usable
+        sandbox response; raising ``ABDMRequestError`` here is what stops a
+        ``json.JSONDecodeError`` from escaping as an unstructured Django 500
+        with no `ABDM_REQUEST_FAILED` body (REG-009).
+        """
+        def handler(request):
+            return httpx.Response(
+                200,
+                text="<html><body>ABDM sandbox login</body></html>",
+                headers={"content-type": "text/html"},
+            )
+
+        client = ABDMClient(SANDBOX_BASE, transport=httpx.MockTransport(handler))
+
+        with pytest.raises(ABDMRequestError) as excinfo:
+            client.create_abha({"aadhaar": "XXXXXXXXXXXX", "otp": "123456"})
+
+        assert excinfo.value.status_code == 200
+        assert excinfo.value.body == "<html><body>ABDM sandbox login</body></html>"
+        assert "200" in str(excinfo.value)
+
 
 class TestSandboxUrlGate:
     """The sandbox predicate refuses every URL that is not an https *sbx* host."""
@@ -240,6 +264,46 @@ class TestAbhaActionsWhenUnconfigured:
         assert response.status_code == 404
 
 
+class TestAbhaRequestBodyValidation:
+    """Non-object request bodies answer the precise 400, before any dispatch.
+
+    A JSON array (or any non-object) body must not be silently coerced to
+    ``{}`` and forwarded to the sandbox: that would both send a create the
+    client never wrote and mislabel the failure as the sandbox's. The 400
+    carries the stable ``ABDM_REQUEST_INVALID`` code and is answered before
+    any adapter dispatch, configured or not (REG-009).
+    """
+
+    def setup_method(self):
+        self.tenant, self.facility, _ = _make_context()
+        self.client, self.user = _make_client(self.tenant)
+        self.patient = _make_patient(self.tenant, self.facility)
+
+    def test_create_rejects_non_object_body_with_stable_400(self):
+        response = self.client.post(
+            f"/api/v1/patients/{self.patient.id}/abha/create/",
+            data=[{"aadhaar": "XXXXXXXXXXXX"}],
+            format="json",
+        )
+        assert response.status_code == 400, response.content
+        body = response.json()
+        assert body["status"] == "error"
+        assert body["code"] == "ABDM_REQUEST_INVALID"
+        assert body["detail"]
+
+    def test_verify_rejects_non_object_body_with_stable_400(self):
+        response = self.client.post(
+            f"/api/v1/patients/{self.patient.id}/abha/verify/",
+            data=["not-an-object"],
+            format="json",
+        )
+        assert response.status_code == 400, response.content
+        body = response.json()
+        assert body["status"] == "error"
+        assert body["code"] == "ABDM_REQUEST_INVALID"
+        assert body["detail"]
+
+
 class TestAbhaActionsWhenConfigured:
     """A configured sandbox means the action delegates to the ABDM client."""
 
@@ -338,6 +402,44 @@ class TestAbhaActionsWhenConfigured:
         assert body["code"] == "ABDM_REQUEST_FAILED"
         assert "OTP_INVALID" in body["detail"]
 
+    def test_non_json_success_body_answers_502_structured(self, monkeypatch):
+        """A 2xx non-JSON sandbox body maps to a structured 502, never a 500.
+
+        The client raises ``ABDMRequestError(200, text)`` for an HTML login
+        page on a 2xx; here the view maps that 2xx status to 502 so the
+        client always sees the stable `ABDM_REQUEST_FAILED` body instead of an
+        unstructured ``json.JSONDecodeError``->Django 500 (REG-009).
+        """
+        tenant, facility, _ = _make_context()
+        client, _ = _make_client(tenant)
+        patient = _make_patient(tenant, facility)
+        monkeypatch.setattr(
+            "apps.abdm_gateway.client.settings.ABDM_SANDBX_BASE_URL", SANDBOX_BASE
+        )
+
+        from apps.patient_registry import views
+
+        class HtmlClient:
+            def __init__(self, base_url, **kwargs):
+                pass
+
+            def create_abha(self, payload):
+                raise ABDMRequestError(200, "<html><body>sandbox login</body></html>")
+
+        monkeypatch.setattr(views, "ABDMClient", HtmlClient)
+
+        response = client.post(
+            f"/api/v1/patients/{patient.id}/abha/create/",
+            {"aadhaar": "XXXXXXXXXXXX"},
+            format="json",
+        )
+
+        assert response.status_code == 502, response.content
+        body = response.json()
+        assert body["status"] == "error"
+        assert body["code"] == "ABDM_REQUEST_FAILED"
+        assert "sandbox login" in body["detail"]
+
 
 class TestDepartmentQRCodes:
     """department-scoped encode_data and the audited regenerate (REG-013)."""
@@ -386,6 +488,27 @@ class TestDepartmentQRCodes:
         foreign_department = Department.objects.get(tenant=other_tenant)
 
         response = self._create_qr(department=str(foreign_department.id))
+        assert response.status_code == 400, response.content
+        assert QRCode.objects.count() == 0
+
+    def test_cross_tenant_intake_point_is_rejected(self):
+        """A foreign intake point is refused with zero rows written (REG-013).
+
+        The intake_point FK drives which ABDM counter queue the encoded scan
+        string routes callbacks into, so accepting another hospital's row
+        would seed callbacks into a foreign queue — the same tenant-horizon
+        defect as a foreign department. ``validate_intake_point`` pins it
+        inside the requesting tenant, so the 400 lands before any row exists.
+        """
+        other_tenant, other_facility, _ = _make_context("Other Hospital")
+        foreign_intake = IntakePoint.objects.create(
+            tenant_id=other_tenant.id,
+            facility=other_facility,
+            type="opd",
+            counter_id="CTR-FOREIGN",
+        )
+
+        response = self._create_qr(intake_point=str(foreign_intake.id))
         assert response.status_code == 400, response.content
         assert QRCode.objects.count() == 0
 

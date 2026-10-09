@@ -143,11 +143,15 @@ class IntakePointSerializer(serializers.ModelSerializer):
 
 
 class QRCodeSerializer(serializers.ModelSerializer):
-    # Explicitly declared rather than the field ModelSerializer would generate,
-    # because the generated PrimaryKeyRelatedField's queryset is unscoped and
-    # would accept another hospital's department id. ``validate_department``
-    # pins the FK inside the request's tenant; the reading side stays the
-    # plain UUID the generated field would have produced.
+    # Explicitly declared rather than the fields ModelSerializer would
+    # generate, because the generated PrimaryKeyRelatedFields' querysets are
+    # unscoped and would accept another hospital's intake point or department
+    # id. ``validate_intake_point`` / ``validate_department`` pin the FKs
+    # inside the request's tenant; the reading side stays the plain UUID the
+    # generated fields would have produced.
+    intake_point = serializers.PrimaryKeyRelatedField(
+        queryset=IntakePoint.objects.all(), required=False, allow_null=True
+    )
     department = serializers.PrimaryKeyRelatedField(
         queryset=Department.objects.all(), required=False, allow_null=True
     )
@@ -173,6 +177,25 @@ class QRCodeSerializer(serializers.ModelSerializer):
         if tenant_id and str(value.tenant_id) != str(tenant_id):
             raise serializers.ValidationError(
                 "Department must belong to the current tenant."
+            )
+        return value
+
+    def validate_intake_point(self, value):
+        """A QR's intake point must belong to the tenant making the request.
+
+        The intake point names the ABDM counter queue the encoded scan string
+        routes inbound callbacks to, so an accepted foreign id would seed
+        callbacks into another hospital's counter queue — the same
+        tenant-horizon defect ``validate_department`` closes, on the counter
+        segment of the string (REG-013).
+        """
+        if value is None:
+            return value
+        request = self.context.get("request")
+        tenant_id = getattr(request, REQUEST_TENANT_ATTR, None) if request else None
+        if tenant_id and str(value.tenant_id) != str(tenant_id):
+            raise serializers.ValidationError(
+                "Intake point must belong to the current tenant."
             )
         return value
 

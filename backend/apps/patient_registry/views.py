@@ -342,6 +342,30 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
 
     # --- ABDM outbound ABHA actions (REG-009) ---------------------------
 
+    @staticmethod
+    def _abdm_request_body(request):
+        """The parsed request body, or None when it is not a JSON object.
+
+        A JSON array (or any non-object) body is not a payload the adapter
+        can forward: silently coercing it to ``{}`` would both send a create
+        the client never wrote and mislabel the failure as the sandbox's, so
+        the actions answer the precise ``ABDM_REQUEST_INVALID`` 400 instead
+        of forwarding.
+        """
+        data = request.data
+        return data if isinstance(data, dict) else None
+
+    def _abdm_invalid_body_response(self):
+        """The stable 400 a non-object ABHA request body answers (REG-009)."""
+        return Response(
+            {
+                "status": "error",
+                "code": "ABDM_REQUEST_INVALID",
+                "detail": "Request body must be a JSON object.",
+            },
+            status=status.HTTP_400_BAD_REQUEST,
+        )
+
     def _abdm_dispatch(self, method, *args):
         """Run an ABDMClient method, or answer the structured 503.
 
@@ -412,23 +436,30 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
                     "shape is not pinned."
                 ),
             ),
+            400: AbdmErrorResponseSerializer,
+            502: AbdmErrorResponseSerializer,
             503: AbdmErrorResponseSerializer,
         },
         description=(
             "Create a new ABHA for this patient through the ABDM sandbox "
             "(REG-009). The request body is passed through to the sandbox "
             "enrollment API verbatim; the sandbox create spec is unresolved, "
-            "so the schema is deliberately not pinned. Answers 503 with code "
-            "`ABDM_SANDBOX_UNCONFIGURED` when the sandbox is not configured "
-            "- never a fabricated success. Tenant-scoped: a patient of another "
-            "tenant answers 404."
+            "so the schema is deliberately not pinned. Answers 400 with code "
+            "`ABDM_REQUEST_INVALID` when the body is not a JSON object, 503 "
+            "with code `ABDM_SANDBOX_UNCONFIGURED` when the sandbox is not "
+            "configured, and 502 with code `ABDM_SANDBOX_UNREACHABLE` when it "
+            "cannot be reached or `ABDM_REQUEST_FAILED` when the sandbox "
+            "answers non-2xx or a 2xx that is not JSON - never a fabricated "
+            "success. Tenant-scoped: a patient of another tenant answers 404."
         ),
     )
     @action(detail=True, methods=["post"], url_path="abha/create")
     def abha_create(self, request, pk=None):
         """Create a new ABHA at the counter (REG-009)."""
         self.get_object()
-        payload = request.data if isinstance(request.data, dict) else {}
+        payload = self._abdm_request_body(request)
+        if payload is None:
+            return self._abdm_invalid_body_response()
         return self._abdm_dispatch("create_abha", payload)
 
     @extend_schema(
@@ -446,20 +477,27 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
                 ),
             ),
             400: AbdmErrorResponseSerializer,
+            502: AbdmErrorResponseSerializer,
             503: AbdmErrorResponseSerializer,
         },
         description=(
             "Verify this patient's existing ABHA with the mobile OTP they "
-            "received (REG-009). Answers 400 when the patient has no ABHA or "
-            "no OTP was sent, and 503 with code `ABDM_SANDBOX_UNCONFIGURED` "
-            "when the sandbox is not configured. Tenant-scoped: a patient of "
-            "another tenant answers 404."
+            "received (REG-009). Answers 400 when the patient has no ABHA, "
+            "no OTP was sent, or the body is not a JSON object; 503 with "
+            "code `ABDM_SANDBOX_UNCONFIGURED` when the sandbox is not "
+            "configured; and 502 with code `ABDM_SANDBOX_UNREACHABLE` when it "
+            "cannot be reached or `ABDM_REQUEST_FAILED` when the sandbox "
+            "answers non-2xx or a 2xx that is not JSON. Tenant-scoped: a "
+            "patient of another tenant answers 404."
         ),
     )
     @action(detail=True, methods=["post"], url_path="abha/verify")
     def abha_verify(self, request, pk=None):
         """Verify an existing ABHA at the counter (REG-009)."""
         patient = self.get_object()
+        data = self._abdm_request_body(request)
+        if data is None:
+            return self._abdm_invalid_body_response()
         if not patient.abha_number:
             return Response(
                 {
@@ -469,7 +507,6 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
                 },
                 status=status.HTTP_400_BAD_REQUEST,
             )
-        data = request.data if isinstance(request.data, dict) else {}
         otp = str(data.get("otp") or "")
         if not otp:
             return Response(
