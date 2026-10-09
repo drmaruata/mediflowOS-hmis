@@ -6,6 +6,7 @@ from django.db import IntegrityError, OperationalError, transaction
 from django.utils import timezone
 
 from .models import Patient, PatientSequence
+from .validation import MOBILE_RE, normalise_mobile
 
 #: Bounded retries for the first-create race. Each retry runs in a fresh
 #: savepoint (``transaction.atomic()`` per attempt), so the bound keeps a
@@ -30,10 +31,6 @@ _MOBILE_KEY = "mobile"
 #: a large tenant would drag the whole registry through the request.
 _MAX_SCAN = 200
 
-#: 10-digit Indian mobile, first digit 6-9. Applied after stripping a leading
-#: ``+91``/``91``/``0`` so the stored and candidate forms agree.
-_MOBILE_RE = re.compile(r"^[6-9]\d{9}$")
-
 
 def _normalise_name(value) -> str:
     """Casefold and collapse whitespace: ``" John  DOE "`` -> ``"john doe"``.
@@ -42,18 +39,6 @@ def _normalise_name(value) -> str:
     and spacing differences that carry no identity information.
     """
     return " ".join(str(value or "").split()).casefold()
-
-
-def _normalise_mobile(value) -> str:
-    """Reduce a mobile to 10 digits, dropping ``+91``/``91``/``0`` prefixes.
-
-    Formatting must not hide a duplicate, so both the candidate and the stored
-    value go through this before comparison.
-    """
-    digits = re.sub(r"\D", "", str(value or ""))
-    if len(digits) > 10 and digits.startswith("91"):
-        digits = digits[2:]
-    return digits[-10:] if len(digits) > 10 else digits
 
 
 def birth_year(record: dict) -> int | None:
@@ -86,17 +71,22 @@ def birth_year(record: dict) -> int | None:
 
 
 def _mobile_of(patient: Patient) -> str:
-    return _normalise_mobile((patient.contact or {}).get(_MOBILE_KEY))
+    return normalise_mobile((patient.contact or {}).get(_MOBILE_KEY))
 
 
 def _match_by_mobile(tenant_queryset, mobile: str):
     """Tenant-scoped mobile matches, isolated for the Task 12 index re-route.
 
     The database prefilter is a portable JSON key substring lookup (SQLite
-    JSON1 ``json_extract`` / PostgreSQL ``->>``); the 10-digit normalisation is
-    applied in Python so ``+91`` and spacing differences cannot evade a match.
-    Kept as its own function because Task 12 re-routes mobile matching through
-    an HMAC ``mobile_idx`` column without disturbing the precedence logic in
+    JSON1 ``json_extract`` / PostgreSQL ``->>``) and therefore can only see a
+    substring of the *stored* value. That is why the stored mobile is the
+    canonical bare 10-digit form — written by the registration serializer
+    (``validate_contact``) and brought up to date for older rows by the
+    ``0009`` data migration — and why the probe is normalised the same way
+    before the prefilter runs. The Python ``normalise_mobile`` comparison then
+    confirms, and ``+91``/spacing in the *probe* cannot evade a match. Kept as
+    its own function because Task 12 re-routes mobile matching through an HMAC
+    ``mobile_idx`` column without disturbing the precedence logic in
     :func:`find_duplicates`.
     """
     last_ten = mobile[-10:]
@@ -142,7 +132,7 @@ def find_duplicates(*, tenant_id, candidate: dict, limit: int = 5) -> list[Patie
     candidate = candidate or {}
     abha = str(candidate.get("abha_number") or "").strip()
     name = _normalise_name(candidate.get("name"))
-    mobile = _normalise_mobile(candidate.get("mobile"))
+    mobile = normalise_mobile(candidate.get("mobile"))
     year = birth_year(candidate)
 
     base = Patient.objects.filter(tenant_id=tenant_id)
@@ -160,7 +150,7 @@ def find_duplicates(*, tenant_id, candidate: dict, limit: int = 5) -> list[Patie
             ranked.setdefault(patient.id, (1, patient))
 
     # 3. Mobile, but only when the candidate itself carries a valid one.
-    if mobile and _MOBILE_RE.fullmatch(mobile):
+    if mobile and MOBILE_RE.fullmatch(mobile):
         for patient in _match_by_mobile(base, mobile):
             ranked.setdefault(patient.id, (2, patient))
 

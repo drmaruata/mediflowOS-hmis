@@ -122,14 +122,21 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         ``demographics`` key transforms compile to ``json_extract`` on SQLite
         and ``->>`` on PostgreSQL, so the same filter runs on both. ``dob`` is
         matched by its leading year because its day/month are irrelevant to an
-        approximate window.
+        approximate window; a bare-year ``dob`` (``"1980"``) is matched exactly
+        because :func:`~apps.patient_registry.services.birth_year` also accepts
+        that form for duplicate-check. ``age_years`` is converted at query time
+        (``current year - stored age``) so a patient whose only birth key was
+        the REG-007 ``age_years`` shape is found without rewriting stored rows.
         """
+        current_year = timezone.now().year
         predicate = Q()
         for year in years:
             predicate |= (
                 Q(demographics__yearOfBirth=year)
                 | Q(demographics__year_of_birth=year)
                 | Q(demographics__dob__startswith=f"{year}-")
+                | Q(demographics__dob=str(year))
+                | Q(demographics__age_years=current_year - year)
             )
         return predicate
 

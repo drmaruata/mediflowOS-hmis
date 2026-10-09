@@ -176,6 +176,63 @@ class TestDuplicateCheck:
         assert "9876501234" not in str(response.json())
         assert "123456789012" not in str(response.json())
 
+    def test_stored_formatted_mobile_is_matched_by_a_bare_probe(self):
+        """A mobile stored in a non-canonical form must still be found (REG-003).
+
+        Registration accepts ``+91``/spacing (REG-007), so the stored shape is
+        not guaranteed to equal the bare digits a later probe carries. The
+        database prefilter can only see a substring of the *stored* value, so
+        the stored and probe forms must agree; this pins the write-path
+        canonicalisation that makes that true (and the direction Task 12's hash
+        index needs). A regression here is a silent duplicate.
+        """
+        created = self.client.post(
+            "/api/v1/patients/",
+            {
+                "demographics": {
+                    "name": "Formatted Mobile", "gender": "F", "yearOfBirth": 1972,
+                },
+                "contact": {"mobile": "+91 98765 43210"},
+            },
+            format="json",
+        )
+        assert created.status_code == 201, created.content
+        patient = Patient.objects.get(id=created.json()["id"])
+        assert patient.contact["mobile"] == "9876543210"
+
+        response = self.client.post(
+            "/api/v1/patients/duplicate-check/",
+            {"mobile": "9876543210"},
+            format="json",
+        )
+        assert response.status_code == 200, response.content
+        assert [row["uhid"] for row in response.json()["candidates"]] == [
+            patient.uhid
+        ]
+
+    def test_bare_mobile_stored_then_probed_formatted_still_matches(self):
+        """The reverse direction — clean stored, formatted probe — stays covered.
+
+        ``normalise_mobile`` runs on the probe too, so a clerk who types the
+        country prefix must still match a patient registered with bare digits.
+        """
+        patient = Patient.objects.create(
+            tenant_id=self.tenant.id, uhid="UHID-BARE-STORED",
+            demographics={"name": "Bare Stored", "gender": "M", "yearOfBirth": 1970},
+            contact={"mobile": "9765432109"},
+        )
+
+        response = self.client.post(
+            "/api/v1/patients/duplicate-check/",
+            {"mobile": "+91 97654 32109"},
+            format="json",
+        )
+
+        assert response.status_code == 200, response.content
+        assert [row["uhid"] for row in response.json()["candidates"]] == [
+            patient.uhid
+        ]
+
     def test_duplicate_check_never_sees_another_tenant(self):
         """Tenant B's probe must not surface tenant A's patient (REG-003)."""
         other_tenant, other_facility, _ = _make_context("Other Hospital")
@@ -306,12 +363,33 @@ class TestPatientSerializerValidation:
         assert Patient.objects.count() == 0
 
     def test_mobile_with_country_prefix_is_accepted(self):
+        """A ``+91``/spaced mobile is accepted *and stored canonically* (REG-007).
+
+        The endpoint must not reject a valid formatted mobile, but it stores the
+        bare 10-digit national form so the REG-003 duplicate prefilter (and the
+        Task 12 hash index) operate on one shape. Asserting both halves keeps
+        the test from being weakened to "201 is enough".
+        """
         response = self.client.post(
             "/api/v1/patients/",
             _payload(contact={"mobile": "+91 98765 43210"}),
             format="json",
         )
         assert response.status_code == 201, response.content
+        patient = Patient.objects.get(id=response.json()["id"])
+        assert patient.contact["mobile"] == "9876543210"
+        assert response.json()["contact"]["mobile"] == "9876543210"
+
+    def test_mobile_with_leading_trunk_prefix_is_canonicalised(self):
+        """A leading ``0`` trunk prefix is stripped to the 10-digit form (REG-007)."""
+        response = self.client.post(
+            "/api/v1/patients/",
+            _payload(contact={"mobile": "098765 43210"}),
+            format="json",
+        )
+        assert response.status_code == 201, response.content
+        patient = Patient.objects.get(id=response.json()["id"])
+        assert patient.contact["mobile"] == "9876543210"
 
     def test_unknown_consent_flag_key_is_rejected(self):
         response = self.client.post(
@@ -429,6 +507,54 @@ class TestSearchByBirthDate:
         assert response.status_code == 200, response.content
         assert {row["uhid"] for row in response.json()} == {"UHID-YOB-1980"}
 
+    def test_age_years_registration_is_findable_by_age_and_year(self):
+        """A patient registered with only ``age_years`` must compose with search.
+
+        REG-007 accepts ``age_years`` as birth data and REG-002 search must find
+        the same patient through both the approximate ``?age=`` window and the
+        exact ``?year_of_birth=`` filter. Before this, search only read
+        ``yearOfBirth``/``dob``, so a patient whose only birth key was
+        ``age_years`` was invisible to both filters — one accepted payload, two
+        blind searches.
+        """
+        payload = {
+            "demographics": {"name": "Age Only", "gender": "M", "age_years": 45},
+        }
+        created = self.client.post("/api/v1/patients/", payload, format="json")
+        assert created.status_code == 201, created.content
+        uhid = created.json()["uhid"]
+        derived_year = self.current_year - 45
+
+        by_age = self.client.get("/api/v1/patients/search/?age=45")
+        assert by_age.status_code == 200, by_age.content
+        assert uhid in {row["uhid"] for row in by_age.json()}
+
+        by_year = self.client.get(
+            f"/api/v1/patients/search/?year_of_birth={derived_year}"
+        )
+        assert by_year.status_code == 200, by_year.content
+        assert uhid in {row["uhid"] for row in by_year.json()}
+
+    def test_bare_year_dob_is_matched_by_year_filter(self):
+        """A ``dob`` stored as a bare year must match ``?year_of_birth=`` (REG-002).
+
+        ``birth_year`` parses a bare-year ``dob`` for duplicate-check, so search
+        accepting only the ISO ``YYYY-`` prefix would let the two features
+        disagree on the same stored shape.
+        """
+        self._patient("UHID-DOB-ISO", 1983)
+        Patient.objects.create(
+            tenant_id=self.tenant.id, uhid="UHID-DOB-BARE",
+            demographics={"name": "Bare Dob", "gender": "F", "dob": "1983"},
+        )
+
+        response = self.client.get("/api/v1/patients/search/?year_of_birth=1983")
+
+        assert response.status_code == 200, response.content
+        assert {row["uhid"] for row in response.json()} == {
+            "UHID-DOB-ISO", "UHID-DOB-BARE",
+        }
+
     def test_existing_uhid_lookup_still_works(self):
         """The regression guard for the counter's original lookup (REG-002)."""
         self._patient("UHID-KEEP", 1990)
@@ -437,3 +563,62 @@ class TestSearchByBirthDate:
 
         assert response.status_code == 200, response.content
         assert {row["uhid"] for row in response.json()} == {"UHID-KEEP"}
+
+
+class TestMobileCanonicalisationMigration:
+    """The data migration brings pre-existing formatted mobiles to canonical form.
+
+    Write-path canonicalisation only fixes new rows; a patient registered before
+    the fix can still hold ``"+91 98765 43210"`` and stay invisible to the
+    duplicate prefilter (REG-003). This exercises the migration function the way
+    ``migrate`` would, on a row that bypassed the serializer.
+    """
+
+    def test_formatted_mobile_is_canonicalised(self):
+        from importlib import import_module
+
+        from django.apps import apps as django_apps
+
+        migration = import_module(
+            "apps.patient_registry.migrations.0009_normalise_patient_mobile"
+        )
+        tenant, _, _ = _make_context()
+        patient = Patient.objects.create(
+            tenant_id=tenant.id, uhid="UHID-LEGACY-FORMATTED",
+            demographics={"name": "Legacy", "gender": "M", "yearOfBirth": 1965},
+            contact={"mobile": "+91 98765 43210", "email": "legacy@example.test"},
+        )
+
+        migration.canonicalise_mobiles(django_apps, None)
+
+        patient.refresh_from_db()
+        assert patient.contact["mobile"] == "9876543210"
+        # Non-mobile contact keys are left untouched.
+        assert patient.contact["email"] == "legacy@example.test"
+
+    def test_empty_and_missing_mobile_are_skipped(self):
+        from importlib import import_module
+
+        from django.apps import apps as django_apps
+
+        migration = import_module(
+            "apps.patient_registry.migrations.0009_normalise_patient_mobile"
+        )
+        tenant, _, _ = _make_context()
+        blank = Patient.objects.create(
+            tenant_id=tenant.id, uhid="UHID-LEGACY-BLANK",
+            demographics={"name": "Blank", "gender": "F", "yearOfBirth": 1975},
+            contact={"mobile": ""},
+        )
+        none = Patient.objects.create(
+            tenant_id=tenant.id, uhid="UHID-LEGACY-NONE",
+            demographics={"name": "None", "gender": "F", "yearOfBirth": 1976},
+            contact=None,
+        )
+
+        migration.canonicalise_mobiles(django_apps, None)
+
+        blank.refresh_from_db()
+        none.refresh_from_db()
+        assert blank.contact == {"mobile": ""}
+        assert none.contact is None

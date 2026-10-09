@@ -1,15 +1,8 @@
 """Patient registry serializers."""
-import re
-
 from rest_framework import serializers
 
 from .models import Patient, IntakePoint, QRCode
-
-#: 10-digit Indian mobile, first digit 6-9. Chosen over a ``+91``-anchored
-#: pattern because the stored form is the bare national number; a leading
-#: ``+91``/``91``/``0`` is stripped before the match so callers may send either
-#: form. Complains on letters, short numbers, and landline-style leading zeros.
-MOBILE_RE = re.compile(r"^[6-9]\d{9}$")
+from .validation import MOBILE_RE, normalise_mobile
 
 #: Birth-data keys accepted in ``demographics`` (REG-007). ``yearOfBirth`` is
 #: the established registry key; ``dob``/``age_years`` are the documented
@@ -22,16 +15,6 @@ BIRTH_KEYS = ("dob", "age_years", "yearOfBirth", "year_of_birth")
 #: the only producer today and writes ``abdm_scan_and_share``, so that is the
 #: documented set. New keys are added here alongside their producer.
 CONSENT_FLAG_KEYS = frozenset({"abdm_scan_and_share"})
-
-
-def _normalise_mobile(value) -> str:
-    """Strip a ``+91``/``91``/``0`` prefix and non-digits, leaving 10 digits."""
-    digits = re.sub(r"\D", "", str(value or ""))
-    if digits.startswith("0"):
-        digits = digits[1:]
-    if digits.startswith("91") and len(digits) == 12:
-        digits = digits[2:]
-    return digits
 
 
 class PatientSerializer(serializers.ModelSerializer):
@@ -95,19 +78,28 @@ class PatientSerializer(serializers.ModelSerializer):
         return value
 
     def validate_contact(self, value):
-        """A supplied mobile must be a valid Indian mobile (REG-007)."""
+        """A supplied mobile must be a valid Indian mobile; store it canonically.
+
+        REG-007 accepts ``+91``/spacing, but REG-003's duplicate prefilter is a
+        substring lookup on the *stored* value, so the mobile is reduced to the
+        bare 10-digit national form on write (via :func:`normalise_mobile`). A
+        registration that stored the client's formatted string verbatim was
+        invisible to a later bare-digit probe. Other contact keys pass through
+        untouched, and a missing mobile is not rewritten.
+        """
         if value is None:
             return value
         if not isinstance(value, dict):
             raise serializers.ValidationError("Contact must be an object.")
         mobile = value.get("mobile")
-        if mobile not in (None, "") and not MOBILE_RE.fullmatch(
-            _normalise_mobile(mobile)
-        ):
+        if mobile in (None, ""):
+            return value
+        canonical = normalise_mobile(mobile)
+        if not MOBILE_RE.fullmatch(canonical):
             raise serializers.ValidationError(
                 "Enter a 10-digit Indian mobile number (optionally prefixed +91)."
             )
-        return value
+        return {**value, "mobile": canonical}
 
     def validate_consent_flags(self, value):
         """Only documented, boolean consent flags may be recorded (REG-007)."""
