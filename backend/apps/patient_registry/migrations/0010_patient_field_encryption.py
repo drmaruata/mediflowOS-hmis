@@ -17,6 +17,14 @@ migration never double-encrypts (which would permanently destroy the
 plaintext) and never changes an existing token. The reverse operation restores
 the plaintext columns so a rollback is lossless.
 
+The forward backfill is deliberately **not** atomic: ``RunPython`` executes
+under autocommit, so it must be run inside a deploy maintenance window (a
+writer landing between ``values()`` and ``update()`` is not blocked by the
+migration). A crash mid-forward leaves the data half-encrypted, but that is
+self-repairing: the re-run is safe because the ``v1:`` skip-guard leaves
+already-encrypted rows untouched and only finishes the remaining plaintext
+rows. Never "fix" a partial state by hand — re-run the forward function.
+
 Like 0009, the data operations stay self-contained: the mobile normaliser is
 inlined rather than imported from the app, and the only app-layer dependency
 is the pinned ``common.crypto`` token format. Writing the encrypted ``contact``
@@ -168,15 +176,18 @@ class Migration(migrations.Migration):
             old_name='abha_number',
             new_name='_abha_number',
         ),
+        # Widen 14 -> 256 in one go (the max_length is a token bound, see the
+        # model comment): a 128-char plaintext seals to a 212-char ``v1:``
+        # token, so a 128-char column could not hold it on PostgreSQL.
         migrations.AlterField(
             model_name='patient',
             name='_abha_number',
-            field=models.CharField(blank=True, db_column='abha_number', max_length=128, null=True),
+            field=models.CharField(blank=True, db_column='abha_number', max_length=256, null=True),
         ),
         migrations.AlterField(
             model_name='patient',
             name='abha_address',
-            field=models.CharField(blank=True, db_column='abha_address', max_length=128, null=True),
+            field=models.CharField(blank=True, db_column='abha_address', max_length=256, null=True),
         ),
         migrations.RenameField(
             model_name='patient',

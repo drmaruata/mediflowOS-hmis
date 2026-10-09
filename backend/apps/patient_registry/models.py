@@ -147,11 +147,18 @@ class Patient(models.Model):
     # would tempt a ``filter(abha_number="...")`` that silently searches
     # ciphertext. The ``*_idx`` columns are the deterministic keyed-HMAC values
     # that REG-002/REG-003 matching actually filters on.
+    # ``max_length`` is the *token* bound, not the plaintext bound: a 128-char
+    # plaintext (the serializer's upper limit) seals into a 212-char ``v1:``
+    # token (3-char prefix + 16-char base64 IV + ":" + base64 of the plaintext
+    # plus the 16-byte GCM tag = 4*ceil(144/3) = 192). 256 gives ~44-char
+    # headroom; the physical column is widened by migration 0010 (expand-only)
+    # so an oversized legacy row fails loudly on PostgreSQL instead of being
+    # silently truncated on SQLite.
     _abha_number = models.CharField(
-        max_length=128, null=True, blank=True, db_column="abha_number"
+        max_length=256, null=True, blank=True, db_column="abha_number"
     )
     _abha_address = models.CharField(
-        max_length=128, null=True, blank=True, db_column="abha_address"
+        max_length=256, null=True, blank=True, db_column="abha_address"
     )
     abha_number_idx = models.CharField(max_length=64, null=True, blank=True)
     abha_address_idx = models.CharField(max_length=64, null=True, blank=True)
@@ -284,7 +291,15 @@ class Patient(models.Model):
         self.abha_address_idx = (
             search_index(abha_address, key=hmac_key) if abha_address else ""
         )
-        self.mobile_idx = search_index(normalise_mobile(mobile), key=hmac_key) if mobile else ""
+        # The digest must cover exactly the string that got sealed
+        # (EncryptedMobileField._seal encrypts ``canonical or mobile``).
+        # Indexing ``normalise_mobile(mobile)`` alone would diverge for a
+        # non-canonicalisable value (e.g. ``"abc"`` → index of ``""`` while the
+        # seal holds ``encrypt("abc")``), leaving no way to match the row.
+        canonical = normalise_mobile(mobile) if mobile else ""
+        self.mobile_idx = (
+            search_index(canonical or mobile, key=hmac_key) if mobile else ""
+        )
 
 
 class IntakePoint(models.Model):

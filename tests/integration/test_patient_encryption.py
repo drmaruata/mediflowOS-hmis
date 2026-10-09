@@ -333,8 +333,18 @@ class TestPatientFieldEncryptionMigration:
                     "",
                     "",
                     json.dumps({"mobile": "9876543210"}),
-                    str(patient.id),
+                    # Bind the pk through the field's DB conversion, exactly like
+                    # the migration's reverse (0010.decrypt_existing_rows):
+                    # SQLite stores UUIDs as compact hex, so a str() of the UUID
+                    # (dashed form) silently matches zero rows and the forward
+                    # path below would never see a genuinely plaintext row.
+                    Patient._meta.pk.get_db_prep_value(patient.id, connection),
                 ],
+            )
+            assert cursor.rowcount == 1, (
+                "the plaintext seed must land on exactly one row — "
+                f"got rowcount={cursor.rowcount}; a vacuous seed would pass "
+                "the migration tests without exercising the forward encrypt."
             )
         return patient
 
