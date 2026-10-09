@@ -146,6 +146,19 @@ class TestPatientRegistryAPI:
         assert response.status_code == status.HTTP_200_OK
         assert len(response.data["results"]) == 1
 
+    def test_patient_create_generates_uhid(self):
+        """Registration mints the UHID server-side and lands in the verify queue."""
+        response = self.client.post(
+            "/api/v1/patients/",
+            {"demographics": {"name": "Walk-in Patient", "yearOfBirth": 1995, "gender": "M"}},
+            format="json",
+        )
+        assert response.status_code == status.HTTP_201_CREATED
+        # REG-001: the client cannot choose the UHID; the server issues it and
+        # nobody has verified identity documents, so the record starts pending.
+        assert response.data["uhid"].startswith("UHID-")
+        assert response.data["verification_status"] == "pending"
+
     def test_patient_search_by_uhid(self):
         response = self.client.get("/api/v1/patients/search/?q=UH001")
         assert response.status_code == status.HTTP_200_OK

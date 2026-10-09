@@ -3,9 +3,10 @@ from django.db.models import Q
 from django.utils import timezone
 from rest_framework import viewsets, status
 from rest_framework.decorators import action
+from rest_framework.exceptions import PermissionDenied, ValidationError
 from rest_framework.response import Response
 
-from common.tenant import TenantScopedQuerysetMixin
+from common.tenant import TENANT_REQUIRED_MESSAGE, TenantScopedQuerysetMixin
 from .models import Patient, IntakePoint, QRCode
 from .serializers import PatientSerializer, IntakePointSerializer, QRCodeSerializer
 
@@ -13,6 +14,89 @@ from .serializers import PatientSerializer, IntakePointSerializer, QRCodeSeriali
 class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
     serializer_class = PatientSerializer
     queryset = Patient.objects.all()
+
+    def _resolve_intake_department(self, department_id, tenant_id):
+        """Resolve a registration's intake department within the tenant.
+
+        A department the caller names must belong to this tenant, or the
+        registration would mint a token into another hospital's queue. None
+        means "no intake department" — the registration lands without a token.
+        """
+        if department_id is None:
+            return None
+        from apps.identity_tenancy.models import Department
+
+        department = Department.objects.filter(
+            tenant_id=tenant_id, id=department_id
+        ).first()
+        if department is None:
+            raise ValidationError(
+                {"intake_department_id": "Unknown department for this tenant."}
+            )
+        return department
+
+    def _issue_intake_token(self, patient, department, tenant_id):
+        """Mint the OPD token the registration response carries (REG-010)."""
+        from apps.opd.models import Token
+        from apps.opd.services import next_token_number
+
+        prefix, number = next_token_number(
+            tenant_id=tenant_id,
+            facility_id=department.facility_id,
+            department_id=department.id,
+        )
+        Token.objects.create(
+            tenant_id=tenant_id,
+            patient_id=patient.id,
+            department_id=department.id,
+            series=prefix,
+            number=number,
+            status="waiting",
+        )
+        return {"series": prefix, "number": number}
+
+    def perform_create(self, serializer):
+        """Assign the server-generated UHID, then mint the intake token.
+
+        ``TenantScopedQuerysetMixin.perform_create`` stamps the tenant and
+        writes the audit row, but it cannot be reused as-is: the UHID must be
+        decided *before* the patient row exists (it is a NOT NULL column), so
+        the tenant guard is replicated here and the mixin's audit helper is
+        invoked explicitly afterwards.
+        """
+        tenant_id = self.get_tenant_id()
+        if not tenant_id:
+            raise PermissionDenied(TENANT_REQUIRED_MESSAGE)
+
+        from apps.patient_registry.services import generate_uhid
+
+        department = self._resolve_intake_department(
+            serializer.validated_data.pop("intake_department_id", None), tenant_id
+        )
+        uhid = generate_uhid(tenant_id=tenant_id)
+        serializer.save(tenant_id=tenant_id, uhid=uhid)
+        self._write_audit_log(serializer.instance, "create")
+
+        self._registration_token = (
+            self._issue_intake_token(serializer.instance, department, tenant_id)
+            if department is not None
+            else None
+        )
+
+    def create(self, request, *args, **kwargs):
+        """Create a patient, appending the issued OPD token when present (REG-010).
+
+        ``token`` is a response-level field: it is data about the intake, not
+        about the patient, so it belongs next to the representation rather
+        than inside it.
+        """
+        # Viewset instances may be reused by DRF; a token left over from a
+        # previous call must never leak into the next response.
+        self._registration_token = None
+        response = super().create(request, *args, **kwargs)
+        if self._registration_token is not None:
+            response.data["token"] = self._registration_token
+        return response
 
     @action(detail=False, methods=["get"])
     def search(self, request):

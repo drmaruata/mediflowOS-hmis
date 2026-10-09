@@ -79,3 +79,23 @@ class ABHACallbackLog(models.Model):
     class Meta:
         db_table = "registry.abdm_callback_log"
         indexes = [models.Index(fields=["tenant_id", "request_id"])]
+
+
+class PatientSequence(models.Model):
+    """Per-tenant, per-month counter that backs server-issued UHIDs (REG-001).
+
+    One row exists per ``(tenant, kind, period)``; ``next_value`` is the next
+    number to issue, so the first call creates the row at 1 and leaves it at
+    2. ``period`` is the ``%Y-%m`` month of registration, which is what makes
+    a UHID restart at ``000001`` each month and stay unique within the tenant.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
+    kind = models.CharField(max_length=16, default="uhid")
+    period = models.CharField(max_length=16)
+    next_value = models.BigIntegerField(default=1)
+
+    class Meta:
+        db_table = "registry.sequence"
+        unique_together = [["tenant_id", "kind", "period"]]
