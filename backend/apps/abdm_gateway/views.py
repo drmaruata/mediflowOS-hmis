@@ -98,12 +98,20 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             return None
 
     def _match_patient(self, profile: dict, tenant_id: str):
-        """Match by ABHA number, then demographics (ABD-008, ABD-009)."""
+        """Match by ABHA number, then demographics (ABD-008, ABD-009).
+
+        The ABHA probe crosses the REG-008 ``abha_number_idx`` digest via
+        ``filter_by_abha`` — the gateway carries the plaintext number (the
+        person scanned it), so exact-digest matching finds the encrypted row
+        and never falls back to a ciphertext scan.
+        """
         from apps.patient_registry.models import Patient
         abha_number = profile.get("abhaNumber") or profile.get("healthId")
         if abha_number:
             try:
-                return Patient.objects.get(tenant_id=tenant_id, abha_number=abha_number)
+                return Patient.objects.filter_by_abha(
+                    tenant_id, abha_number
+                ).get()
             except Patient.DoesNotExist:
                 pass
 
@@ -193,26 +201,28 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         ``patient_id`` is required because ``opd.Token.patient_id`` is NOT NULL;
         the caller creates the patient when the profile does not match an
         existing record.
+
+        The series and number come from the shared token-series service
+        (REG-010): a pre-configured TokenSeries prefix for the department wins
+        over the old inline ``QR-<uuid>`` naming, and the counter is safe
+        under concurrent scans.
         """
         from apps.opd.models import Token
+        from apps.opd.services import next_token_number
 
         if department is None:
             raise _NoOpdDepartment()
 
-        series = f"QR-{str(department.id)[:8].upper()}"
-        max_num = (
-            Token.objects.filter(
-                tenant_id=self._tenant_id, department_id=department.id, series=series
-            )
-            .order_by("-number")
-            .first()
+        prefix, number = next_token_number(
+            tenant_id=self._tenant_id,
+            facility_id=department.facility_id,
+            department_id=department.id,
         )
-        number = (max_num.number + 1) if max_num else 1
         token = Token.objects.create(
             tenant_id=self._tenant_id,
             patient_id=patient_id,
             department_id=department.id,
-            series=series,
+            series=prefix,
             number=number,
             status="waiting",
         )

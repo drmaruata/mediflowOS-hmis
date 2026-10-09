@@ -55,7 +55,7 @@ These are planning assumptions to validate, not measurements.
 | Layer | Choice | Notes |
 | --- | --- | --- |
 | Frontend | React + TypeScript, **Vite SPA** | No SSR needed; the app sits behind authentication |
-| UI | **Shadcn UI** (Tailwind + Radix) — replaces Ant Design 5 | Copied-source components via CLI; no external icon library dependency; semantic tokens (`bg-primary`, `text-foreground`) replace `ConfigProvider` theming |
+| UI | **Shadcn UI** (Tailwind + Radix) — replaces Ant Design 5 | Copied-source components via CLI; `lucide-react` icon set; semantic tokens (`bg-primary`, `text-foreground`) replace `ConfigProvider` theming |
 | Charts | **Inline SVG** (hand-rolled donut with `stroke-dasharray`, bars via SVG primitives) | No `@ant-design/charts`, no `recharts`; avoids dependency sync and keeps bundle small |
 | Component registry | `components.json` + `src/components/ui/` | `Button`, `Card`, `Badge`, `Input`, `Label`, `Dialog`, `Tabs`, `Avatar`, `Tooltip`, `Toast`, `ScrollArea`, `Progress`, `DropdownMenu`, `Separator`, `Select` (planned)
 | Data fetching | TanStack Query | Server-state cache and refetching |
@@ -64,6 +64,7 @@ These are planning assumptions to validate, not measurements.
 | Backend | **Django + Django REST Framework (Python)**, modular monolith | REST API; ASGI runtime. Django Channels is isolated to the real-time notification and live-vitals endpoints only |
 | Backend runtime | **ASGI + Uvicorn/Daphne** | Serves Django/DRF and the dedicated Django Channels WebSocket consumers |
 | ORM | **Django ORM + psycopg** | PostgreSQL transactions, migrations, and tenant-aware application access |
+| Field encryption | **cryptography (AES-256-GCM) + keyed HMAC-SHA256** | REG-008: `abha_number`, `abha_address` and `contact.mobile` are stored as `v1:` AES-GCM tokens; deterministic keyed digests in `*_idx` columns serve exact lookups (REG-002/REG-003/ABD-008) without decrypting. Master key from `PATIENT_FIELDS_KEY` (no default outside DEBUG) |
 | Async workers | **Celery + Celery Beat** | Background jobs; not used as the realtime transport |
 | Realtime | **Django Channels** | WebSocket consumers only for notifications and live vitals; Redis channel layer |
 | Database | **PostgreSQL** (managed) with RLS | One shared DB, `tenant_id` on every table |
@@ -484,6 +485,7 @@ CAPA records the issue, severity, RCA, corrective/preventive actions, owners, du
 ## 10. Data Architecture
 
 - **Patient identity:** one patient record per tenant (UHID), referenced by all modules. ABHA linkage; merge workflow with full history preserved; provisional vs verified status for self-registered patients.
+- **Field-level encryption at rest (REG-008):** `abha_number`, `abha_address` and `contact.mobile` are stored as AES-256-GCM `v1:` tokens (keyed from `PATIENT_FIELDS_KEY` via PBKDF2-HMAC-SHA256, AES and HMAC keys domain-separated). Search and duplicate-matching never scan ciphertext: the deterministic keyed-HMAC `abha_number_idx` / `abha_address_idx` / `mobile_idx` columns carry exact digests and lead with `tenant_id`; a mobile probe is canonicalised to the bare national number before hashing, exactly like the write path. The model and serializers expose plaintext only.
 - **Clinical model:** internal tables designed for operations; FHIR resources generated at the integration boundary.
 - **Append-only clinical data:** corrections create new versions (amendment records), never destructive updates.
 - **Quality data:** `quality` schema holds fact tables, daily snapshots, indicator values and CAPA; written by event consumers, read by the engine. Indicator values are denormalised and versioned for reproducible history.

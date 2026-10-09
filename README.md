@@ -22,11 +22,13 @@ The application is built around the following principles:
 - Python 3.11+
 - Django 5.2 LTS
 - Django REST Framework
-- PostgreSQL
+- PostgreSQL 15+
 - Redis
 - Celery + django-celery-beat
 - Django Channels
 - JWT authentication
+- Field-level encryption at rest (`cryptography`, AES-GCM tokens + keyed-HMAC
+  search indexes) for patient identifiers (REG-008)
 - OpenAPI schema generation via drf-spectacular
 - OTP support via django-otp
 
@@ -128,10 +130,11 @@ animation utilities.
 | django-celery-beat | 2.9.0 | 2.9.0 | Current latest. |
 | channels, channels-redis | 4.3.2, 4.3.0 | 4.3.2, 4.3.0 | Current latest; keep the pair aligned. |
 | daphne | 4.2.3 | 4.2.3 | ASGI server; required because the project serves Channels WebSocket consumers. See below. |
+| cryptography | 48.0.0 | 48.0.0 | Application-level field encryption at rest (REG-008): AES-256-GCM tokens + keyed-HMAC search indexes for patient identifiers. **Pinned exactly** — the token format and key derivation depend on the installed release. Wired via `common/crypto.py`. |
 | openpyxl | 3.1.5 | 3.1.5 | Current latest in the supported 3.1 line; currently unused — see below. |
 | Pillow | 12.3.0 | 12.3.0 | Current latest; currently unused — see below. |
 | reportlab | 5.0.1 | 5.0.1 | Current latest; currently unused — see below. |
-| httpx | 0.28.1 | 0.28.1 | Current latest in the supported 0.28 line; currently unused — see below. |
+| httpx | 0.28.1 | 0.28.1 | Current latest in the supported 0.28 line. Wired via `apps/abdm_gateway/client.py` — outbound ABDM sandbox ABHA create/verify (REG-009). |
 | opentelemetry-sdk | 1.45.0 | 1.45.0 | Current latest; keep aligned with instrumentation. Currently unwired. |
 | opentelemetry-instrumentation-django | 0.66b0 | 0.66b0 | Prerelease; keep exactly pinned and upgrade with matching OTel packages. Currently unwired. |
 | sentry-sdk | 2.71.0 | 2.71.0 | Current latest in v2. Currently unwired. |
@@ -163,7 +166,7 @@ Django's ASGI handler, but it is not what the container uses.
 
 ### Dependencies that are declared but not yet used
 
-`Pillow`, `openpyxl`, `reportlab`, `httpx`, `opentelemetry-sdk`,
+`Pillow`, `openpyxl`, `reportlab`, `opentelemetry-sdk`,
 `opentelemetry-instrumentation-django` and `sentry-sdk` are declared but not
 imported anywhere in `backend/`. Each backs a documented requirement that is not
 implemented yet:
@@ -172,7 +175,6 @@ implemented yet:
 | --- | --- |
 | `Pillow` | printable facility/counter QR codes (architecture doc 8.4) |
 | `openpyxl`, `reportlab` | Quality OS regulatory exports (9.9) |
-| `httpx` | ABDM gateway, HL7 v2 bridge and payer adapters (12) |
 | `opentelemetry-*`, `sentry-sdk` | observability (16) — entirely unimplemented |
 
 They are kept pinned rather than removed so the versions are not re-resolved
@@ -215,8 +217,12 @@ mediflowOS-hmis/
 │   │   ├── modules/              # one folder per backend module (auth, dashboard, ...)
 │   │   ├── lib/                  # fetch wrappers, e.g. health.ts
 │   │   ├── stores/               # zustand client UI state
-│   │   └── styles/               # index.css; ConfigProvider owns the antd tokens
-│   ├── public/
+│   │   ├── styles/               # globals.css owns the Tailwind/shadcn tokens
+│   │   ├── components/           # AppShell + vendored shadcn ui/ components
+│   │   ├── test/                 # vitest setup (matchMedia, ResizeObserver)
+│   │   ├── App.tsx               # route table + QueryClientProvider
+│   │   └── main.tsx
+│   ├── index.html                # dark-mode pre-paint bootstrap
 │   ├── package.json
 │   ├── vite.config.ts
 │   └── tsconfig.json
@@ -244,7 +250,11 @@ Before setting up the project locally, install the following:
 
 - Python 3.11 or newer
 - Node.js 22.22.2+ or 24.15+ and npm (required by the frontend test environment)
-- PostgreSQL 14+ or 15+
+- PostgreSQL 15+ (16 recommended). The schema relies on row-level security
+  and on `NULLS NOT DISTINCT` unique constraints, both of which require
+  PostgreSQL 15+; `docker/compose.yaml` and CI run PostgreSQL 16. On 14 or
+  earlier Django silently omits the `NULLS NOT DISTINCT` constraint
+  (system check `models.W047`), leaving token-series uniqueness unenforced.
 - Redis
 - Git
 - A terminal such as PowerShell, Bash, or zsh
@@ -310,6 +320,18 @@ $env:PGPORT = "5432"
 $env:REDIS_URL = "redis://localhost:6379/0"
 $env:CELERY_BROKER_URL = "redis://localhost:6379/0"
 ```
+
+> **PATIENT_FIELDS_KEY (REG-008):** patient identifiers (`abha_number`,
+> `abha_address`, `contact.mobile`) are encrypted at rest with a key derived
+> from `PATIENT_FIELDS_KEY`. For local dev this is optional — `config.settings.dev`
+> supplies a deterministic development passphrase when the variable is unset —
+> but it must be explicitly exported in any non-DEBUG environment: `base.py`
+> refuses to start without it so identifiers are never encrypted under an
+> empty or guessed key. Example:
+>
+> ```powershell
+> $env:PATIENT_FIELDS_KEY = "a-long-random-passphrase-only-the-hospital-knows"
+> ```
 
 > The project defaults to PostgreSQL on `localhost` and Redis at `redis://redis:6379/0` in many settings. If you are using local services instead of containers, update these values accordingly.
 

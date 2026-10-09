@@ -5,6 +5,7 @@ from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
 from rest_framework.response import Response
 
+from apps.identity_tenancy.permissions import WritePermissionMixin
 from common.tenant import TenantScopedQuerysetMixin
 from .models import CAPA, IndicatorDef, IndicatorSourceDocument, IndicatorValue, QualityFact, Framework, FrameworkEdition
 from .serializers import (
@@ -14,26 +15,38 @@ from .serializers import (
 )
 
 
-class FrameworkViewSet(viewsets.ModelViewSet):
-    """Framework definitions — global, not tenant-scoped."""
+class FrameworkViewSet(WritePermissionMixin, viewsets.ModelViewSet):
+    """Framework definitions — global, not tenant-scoped.
+
+    The four global catalogue viewsets share this split (TEN-004): reads are
+    open to any authenticated tenant user, but writes need the
+    ``quality.catalogue.manage`` claim, because a global edit lands in every
+    hospital's view of the catalogue.
+    """
     serializer_class = FrameworkSerializer
     queryset = Framework.objects.all()
+    write_permission = "quality.catalogue.manage"
 
 
-class FrameworkEditionViewSet(viewsets.ModelViewSet):
+class FrameworkEditionViewSet(WritePermissionMixin, viewsets.ModelViewSet):
+    """Framework editions — global catalogue, gated like FrameworkViewSet."""
     serializer_class = FrameworkEditionSerializer
     queryset = FrameworkEdition.objects.all()
+    write_permission = "quality.catalogue.manage"
 
 
-class IndicatorSourceDocumentViewSet(viewsets.ModelViewSet):
+class IndicatorSourceDocumentViewSet(WritePermissionMixin, viewsets.ModelViewSet):
+    """Indicator source documents — global catalogue, gated like FrameworkViewSet."""
     serializer_class = IndicatorSourceDocumentSerializer
     queryset = IndicatorSourceDocument.objects.all()
+    write_permission = "quality.catalogue.manage"
 
 
-class IndicatorDefViewSet(viewsets.ModelViewSet):
-    """Indicator definitions — global source catalogue."""
+class IndicatorDefViewSet(WritePermissionMixin, viewsets.ModelViewSet):
+    """Indicator definitions — global source catalogue, gated like FrameworkViewSet."""
     serializer_class = IndicatorDefSerializer
     queryset = IndicatorDef.objects.all()
+    write_permission = "quality.catalogue.manage"
 
 
 class IndicatorValueViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):

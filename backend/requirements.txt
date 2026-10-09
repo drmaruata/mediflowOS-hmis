@@ -15,6 +15,10 @@ channels-redis>=4.3,<4.4
 # Daphne is the reference server for Channels 4 and is maintained by the Django
 # Software Foundation.
 daphne>=4.2,<5
+# REG-008: application-level field encryption at rest (``common.crypto``, AES-GCM
+# tokens + keyed-HMAC search indexes). Pinned exactly: the token format and the
+# key derivation depend on the installed cryptography release.
+cryptography==48.0.0
 # --- Declared for features that are specified but not yet implemented --------
 # Kept pinned rather than removed, because each backs a documented requirement
 # and would otherwise have to be re-resolved from scratch. tests/unit/test_dependency_wiring.py

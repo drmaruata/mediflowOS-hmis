@@ -30,6 +30,15 @@ FACILITY_CLAIM = "facility_id"
 TENANT_SETTING = "app.tenant_id"
 FACILITY_SETTING = "app.facility_id"
 
+#: Canonical refusal text for a write whose tenant was never resolved.
+#: Defined here because the guard itself lives in
+#: TenantScopedQuerysetMixin.perform_create; views that replicate the guard
+#: (UserViewSet, which cannot reuse the mixin's save kwargs) import this
+#: constant so the two refusals cannot drift into different wording.
+TENANT_REQUIRED_MESSAGE = (
+    "A tenant must be resolved before tenant-owned data can be written."
+)
+
 # Attribute names used to expose the resolved context on the request.
 REQUEST_TENANT_ATTR = "tenant_id"
 REQUEST_FACILITY_ATTR = "facility_id"
@@ -138,9 +147,7 @@ class TenantScopedQuerysetMixin:
         """Stamp the tenant from the request; never trust a client-supplied one."""
         tenant_id = self.get_tenant_id()
         if not tenant_id:
-            raise PermissionDenied(
-                "A tenant must be resolved before tenant-owned data can be written."
-            )
+            raise PermissionDenied(TENANT_REQUIRED_MESSAGE)
         serializer.save(**{self.tenant_field: tenant_id})
         
         # Write an audit trail event (AUD-001)

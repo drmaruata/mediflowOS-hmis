@@ -37,6 +37,7 @@ IMPORT_NAME = {
     "channels": "channels",
     "channels-redis": "channels_redis",
     "daphne": "daphne",
+    "cryptography": "cryptography",
     "Pillow": "PIL",
     "openpyxl": "openpyxl",
     "reportlab": "reportlab",
@@ -60,7 +61,6 @@ UNIMPLEMENTED = {
     "Pillow": "printable facility/counter QR codes (architecture doc 8.4)",
     "openpyxl": "Quality OS regulatory exports (9.9)",
     "reportlab": "Quality OS regulatory exports (9.9)",
-    "httpx": "ABDM gateway, HL7 v2 bridge and payer adapters (12)",
 }
 
 

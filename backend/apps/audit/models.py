@@ -11,6 +11,11 @@ class AuditEvent(models.Model):
     entity_type = models.CharField(max_length=64)
     entity_id = models.CharField(max_length=64)
     reason = models.TextField(null=True)
+    #: Provenance marker for programmatic writes (e.g. ``"qr.regenerate"``).
+    #: Distinct from ``reason``, which is the human break-glass justification;
+    #: a machine-initiated change carries no break-glass header and still has
+    #: to be findable as its own kind of event.
+    source = models.CharField(max_length=64, null=True, blank=True)
     source_ip = models.GenericIPAddressField(null=True)
     occurred_at = models.DateTimeField(auto_now_add=True, db_index=True)
     hash_chain = models.CharField(max_length=128, default="")

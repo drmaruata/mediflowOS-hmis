@@ -17,12 +17,18 @@ PROTECTED_ENDPOINTS = [
     "/api/v1/departments/",
     "/api/v1/wards/",
     "/api/v1/beds/",
+    "/api/v1/beds/export/",
+    "/api/v1/beds/import/",
     "/api/v1/service-units/",
     "/api/v1/staff-positions/",
+    "/api/v1/staff-positions/export/",
+    "/api/v1/staff-positions/import/",
+    "/api/v1/config-revisions/",
     "/api/v1/patients/",
     "/api/v1/patients/search/",
     "/api/v1/intake-points/",
     "/api/v1/qr-codes/",
+    "/api/v1/users/",
 ]
 
 

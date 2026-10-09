@@ -81,7 +81,7 @@ Load a skill before implementing. Check both locations.
 | Any React component / hook | `react-expert` |
 | React performance, render behaviour, memoization | `vercel-react-best-practices` |
 | Any TypeScript typing question | `typescript-pro` |
-| Any Ant Design component or theming | `ant-design-react` |
+| Any shadcn/ui component, Tailwind token, or theming question | `shadcn`, `shadcn-ui`, `tailwind-4-docs` |
 | Any REST endpoint, versioning, or pagination design | `api-designer` |
 | Auth, permissions, tenant isolation, PHI, input validation | `secure-code-guardian` |
 | Any change touching auth or tenancy | `security-reviewer` |
@@ -135,7 +135,8 @@ mediflowOS-hmis/
 │   ├── requirements.txt, requirements-dev.txt, pyproject.toml
 │   └── manage.py
 ├── frontend/
-│   └── src/                     # lib/, styles/, test/, App.tsx, main.tsx
+│   └── src/                     # modules/, components/, lib/, stores/,
+│                                # styles/, test/, App.tsx, main.tsx
 ├── tests/                       # pytest suite (outside backend/)
 │   ├── unit/  integration/
 ├── docs/                        # PRD, SRS, Architecture, Quality OS catalog
@@ -157,13 +158,19 @@ be honoured):
 
 ## 3. Tech stack (pinned — do not drift)
 
-**Backend:** Python 3.11+, Django 5.2 LTS, DRF 3.18, PostgreSQL (psycopg 3),
+**Backend:** Python 3.11+, Django 5.2 LTS, DRF 3.18, PostgreSQL 15+ (psycopg 3),
 Redis, Celery 5.6 + django-celery-beat, Channels 4.3, **daphne 4.2** (ASGI
-server), SimpleJWT, django-otp, drf-spectacular, OpenTelemetry + Sentry.
+server), SimpleJWT, django-otp, drf-spectacular, **cryptography 48.0** (AES-GCM
+field encryption + keyed-HMAC search indexes, REG-008), OpenTelemetry + Sentry.
 
-**Frontend:** React 18.3, TypeScript 5.9, Vite 6.4, Ant Design 5.29,
-`@ant-design/icons` 5.6, **React Router 7.18** (`react-router-dom` — installed
-and in use), TanStack Query 5.104, Zustand, React Hook Form, Zod.
+**Frontend:** React 18.3, TypeScript 5.9, Vite 6.4, **React Router 7.18**
+(`react-router-dom` — installed and in use), TanStack Query 5.104, Zustand,
+React Hook Form 7.89 + Zod 3.25 (both wired in `src/modules/auth/LoginPage.tsx`),
+Tailwind CSS v4 + shadcn/ui (vendored components in `src/components/ui/`),
+Radix UI primitives, `lucide-react` icons. **Ant Design was removed** on
+2 Oct 2026 (README §"UI system migration"); `antd`, `@ant-design/icons` and
+`@ant-design/charts` are no longer dependencies and docs describing their API
+do not apply to this repo.
 
 **Dependency rules:**
 
@@ -180,12 +187,19 @@ and in use), TanStack Query 5.104, Zustand, React Hook Form, Zod.
   `docker/Dockerfile.backend` does.
 - Before adding any dependency, check `README.md` §"Dependency version
   guidance", then verify via Context7, then justify it in your report.
-- Unused **backend** dependencies (`Pillow`, `openpyxl`, `reportlab`, `httpx`,
+- Unused **backend** dependencies (`Pillow`, `openpyxl`, `reportlab`,
   `opentelemetry-sdk`, `opentelemetry-instrumentation-django`, `sentry-sdk`) are
   declared but not imported; each backs a documented requirement that is not
-  implemented. Unused **frontend** dependencies (`@ant-design/charts`,
-  `react-hook-form`, `zod`) are the same situation. Do not build features on
-  them silently — flag that they are unwired. `zustand` and `react-router-dom`
+  implemented. `httpx` was wired by `apps/abdm_gateway/client.py` (outbound
+  ABDM sandbox ABHA create/verify, REG-009) and is an ordinary imported
+  dependency now. On the **frontend**, `react-hook-form` and `zod` are wired
+  (login form); `@ant-design/charts` was removed with the shadcn migration.
+  The frontend dependencies that are declared but never imported are the
+  shadcn prerequisites for components not yet vendored — nine Radix packages
+  (`react-accordion`, `react-alert-dialog`, `react-checkbox`,
+  `react-collapsible`, `react-popover`, `react-radio-group`, `react-select`,
+  `react-switch`) and `sonner`. Do not build features on an unwired
+  dependency silently — flag it. `zustand` and `react-router-dom`
   are wired: `src/stores/authStore.ts` and `src/App.tsx` / `src/main.tsx`
   respectively. `tests/unit/test_dependency_wiring.py`
   enforces this for the backend: a declared dependency that is neither
@@ -304,12 +318,19 @@ means table `patient` in schema `registry`.
 - **Never** add `AllowAny` to a tenant-owned endpoint.
 - Only two endpoints may opt out: the health probe
   (`apps/common/urls.py`) and the ABDM callback, which carries no user JWT.
-- The ABDM callback (`ABHACallbackViewSet`) **currently answers 501 on
-  purpose.** Do not "fix" it by returning 200. The seven outstanding
-  requirements are listed in its docstring (architecture doc §8.4): gateway
-  authentication, tenant resolution from HIP ID, idempotency, strict timestamp
-  validation, patient matching, async token issuance, and DPDP consent
-  recording. Until all seven are done it stays 501.
+- The ABDM callback (`ABHACallbackViewSet` in `apps/abdm_gateway/views.py`)
+  is **implemented** — it authenticates presence, validates timestamps, binds
+  the tenant from `Facility.abdm_hip_id`, is idempotent on the gateway
+  request ID, matches patients by ABHA then demographics, issues an OPD
+  token, and returns an acknowledgement carrying the consent event. There is
+  no `501` anywhere under `backend/apps/`.
+  Residual §8.4 gaps that must not be papered over (and must not be reported
+  as done): signature verification is **presence-only** (any
+  `X-ABDM-Signature`/`Bearer` header passes — ABD-005), the consent event is
+  built but **not persisted** (ABD-011), and the link token is
+  `secrets.token_urlsafe(32)` with no encryption (ABD-012 placeholder).
+  Do not regress the endpoint to 501, and do not claim these three are
+  finished until the code says so.
 - `tests/integration/test_api_authentication.py` enforces this. Keep it passing.
 
 ### Serializers
@@ -380,7 +401,7 @@ This repo documents **why**, not what, and it is meticulous about it. Follow it:
 
 ---
 
-## 5. Frontend rules (React 18 / TypeScript / Ant Design 5)
+## 5. Frontend rules (React 18 / TypeScript / Tailwind + shadcn/ui)
 
 ### TypeScript
 
@@ -409,24 +430,28 @@ This repo documents **why**, not what, and it is meticulous about it. Follow it:
 - Split a component when it exceeds a readable single screen, and when you split,
   colocate the sub-component rather than creating a shallow wrapper chain.
 
-### Ant Design
+### UI system (Tailwind v4 + shadcn/ui — Ant Design is gone)
 
-- Theme lives in one `ConfigProvider` in the app root — currently teal
-  `#0f766e`. Do not hardcode colors inline elsewhere; add or reuse a token.
-- Use Ant Design components before writing custom ones. Use `Card`, `Statistic`,
-  `Table`, `Space`, `Row`/`Col` responsive grids, `Tag` for state, `message`
-  for feedback.
-- Import icons from `@ant-design/icons`, never from a CDN or an SVG asset.
+- The theme lives in `src/styles/globals.css`: design tokens are CSS custom
+  properties registered under `@theme inline` (brand primary
+  `hsl(174 83% 25%)`, teal `#0f766e`). Do not hardcode colors inline; add or
+  reuse a token.
+- Use the vendored shadcn components in `src/components/ui/` before writing
+  custom ones. To vendor a new one: `npx shadcn@latest add <component> --diff`,
+  then commit the generated source — never overwrite local edits.
+- Import icons from `lucide-react` (shadcn's `iconLibrary`), never from a
+  CDN or a hand-rolled SVG asset.
 - Accessibility is a requirement, not a nicety: `aria-label` on every
   icon-only `Button`, keyboard-reachable interactions, and labels on inputs.
-- Responsive: use the `xs`/`sm`/`md`/`xl` breakpoints on `Row`/`Col`. Hospital
-  screens are often small or wall-mounted.
-- `useBreakpoint` and `Grid` for behaviour changes, not only layout.
+- Responsive: Tailwind breakpoints (`sm:`/`md:`/`lg:`/`xl:`) plus the
+  `useBreakpoint` hook (`src/lib/`) for behaviour changes, not only layout.
+  Hospital screens are often small or wall-mounted.
 
 ### Data fetching
 
-- TanStack Query owns all server state. `QueryClientProvider` is in `main.tsx`;
-  never create a second `QueryClient` in app code.
+- TanStack Query owns all server state. `QueryClientProvider` lives in
+  `src/App.tsx` (one `QueryClient` at module scope); never create a second
+  `QueryClient` in app code.
 - Query keys must be structured arrays, scoped and stable:
   `["patients", tenantId, filters]`. Include every input that changes the result.
 - Set `retry`, `refetchInterval`, `staleTime` deliberately. The health query

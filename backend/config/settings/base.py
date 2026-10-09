@@ -3,10 +3,42 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from django.core.exceptions import ImproperlyConfigured
+
+from apps.abdm_gateway.client import require_sandbox_base_url
+
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 SECRET_KEY = os.getenv("DJANGO_SECRET_KEY", "change-me")
 DEBUG = os.getenv("DJANGO_DEBUG", "false") == "true"
 ALLOWED_HOSTS = os.getenv("DJANGO_ALLOWED_HOSTS", "*").split(",")
+
+# REG-008: master passphrase for application-level field encryption
+# (``abha_number``, ``abha_address``, ``contact.mobile``, AES-GCM via
+# ``common.crypto``; PBKDF2-HMAC-SHA256 derives the AES and HMAC-SHA256 index
+# keys). There is deliberately **no default**: encrypting patient identifiers
+# under an empty or guessed passphrase would be theatre, so a non-DEBUG
+# settings import refuses to start without it. dev.py and test.py supply
+# deterministic values *before* they ``from .base import *``; production must
+# set PATIENT_FIELDS_KEY in the environment.
+PATIENT_FIELDS_KEY = os.getenv("PATIENT_FIELDS_KEY", "")
+if not DEBUG and not PATIENT_FIELDS_KEY:
+    raise ImproperlyConfigured(
+        "PATIENT_FIELDS_KEY must be set when DEBUG is off: patient identifiers "
+        "are encrypted at rest (REG-008) and must never be encrypted under a "
+        "missing master key. dev.py/test.py set a value; production must export "
+        "one."
+    )
+
+# REG-009: outbound ABDM sandbox root for the ABHA create/verify adapter.
+# Sandbox-only by design: the gate refuses anything but an https "sbx" URL, so
+# a mis-typed value fails at import rather than later when the first counter
+# request would reach the production ABDM endpoint. Unset means the adapter is
+# unavailable and the patient ABHA actions answer 503 (never a fake 200);
+# dev.py/test.py leave it unset, and a local sandbox run exports it.
+_abdm_sandbox_url = os.getenv("ABDM_SANDBX_BASE_URL", "")
+ABDM_SANDBX_BASE_URL = (
+    require_sandbox_base_url(_abdm_sandbox_url) if _abdm_sandbox_url else ""
+)
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -16,6 +48,12 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "rest_framework",
+    # SimpleJWT's blacklist app. ROTATE_REFRESH_TOKENS and
+    # BLACKLIST_AFTER_ROTATION are already enabled below, but SimpleJWT skips
+    # blacklisting (it catches the missing-method AttributeError) while this
+    # app is absent — a replayed refresh token would stay valid for its whole
+    # lifetime (TEN-006). Its migrations only create new tables.
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "django_otp",
     # The TOTP plugin carries the device model used for second-factor
@@ -109,8 +147,14 @@ REST_FRAMEWORK = {
     # explicitly (see apps/common/urls.py for the health probe). Leaving
     # this unset makes DRF fall back to AllowAny, which would expose every
     # tenant-owned resource to unauthenticated CRUD.
+    # TEN-006: the MFA gate is appended after IsAuthenticated, never before
+    # it — an anonymous request must fail authentication (401), not be told
+    # about an MFA requirement it cannot satisfy. Views that declare their
+    # own permission_classes replace this list wholesale; the health probe,
+    # the ABDM callback and the TOTP enrolment endpoints do so deliberately.
     "DEFAULT_PERMISSION_CLASSES": [
         "rest_framework.permissions.IsAuthenticated",
+        "common.mfa.MFARequiredIfConfigured",
     ],
     "DEFAULT_AUTHENTICATION_CLASSES": [
         # Binds the tenant from the token's signed claims, overriding the
@@ -149,6 +193,12 @@ SPECTACULAR = {
 # client-supplied header. See apps/identity_tenancy/tokens.py.
 SIMPLE_JWT = {
     "TOKEN_OBTAIN_SERIALIZER": "apps.identity_tenancy.tokens.TenantAwareTokenSerializer",
+    # Fail-closed deactivation (TEN-008): the obtain serializer refuses a
+    # switched-off membership only at the *next* login, so without a matching
+    # refresh-time refusal a live refresh token outruns deactivation — tenant
+    # and permission claims survive rotation, and an offboarded user would
+    # keep minting fully-claimed access tokens until REFRESH_TOKEN_LIFETIME.
+    "TOKEN_REFRESH_SERIALIZER": "apps.identity_tenancy.tokens.TenantAwareTokenRefreshSerializer",
     "ACCESS_TOKEN_LIFETIME": timedelta(minutes=15),
     "REFRESH_TOKEN_LIFETIME": timedelta(days=1),
     # Tenants hold clinical records, so a leaked refresh token should not stay
