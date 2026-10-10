@@ -30,6 +30,7 @@ from rest_framework.response import Response
 
 from common.tenant import bind_tenant_session
 from common.throttling import AbdmHipThrottle
+from .consent import hash_profile, record_consent_event, store_link_token
 from .models import ABHACallbackLog
 from .serializers import ABHACallbackAckSerializer, ABHACallbackSerializer
 
@@ -423,19 +424,31 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                     status=status.HTTP_409_CONFLICT,
                 )
 
-            # ABD-011: record consent event
-            consent_event = {
-                "timestamp": timezone.now().isoformat(),
-                "source_app": payload.get("sourceApp") or "ABDM",
-                "purpose": "registration",
-                "facility_id": facility_id,
-            }
+            # ABD-011: record the consent event, and ABD-012: store the link
+            # token encrypted. Both writes sit inside the request transaction
+            # alongside the patient registration and the token, so the consent
+            # record and the patient it names cannot come apart: a rollback of
+            # one is a rollback of all of them, and a dangling consent row
+            # pointing at a patient that no longer exists is worse than no
+            # consent row at all.
+            consent_event = record_consent_event(
+                tenant_id=tenant_id,
+                patient_id=patient.id,
+                request_id=request_id,
+                source_app=payload.get("sourceApp") or "ABDM",
+                purpose="registration",
+                facility_id=facility_id,
+                raw_profile_hash=hash_profile(profile),
+            )
 
-            # ABD-012: store link token encrypted (placeholder for KMS integration)
+            # ABD-012: the link token exists only for care-context linking. It
+            # is sealed into the log row and never echoed in the
+            # acknowledgement — the gateway does not need the value, and an
+            # ack is the one part of this flow that logs and proxies see.
             link_token = secrets.token_urlsafe(32)
 
             # Log the callback
-            ABHACallbackLog.objects.create(
+            log = ABHACallbackLog.objects.create(
                 tenant_id=tenant_id,
                 request_id=request_id,
                 facility_abdm_id=hip_id,
@@ -445,6 +458,7 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 token_issued=token,
                 status="ok",
             )
+            store_link_token(log_id=log.id, token=link_token)
 
         ack = ABHACallbackAckSerializer({
             "status": "ok",
@@ -452,7 +466,6 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             "request_id": request_id,
             "patient_id": str(patient.id),
             "consent_event": consent_event,
-            "link_token": link_token,
         })
         return Response(ack.data, status=status.HTTP_200_OK)
 

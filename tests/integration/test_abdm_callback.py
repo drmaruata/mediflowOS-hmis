@@ -17,10 +17,17 @@ the payload once and signs those bytes), and the view re-computes the digest
 over the raw body it receives. Tests that must change the bytes after signing
 post the mutated body with the original signature — the view computes over
 what it receives, so the digest no longer matches.
+
+The last two of the seven architecture doc section 8.4 requirements close here:
+ABD-011 (the consent event is written to ``abdm.consent_event``, not merely built
+in memory) and ABD-012 (the link token is sealed at rest and never echoed back).
+Both are pinned below, including the data-minimisation rule that the consent
+table carries no profile data at all.
 """
 import hashlib
 import hmac
 import json
+import uuid
 
 import pytest
 from django.conf import settings
@@ -29,10 +36,11 @@ from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
-from apps.abdm_gateway.models import ABHACallbackLog
+from apps.abdm_gateway.models import ABHACallbackLog, ConsentEvent
 from apps.identity_tenancy.models import Department, Facility, Tenant
 from apps.opd.models import Token
 from apps.patient_registry.models import Patient
+from common.crypto import decrypt, derive_keys
 
 CALLBACK_URL = "/api/v1/abdm-callbacks/"
 
@@ -352,6 +360,195 @@ def test_scan_cannot_write_into_another_tenants_department():
     assert Token.objects.count() == 0
     assert ABHACallbackLog.objects.count() == 0
     assert Patient.objects.count() == 0
+
+
+def _canonical(profile):
+    """The canonical JSON serialization ``hash_profile`` digests."""
+    return json.dumps(profile, sort_keys=True, separators=(",", ":")).encode()
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_successful_callback_records_one_consent_event():
+    """One successful scan records exactly one consent event (ABD-011).
+
+    The event used to be built as a dict inside the view and returned in the
+    acknowledgement, which meant nothing downstream could ever prove consent was
+    granted. Timestamp, source, purpose and facility are the four things the
+    requirement names, so all four are pinned from the stored row.
+    """
+    tenant, facility, _ = _tenant_with_opd()
+    response = _post(APIClient(), _payload())
+
+    assert response.status_code == 200
+    events = ConsentEvent.objects.all()
+    assert events.count() == 1
+
+    event = events.get()
+    assert event.tenant_id == tenant.id
+    assert event.patient_id == uuid.UUID(response.json()["patient_id"])
+    assert event.request_id == "req-1"
+    assert event.source_app == "ABDM"  # payload carries no sourceApp
+    assert event.purpose == "registration"
+    assert event.facility_id == facility.id
+    assert event.granted_at is not None
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_consent_event_takes_the_gateways_source_app():
+    """``sourceApp`` from the payload wins over the ABDM fallback (ABD-011).
+
+    Consent provenance is the point of the record: a scan launched from another
+    HIP's app has to be attributed to that app, not to "ABDM".
+    """
+    _tenant_with_opd()
+    _post(APIClient(), _payload(sourceApp="NHA-Scan-and-Share"))
+
+    assert ConsentEvent.objects.get().source_app == "NHA-Scan-and-Share"
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_consent_event_ties_itself_to_the_payload_with_a_hash():
+    """``raw_profile_hash`` is the one-way SHA-256 of the shared profile.
+
+    The digest lets an auditor confirm a consent record belongs to the payload
+    in hand without the table holding any of it. Canonical serialization is
+    asserted too: key order in the gateway's JSON must not change the digest.
+    """
+    profile = {"abhaNumber": "123456789012", "demographics": {"yearOfBirth": 1984}}
+    _tenant_with_opd()
+    _post(APIClient(), _payload(profile=profile))
+
+    event = ConsentEvent.objects.get()
+    assert event.raw_profile_hash == hashlib.sha256(_canonical(profile)).hexdigest()
+    assert len(event.raw_profile_hash) == 64
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_consent_event_row_carries_no_profile_data():
+    """Data minimisation: the consent table holds no PHI (ABD-011, §8.4).
+
+    Asserted two ways, because either alone is weak. The stored row is dumped
+    field by field and no profile substring may appear anywhere in it — the
+    patient's name and ABHA number are in the posted profile, so a copy of the
+    profile would show up here. And the column set itself is pinned, so a future
+    migration cannot quietly add a ``name`` or ``abha_number`` column and pass a
+    test that only greps the values.
+    """
+    profile = {
+        "abhaNumber": "123456789012",
+        "demographics": {"name": "Asha Verma", "yearOfBirth": 1984, "gender": "F"},
+    }
+    _tenant_with_opd()
+    _post(APIClient(), _payload(profile=profile))
+
+    row = ConsentEvent.objects.values().get()
+    assert set(row) == {
+        "id",
+        "tenant_id",
+        "patient_id",
+        "request_id",
+        "source_app",
+        "purpose",
+        "facility_id",
+        "granted_at",
+        "raw_profile_hash",
+    }
+
+    dumped = json.dumps(row, default=str)
+    for profile_data in ("Asha Verma", "123456789012", "abhaNumber", "demographics"):
+        assert profile_data not in dumped
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_replay_creates_no_second_consent_event():
+    """A replayed request ID records no second consent event (ABD-006/ABD-011).
+
+    Idempotency is enforced by the early return before the atomic block, so a
+    replay must not reach the consent write at all: two consent events for one
+    scan would be two records of the same grant, which a DPDP audit cannot
+    reconcile.
+    """
+    _tenant_with_opd()
+    client = APIClient()
+
+    first = _post(client, _payload())
+    _post(client, _payload(), count=2)
+
+    assert first.status_code == 200
+    assert ConsentEvent.objects.count() == 1
+    assert ABHACallbackLog.objects.count() == 1
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_consent_event_rolls_back_with_the_rest_of_the_write(monkeypatch):
+    """A consent record must never outlive the transaction that created it.
+
+    The failure is injected *after* the consent event would have been written
+    (the link token is minted last), so a consent row surviving it would be a
+    dangling DPDP record naming a patient that was never registered.
+    """
+    _tenant_with_opd()
+
+    def _explode(*args, **kwargs):
+        raise RuntimeError("link token minting failed")
+
+    monkeypatch.setattr("apps.abdm_gateway.views.secrets.token_urlsafe", _explode)
+
+    with pytest.raises(RuntimeError, match="link token minting failed"):
+        _post(APIClient(), _payload())
+
+    assert ConsentEvent.objects.count() == 0
+    assert Patient.objects.count() == 0
+    assert ABHACallbackLog.objects.count() == 0
+    assert Token.objects.count() == 0
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_ack_stops_returning_the_plaintext_link_token():
+    """ABD-012: the link token is stored sealed, never echoed to the gateway.
+
+    It exists for care-context linking, which the gateway does not need the
+    value for. Returning it put a bearer-style credential in an acknowledgement
+    that logs, proxies and browser tooling all see.
+    """
+    _tenant_with_opd()
+    response = _post(APIClient(), _payload())
+
+    body = response.json()
+    assert body["status"] == "ok"
+    assert "link_token" not in body
+    # The consent event stays in the acknowledgement — it carries no PHI.
+    assert body["consent_event"]["purpose"] == "registration"
+    assert body["consent_event"]["source_app"] == "ABDM"
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_link_token_is_stored_encrypted_not_in_clear():
+    """The stored link token is a ``v1:`` AES-GCM token, not the plaintext.
+
+    Decrypted under the test passphrase it yields a 43-character
+    ``token_urlsafe(32)`` value — the shape the view mints — which is what
+    proves the column holds the sealed link token and not some other secret.
+    """
+    _tenant_with_opd()
+    _post(APIClient(), _payload())
+
+    stored = ABHACallbackLog.objects.values_list("link_token_enc", flat=True).get()
+    assert stored is not None
+    assert stored.startswith("v1:")
+
+    aes_key, _ = derive_keys(settings.PATIENT_FIELDS_KEY)
+    plaintext = decrypt(stored, key=aes_key)
+    assert len(plaintext) == 43  # secrets.token_urlsafe(32)
+    assert stored != plaintext
 
 
 @pytest.mark.integration

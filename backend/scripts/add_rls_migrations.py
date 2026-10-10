@@ -86,7 +86,7 @@ PLAN = {
         "0003_alter_intakepoint_tenant_id_alter_qrcode_tenant_id",
     ),
     "abdm_gateway": (
-        ["abdm.callback_log"],
+        ["abdm.callback_log", "abdm.consent_event"],
         "0001_initial",
     ),
     "opd": (["opd.token", "opd.encounter"], "0003_alter_opdencounter_tenant_id"),

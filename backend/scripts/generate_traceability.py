@@ -60,16 +60,6 @@ KNOWN_GAPS = {
         "QR regenerate is implemented (`qr-codes/{id}/regenerate/`); the revoke "
         "half of the requirement has no endpoint",
     ),
-    "ABD-011": (
-        "**not implemented**",
-        "the consent event is built and returned in the acknowledgement but "
-        "never written to any table",
-    ),
-    "ABD-012": (
-        "**not implemented**",
-        "the link token is `secrets.token_urlsafe(32)` and discarded — "
-        "no encryption, no storage (placeholder comment for KMS)",
-    ),
     "REG-009": (
         "deferred",
         "the outbound ABDM sandbox ABHA adapter shipped (create/verify actions "

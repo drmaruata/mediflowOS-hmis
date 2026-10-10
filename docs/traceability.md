@@ -64,8 +64,6 @@ claimed as delivered (re-verified against the code each time
 this file is regenerated):
 
 - **ABD-002** (partial) - QR regenerate is implemented (`qr-codes/{id}/regenerate/`); the revoke half of the requirement has no endpoint
-- **ABD-011** (not implemented) - the consent event is built and returned in the acknowledgement but never written to any table
-- **ABD-012** (not implemented) - the link token is `secrets.token_urlsafe(32)` and discarded — no encryption, no storage (placeholder comment for KMS)
 - **AUD-002** (partial) - AuditEvent.hash_chain exists but is never computed — the log is append-only in practice, not tamper-evident
 - **PLT-004** (not implemented) - every Celery task body is `pass` and there is no CELERY_BEAT_SCHEDULE — no background job can run
 - **QOS-001** (not implemented) - indicator catalogue exists in docs/ but no loader has been written; the 406 records are not in the database
@@ -89,8 +87,8 @@ this file is regenerated):
 | ABD-008 | The system shall match a shared profile first by ABHA number within the tenant, then by demographic candidate search | M | R1 | partial |
 | ABD-009 | If exactly one strong match exists the system shall link to it; if multiple candidates exist it shall create a verification-queue entry; if none exist it shall create a provisional patient | M | R1 | partial |
 | ABD-010 | The system shall issue a token for the intake point and shall make it available to the counter display and the patient's app via the acknowledgement | M | R1 | partial |
-| ABD-011 | The system shall record the profile share as a consent event with timestamp, source, purpose and facility | M | R1 | **not implemented** |
-| ABD-012 | The system shall store ABDM link tokens encrypted and use them only for care-context linking | M | R1 | **not implemented** |
+| ABD-011 | The system shall record the profile share as a consent event with timestamp, source, purpose and facility | M | R1 | partial |
+| ABD-012 | The system shall store ABDM link tokens encrypted and use them only for care-context linking | M | R1 | partial |
 | ABD-013 | The system shall remain fully usable through the counter channel if the ABDM gateway is unavailable | M | R1 | partial |
 | ABD-014 | The system shall alert administrators on abnormal callback failure or volume | S | R1 | partial |
 | ABD-015 | The system shall model intake points by type (OPD, pharmacy, lab, billing) so Scan and Share can extend beyond OPD | S | R4 | partial |
