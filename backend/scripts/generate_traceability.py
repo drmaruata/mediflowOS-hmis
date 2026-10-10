@@ -56,7 +56,16 @@ MODULES = {
 #: closed, delete the entry so regeneration reflects reality.
 #: Task 18 deleted ABD-002 (QR regeneration *and* revocation both exist now:
 #: `qr-codes/{id}/regenerate/` and `qr-codes/{id}/revoke/`).
+#: Task 19 added ABD-017 (the profile-share replay ships and passes
+#: hermetically against our own callback, but no recorded real-sandbox run
+#: exists — a skip, or a hermetic replay, is not a verification).
 KNOWN_GAPS = {
+    "ABD-017": (
+        "deferred",
+        "sandbox profile-share replay test is gated on `ABDM_SANDBOX_RUN` "
+        "with real credentials; no recorded run in this environment — see "
+        "`docs/abdm-sandbox-runbook.md`",
+    ),
     "REG-009": (
         "deferred",
         "the outbound ABDM sandbox ABHA adapter shipped (create/verify actions "

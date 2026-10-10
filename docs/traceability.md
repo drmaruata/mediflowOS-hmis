@@ -63,6 +63,7 @@ Requirements that exist in the SRS but are deliberately not
 claimed as delivered (re-verified against the code each time
 this file is regenerated):
 
+- **ABD-017** (deferred) - sandbox profile-share replay test is gated on `ABDM_SANDBOX_RUN` with real credentials; no recorded run in this environment — see `docs/abdm-sandbox-runbook.md`
 - **AUD-002** (partial) - AuditEvent.hash_chain exists but is never computed — the log is append-only in practice, not tamper-evident
 - **PLT-004** (not implemented) - every Celery task body is `pass` except Task 18's `task_scan_callback_failures` (ABD-014), and there is no CELERY_BEAT_SCHEDULE — no background job runs on a schedule
 - **QOS-001** (not implemented) - indicator catalogue exists in docs/ but no loader has been written; the 406 records are not in the database
@@ -92,7 +93,7 @@ this file is regenerated):
 | ABD-014 | The system shall alert administrators on abnormal callback failure or volume | S | R1 | partial |
 | ABD-015 | The system shall model intake points by type (OPD, pharmacy, lab, billing) so Scan and Share can extend beyond OPD | S | R4 | partial |
 | ABD-016 | The system shall support linking care contexts and sharing health records with consent via ABDM | S | R6 | partial |
-| ABD-017 | The system shall pass the ABDM profile-share test case in sandbox for each supported API version | M | R1 | partial |
+| ABD-017 | The system shall pass the ABDM profile-share test case in sandbox for each supported API version | M | R1 | deferred |
 
 ### AUD - `audit` (module completion phase R1)
 
