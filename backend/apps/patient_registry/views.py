@@ -37,6 +37,15 @@ from .validation import normalise_mobile
 
 logger = logging.getLogger(__name__)
 
+#: Refusal text for a regenerate on a withdrawn QR code (ABD-002). A constant
+#: so the 409 response and any test or client that matches on it cannot drift
+#: apart, and because the wording has to name *which* state was hit — a bare
+#: "not allowed" leaves the caller guessing between revoked, unknown tenant
+#: and a missing field.
+REVOKED_REGENERATE_DETAIL = (
+    "This QR code has been revoked; a revoked code cannot be regenerated."
+)
+
 
 class AbdmErrorResponseSerializer(serializers.Serializer):
     """Structured error body the ABDM ABHA actions answer (REG-009).
@@ -596,8 +605,22 @@ class QRCodeViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         be traceable. The audit row is written directly to ``audit.event`` with
         the ``source`` marker because the mixin's write path cannot express a
         machine-initiated event.
+
+        A revoked code is refused (ABD-002): see ``REVOKED_REGENERATE_DETAIL``.
         """
         qr = self.get_object()
+        if qr.revoked_at is not None:
+            # Refuse before touching the row: a rebuild would mint a working
+            # routing string out of a code that was withdrawn, while the audit
+            # trail says it was revoked — the poster is printed, the department
+            # may have been reassigned, and the queue would keep accepting its
+            # scans. ``revoked_at`` and ``active`` are left as they are and no
+            # audit row is written, so a refused call leaves no trace of a
+            # change that never happened.
+            return Response(
+                {"detail": REVOKED_REGENERATE_DETAIL},
+                status=status.HTTP_409_CONFLICT,
+            )
         qr.encode_data = self._encode_data(qr.facility, qr.intake_point, qr.department)
         qr.regenerated_at = timezone.now()
         qr.save(update_fields=["encode_data", "regenerated_at"])
@@ -615,6 +638,51 @@ class QRCodeViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
             source="qr.regenerate",
         )
         return Response(QRCodeSerializer(qr).data)
+
+    @extend_schema(
+        request=None,
+        responses={
+            200: QRCodeSerializer,
+            201: QRCodeSerializer,
+            404: OpenApiResponse(description="No such QR code in this tenant."),
+        },
+        description=(
+            "Revoke this facility, counter or department QR code (ABD-002). "
+            "The row keeps its history — a printed poster is not un-printed by "
+            "a delete — but ``active`` goes false, ``revoked_at`` is stamped "
+            "server-side and an AUD-001 audit row is written; the "
+            "``regenerate`` action then answers 409 so a withdrawn string "
+            "cannot be rebuilt. The first call answers 201; a repeat call is "
+            "the same end state, answers 200 and writes nothing more. "
+            "Tenant-scoped: a QR code of another tenant answers 404."
+        ),
+    )
+    @action(detail=True, methods=["post"], url_path="revoke")
+    def revoke(self, request, pk=None):
+        """Withdraw a QR code from service, recording who withdrew it.
+
+        Both fields are written in one ``save(update_fields=...)`` so the
+        stamp and the flag cannot land apart: ``active=False`` with no
+        ``revoked_at`` would make the row look deactivated-but-alive to any
+        consumer reading one column.
+
+        The audit row comes from ``TenantScopedQuerysetMixin._write_audit_log``
+        rather than a direct ``AuditEvent`` write, because a revocation is an
+        authenticated user's update of a row — the same event class the
+        mixin already records for every other write — and not a
+        machine-initiated one like ``regenerate``.
+        """
+        qr = self.get_object()  # tenant-scoped: a foreign id 404s here
+        if qr.revoked_at is not None:
+            # Already withdrawn: the repeat is the same end state, so it is a
+            # no-op that echoes the row. A second stamp or audit row would make
+            # the trail claim two withdrawals of one code.
+            return Response(QRCodeSerializer(qr).data)
+        qr.revoked_at = timezone.now()
+        qr.active = False
+        qr.save(update_fields=["revoked_at", "active"])
+        self._write_audit_log(qr, "update")
+        return Response(QRCodeSerializer(qr).data, status=status.HTTP_201_CREATED)
 
 
 class OpSlipView(APIView):

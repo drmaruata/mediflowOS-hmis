@@ -1,4 +1,5 @@
-"""ABDM outbound ABHA adapter and department QR codes (REG-009, REG-013).
+"""ABDM outbound ABHA adapter, counter-channel resilience and department QR codes
+(REG-009, REG-013, ABD-013).
 
 REG-009 (create/verify an ABHA at the counter) is shipped as an outbound
 ``ABDMClient`` plus a strict 503 when the sandbox is not configured: the ABDM
@@ -7,6 +8,11 @@ so the ``ABDMClient`` paths below are patterned on the community-mirrored
 sandbox v1 enrollment spec and must be re-verified when the official spec is
 confirmed (see the REG-009 entry in ``docs/traceability.md`` Known gaps).
 No endpoint may fake a 200 for a request the adapter never completed.
+
+ABD-013 (the counter channel stays fully usable if the ABDM gateway is
+unavailable) is pinned here too: registration never touches the outbound
+client, and the actions that do touch it answer a structured 502 rather than
+a fabricated success.
 
 REG-013 (department-specific QR codes) pins the ``encode_data`` contract
 ``HIP[-counter][-department_id]`` and the audited regenerate action.
@@ -17,6 +23,7 @@ import uuid
 import httpx
 import pytest
 from django.contrib.auth import get_user_model
+from django.test import override_settings
 from rest_framework.test import APIClient
 
 from apps.abdm_gateway.client import (
@@ -439,6 +446,99 @@ class TestAbhaActionsWhenConfigured:
         assert body["status"] == "error"
         assert body["code"] == "ABDM_REQUEST_FAILED"
         assert "sandbox login" in body["detail"]
+
+
+class TestCounterChannelSurvivesGatewayOutage:
+    """ABD-013: a dead ABDM gateway must not take the counter down with it.
+
+    The counter's job is registering patients and issuing tokens, neither of
+    which depends on the ABDM gateway. Pinning that with a *configured* base
+    URL that cannot be reached is the point: an unconfigured sandbox is a
+    trivially offline gateway, whereas a configured-but-unreachable one is the
+    state a hospital is actually in when the network or the gateway is down,
+    and it is where a shared client could hold a request hostage.
+
+    The base URL is sandbox-shaped so it passes ``require_sandbox_base_url``
+    (the gate that keeps this client away from production ABDM), and the
+    transport is the real ``ABDMClient`` failing to connect — the same
+    ``httpx.TransportError`` a real outage raises, not a stub of it.
+    """
+
+    UNREACHABLE_BASE = "https://sbx-unreachable.example.invalid/api/v1"
+
+    def setup_method(self):
+        self.tenant, self.facility, _ = _make_context()
+        self.client, _ = _make_client(self.tenant)
+
+    def _unreachable_client(self, monkeypatch):
+        """Point the views' client at a transport that cannot connect."""
+
+        def _unreachable(request):
+            raise httpx.ConnectError(
+                "connection refused", request=request
+            )
+
+        from apps.patient_registry import views
+
+        class UnreachableClient(ABDMClient):
+            def __init__(self, base_url, **kwargs):
+                super().__init__(
+                    base_url, transport=httpx.MockTransport(_unreachable), **kwargs
+                )
+
+        monkeypatch.setattr(views, "ABDMClient", UnreachableClient)
+
+    @override_settings(ABDM_SANDBX_BASE_URL=UNREACHABLE_BASE)
+    def test_registration_succeeds_with_the_gateway_unreachable(self, monkeypatch):
+        """POST /patients/ never touches the outbound client (ABD-013).
+
+        Registration is a local write: UHID, demographics, the server-issued
+        token. If a future change makes it depend on the gateway, this fails
+        — and that failure is the requirement being broken, not the test.
+        """
+        self._unreachable_client(monkeypatch)
+
+        payload = {
+            "demographics": {
+                "name": "Counter Patient",
+                "yearOfBirth": 1990,
+                "gender": "F",
+            }
+        }
+        response = self.client.post("/api/v1/patients/", payload, format="json")
+
+        assert response.status_code == 201, response.content
+        body = response.json()
+        assert body["uhid"].startswith("UHID-")
+        assert Patient.objects.filter(uhid=body["uhid"]).count() == 1
+
+    @override_settings(ABDM_SANDBX_BASE_URL=UNREACHABLE_BASE)
+    def test_abha_create_answers_structured_502_not_a_fake_success(self, monkeypatch):
+        """The gateway path fails loudly while the counter path does not.
+
+        Same request, same unreachable gateway, opposite outcomes: the ABHA
+        action answers 502 with the stable ``ABDM_SANDBOX_UNREACHABLE`` code
+        (a request the adapter could not complete must never look like a
+        created ABHA), and the client can see the difference.
+        """
+        self._unreachable_client(monkeypatch)
+        patient = _make_patient(self.tenant, self.facility)
+
+        response = self.client.post(
+            f"/api/v1/patients/{patient.id}/abha/create/",
+            {"aadhaar": "XXXXXXXXXXXX", "mobile": "9876543210", "otp": "111111"},
+            format="json",
+        )
+
+        assert response.status_code == 502, response.content
+        body = response.json()
+        assert body["status"] == "error"
+        assert body["code"] == "ABDM_SANDBOX_UNREACHABLE"
+        assert body["detail"]
+        patient.refresh_from_db()
+        # The failed gateway call wrote nothing onto the patient either: an
+        # outbound create that could not happen must not clear or mint an ABHA.
+        assert patient.abha_number == "123456789012"
 
 
 class TestDepartmentQRCodes:

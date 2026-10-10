@@ -161,8 +161,13 @@ class QRCodeSerializer(serializers.ModelSerializer):
         fields = "__all__"
         # encode_data is minted by QRCodeViewSet._encode_data from the row's
         # own facility/intake_point/department (REG-013); client-supplied
-        # values must be ignored, never stored.
-        read_only_fields = ["id", "tenant_id", "encode_data"]
+        # values must be ignored, never stored. ``revoked_at`` is server-owned
+        # for the same reason with a sharper edge (ABD-002): a client-supplied
+        # timestamp would let anyone date a withdrawal into the past or the
+        # future, so the audit trail's ``occurred_at`` and the state it
+        # describes would disagree. Only the revoke action writes it, and it
+        # is what the regenerate guard reads.
+        read_only_fields = ["id", "tenant_id", "encode_data", "revoked_at"]
 
     def validate_department(self, value):
         """A QR's department must belong to the tenant making the request.

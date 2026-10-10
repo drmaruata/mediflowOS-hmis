@@ -54,12 +54,9 @@ MODULES = {
 #: per-requirement table prints, the note is appended to the Known gaps list.
 #: Every entry was re-verified against the code on 2026-10-07 — when a gap is
 #: closed, delete the entry so regeneration reflects reality.
+#: Task 18 deleted ABD-002 (QR regeneration *and* revocation both exist now:
+#: `qr-codes/{id}/regenerate/` and `qr-codes/{id}/revoke/`).
 KNOWN_GAPS = {
-    "ABD-002": (
-        "partial",
-        "QR regenerate is implemented (`qr-codes/{id}/regenerate/`); the revoke "
-        "half of the requirement has no endpoint",
-    ),
     "REG-009": (
         "deferred",
         "the outbound ABDM sandbox ABHA adapter shipped (create/verify actions "
@@ -97,8 +94,9 @@ KNOWN_GAPS = {
     ),
     "PLT-004": (
         "**not implemented**",
-        "every Celery task body is `pass` and there is no "
-        "CELERY_BEAT_SCHEDULE — no background job can run",
+        "every Celery task body is `pass` except Task 18's "
+        "`task_scan_callback_failures` (ABD-014), and there is no "
+        "CELERY_BEAT_SCHEDULE — no background job runs on a schedule",
     ),
     "QOS-001": (
         "**not implemented**",

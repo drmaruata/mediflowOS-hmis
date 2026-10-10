@@ -35,6 +35,7 @@ import hashlib
 import hmac
 import json
 import uuid
+from datetime import timedelta
 
 import pytest
 from django.conf import settings
@@ -51,9 +52,18 @@ from apps.identity_tenancy.models import (
 from apps.identity_tenancy.tokens import TenantAwareTokenSerializer
 from apps.opd.models import Token
 from apps.patient_registry.models import Patient
+from apps.platform.models import Notification
+from apps.workers.tasks import task_scan_callback_failures
 from common.crypto import decrypt, derive_keys
 
 CALLBACK_URL = "/api/v1/abdm-callbacks/"
+
+#: The alert the scan task raises, and the burst size that raises it. Copied
+#: here as literals rather than imported from the task so the test pins the
+#: *documented* threshold: if someone widens it, these numbers fail instead of
+#: quietly following the change.
+ALERT_TITLE = "ABDM callback failure burst"
+FAILURE_THRESHOLD = 5
 
 
 def _signed_request(payload, secret=None):
@@ -849,6 +859,177 @@ def test_link_token_is_stored_encrypted_not_in_clear():
     plaintext = decrypt(stored, key=aes_key)
     assert len(plaintext) == 43  # secrets.token_urlsafe(32)
     assert stored != plaintext
+
+
+def _seed_callbacks(tenant, *, count, status="rejected", **overrides):
+    """Write ``count`` ledger rows for a tenant, as a gateway would.
+
+    ``status`` is the only interesting column: the scan is a count over the
+    ledger, so it is what each case seeds.
+    """
+    for _ in range(count):
+        ABHACallbackLog.objects.create(
+            tenant_id=tenant.id,
+            request_id=f"req-{uuid.uuid4().hex}",
+            facility_abdm_id="hip-123",
+            status=status,
+            **overrides,
+        )
+
+
+def _seed_member(tenant, username, *, privileged):
+    """One active membership; ``privileged`` marks an administrator.
+
+    ``Role.require_mfa`` is the documented privileged-role marker (TEN-006)
+    and is the predicate the TEN-007 break-glass alert already fans out over,
+    so it is what names a tenant's administrators for ABD-014 too — Role has
+    no ``is_admin`` column, and matching a role *name* would miss every
+    hospital that names its admin role differently.
+    """
+    User = get_user_model()
+    user = User.objects.create_user(username=username, password="testpass123")
+    role = Role.objects.create(
+        tenant=tenant,
+        name=f"role-{username}",
+        permissions=[],
+        require_mfa=privileged,
+    )
+    UserMembership.objects.create(user=user, tenant=tenant, role=role, active=True)
+    return user
+
+
+def _run_scan(tenant):
+    """Run the scan the way the scheduler will: ``delay`` with a tenant id.
+
+    ``CELERY_TASK_ALWAYS_EAGER`` is on in the test profile, so ``delay`` runs
+    the task synchronously through the real task entry point rather than
+    calling the function directly.
+    """
+    return task_scan_callback_failures.delay(str(tenant.id))
+
+
+class TestCallbackFailureBurstAlert:
+    """ABD-014: a burst of rejected callbacks alerts administrators, once.
+
+    ``ABHACallbackLog.status`` already carries ``rejected``, but **no writer
+    emits it today**: the callback view refuses an unauthenticated, malformed,
+    stale or unknown-facility call before any ledger row exists, and the
+    "no OPD department" refusal returns from inside the atomic block before
+    the row is written. The scan is therefore deliberately forward-looking -
+    it counts what the ledger records, and these tests seed those rows
+    directly. The count stays empty until a writer records rejections; that
+    is a statement about what is instrumented, not a defect in the scanner.
+    """
+
+    #: This file marks each test individually rather than at module level, so
+    #: the class carries its own marks: every case here writes ledger and
+    #: notification rows.
+    pytestmark = [pytest.mark.integration, pytest.mark.django_db]
+
+    def setup_method(self):
+        self.tenant, _, _ = _tenant_with_opd("burst-hospital", "hip-burst-1")
+
+    def test_burst_over_threshold_alerts_every_administrator(self):
+        admin = _seed_member(self.tenant, "burst-admin", privileged=True)
+        second_admin = _seed_member(self.tenant, "burst-admin-2", privileged=True)
+        _seed_member(self.tenant, "burst-clerk", privileged=False)
+        _seed_callbacks(self.tenant, count=FAILURE_THRESHOLD)
+
+        _run_scan(self.tenant)
+
+        alerts = Notification.objects.filter(tenant_id=self.tenant.id)
+        assert alerts.count() == 2
+        assert set(alerts.values_list("user_id", flat=True)) == {
+            uuid.UUID(int=admin.pk),
+            uuid.UUID(int=second_admin.pk),
+        }
+        for alert in alerts:
+            assert alert.type == "critical"
+            assert alert.title == ALERT_TITLE
+            # Count and window only. No request id, patient, ABHA number or
+            # profile value may appear in an alert body (AGENTS.md security
+            # rule: log identifiers, never PHI).
+            assert str(FAILURE_THRESHOLD) in alert.body
+            assert "minutes" in alert.body
+            # Persisted before delivery: the delivery consumer flips
+            # ``delivered`` when it actually pushes, as for the TEN-007 alert.
+            assert alert.persisted is True
+            assert alert.delivered is False
+
+    def test_below_threshold_writes_no_alert(self):
+        _seed_member(self.tenant, "burst-admin", privileged=True)
+        _seed_callbacks(self.tenant, count=FAILURE_THRESHOLD - 1)
+
+        _run_scan(self.tenant)
+
+        assert Notification.objects.filter(tenant_id=self.tenant.id).count() == 0
+
+    def test_failures_outside_the_window_are_not_counted(self):
+        """Only the last hour counts: an old, already-alerted burst is history.
+
+        ``timestamp`` is ``auto_now_add``, so a row created now can only be
+        moved out of the window afterwards with a queryset ``update()``, which
+        bypasses the field's ``pre_save`` — passing ``timestamp`` to
+        ``objects.create()`` is silently ignored.
+        """
+        _seed_member(self.tenant, "burst-admin", privileged=True)
+        _seed_callbacks(self.tenant, count=FAILURE_THRESHOLD)
+        ABHACallbackLog.objects.update(timestamp=timezone.now() - timedelta(hours=2))
+
+        _run_scan(self.tenant)
+
+        assert Notification.objects.filter(tenant_id=self.tenant.id).count() == 0
+
+    def test_second_run_in_the_same_window_does_not_duplicate_the_alert(self):
+        """A re-run is idempotent, so a retrying scheduler cannot spam.
+
+        The guard is "a critical alert with this title exists inside the
+        window", which is why the title is a constant rather than a message
+        that embeds the count: the same burst seen twice must be recognisable
+        as the same alert, while a burst in a *later* hour alerts again.
+        """
+        _seed_member(self.tenant, "burst-admin", privileged=True)
+        _seed_callbacks(self.tenant, count=FAILURE_THRESHOLD)
+
+        _run_scan(self.tenant)
+        _run_scan(self.tenant)
+
+        assert Notification.objects.filter(tenant_id=self.tenant.id).count() == 1
+
+    def test_another_tenants_failures_do_not_count_toward_this_tenant(self):
+        """The scan takes an explicit tenant id, and counts only that tenant.
+
+        This is the tenant-isolation half of ABD-014: a busy hospital's
+        failure burst must not raise an alert in a quiet one, and a quiet
+        hospital's scan must not see another tenant's rows at all.
+        """
+        other_tenant, _, _ = _tenant_with_opd("other-hospital", "hip-other-1")
+        _seed_member(self.tenant, "burst-admin", privileged=True)
+        _seed_member(other_tenant, "other-admin", privileged=True)
+        _seed_callbacks(other_tenant, count=FAILURE_THRESHOLD)
+
+        _run_scan(self.tenant)
+
+        assert Notification.objects.filter(tenant_id=self.tenant.id).count() == 0
+        assert Notification.objects.filter(tenant_id=other_tenant.id).count() == 0
+
+    def test_tenant_without_administrators_warns_and_writes_nothing(self, caplog):
+        """Zero recipients must not become zero alerting by silence.
+
+        A tenant whose roles all lack the privileged marker would otherwise
+        swallow a failure burst; the task logs the count and the tenant and
+        raises nothing. Counts and ids only, and the warning exists to be read
+        in the log, not to crash the worker.
+        """
+        _seed_member(self.tenant, "burst-clerk", privileged=False)
+        _seed_callbacks(self.tenant, count=FAILURE_THRESHOLD)
+
+        with caplog.at_level("WARNING", logger="apps.workers.tasks"):
+            _run_scan(self.tenant)
+
+        assert Notification.objects.filter(tenant_id=self.tenant.id).count() == 0
+        assert str(self.tenant.id) in caplog.text
+        assert str(FAILURE_THRESHOLD) in caplog.text
 
 
 @pytest.mark.integration

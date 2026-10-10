@@ -27,7 +27,7 @@ the frontend, so Modelled/API/RLS read `no` for them by construction.
 
 | Reqs | App | Phase | Count | Modelled | API | Routes | RLS |
 | ---: | --- | --- | ---: | --- | --- | ---: | --- |
-| ABD | patient_registry | R1 | `17` | yes | yes | `29` | yes |
+| ABD | patient_registry | R1 | `17` | yes | yes | `31` | yes |
 | AUD | audit | R1 | `4` | yes | yes | `6` | yes |
 | BBK | blood_bank | R4 | `8` | yes | yes | `1` | yes |
 | BIL | billing_insurance | R2 | `6` | yes | yes | `21` | yes |
@@ -43,7 +43,7 @@ the frontend, so Modelled/API/RLS read `no` for them by construction.
 | PHM | pharmacy | R4 | `6` | yes | yes | `1` | yes |
 | PLT | platform | R1 | `8` | yes | yes | `18` | yes |
 | QOS | quality_os | R3 | `48` | yes | yes | `35` | yes |
-| REG | patient_registry | R1 | `13` | yes | yes | `29` | yes |
+| REG | patient_registry | R1 | `13` | yes | yes | `31` | yes |
 | RIS | ris | R4 | `4` | yes | yes | `6` | yes |
 | SET | identity_tenancy | R1 | `13` | yes | yes | `82` | yes |
 | TEN | identity_tenancy | R1 | `11` | yes | yes | `82` | yes |
@@ -63,9 +63,8 @@ Requirements that exist in the SRS but are deliberately not
 claimed as delivered (re-verified against the code each time
 this file is regenerated):
 
-- **ABD-002** (partial) - QR regenerate is implemented (`qr-codes/{id}/regenerate/`); the revoke half of the requirement has no endpoint
 - **AUD-002** (partial) - AuditEvent.hash_chain exists but is never computed — the log is append-only in practice, not tamper-evident
-- **PLT-004** (not implemented) - every Celery task body is `pass` and there is no CELERY_BEAT_SCHEDULE — no background job can run
+- **PLT-004** (not implemented) - every Celery task body is `pass` except Task 18's `task_scan_callback_failures` (ABD-014), and there is no CELERY_BEAT_SCHEDULE — no background job runs on a schedule
 - **QOS-001** (not implemented) - indicator catalogue exists in docs/ but no loader has been written; the 406 records are not in the database
 - **REG-009** (deferred) - the outbound ABDM sandbox ABHA adapter shipped (create/verify actions on the patient endpoint, `apps/abdm_gateway/client.py`, 503 `ABDM_SANDBOX_UNCONFIGURED` fail-closed path, env + IntegrationAdapter base-URL resolution) but the official sandbox create/verify spec (endpoint paths, payloads, OTP flow) is unresolved — the enrollment paths are patterned on the community-mirrored sandbox v1 spec and must be re-verified before production
 - **TEN-004** (partial) - RequirePermission reads the token's `permissions` claim and gates the role/membership writes, tenant CRUD and the quality catalogue, RoleSerializer rejects `platform.` codes on tenant-scoped roles at the write path (platform scope = Role.tenant is None; token-level scope binding deferred), and role/membership/scheduled-job querysets are tenant-scoped — but most endpoints still authorise by authentication alone, and facility/department-scoped permissions (TEN-005) are unimplemented
