@@ -28,7 +28,7 @@ class ABHACallbackLog(models.Model):
     profile = models.JSONField(null=True)
     matched_patient_id = models.UUIDField(null=True, blank=True)
     token_issued = models.CharField(max_length=64, null=True, blank=True)
-    status = models.CharField(max_length=32)  # ok | rejected | duplicate
+    status = models.CharField(max_length=32)  # ok | rejected | duplicate | ambiguous
     # ABD-012: the link token, sealed. The column holds a ``v1:<iv>:<ciphertext>``
     # AES-256-GCM envelope under the same key stream that encrypts patient
     # identifiers (common.crypto + ``PATIENT_FIELDS_KEY``); the plaintext is
@@ -37,6 +37,14 @@ class ABHACallbackLog(models.Model):
     # Nullable because existing rows were written before the token was stored,
     # and because a log row is created before the seal is written (expand-only).
     link_token_enc = models.CharField(max_length=255, null=True, blank=True)
+    # ABD-009: when a scan matches several patients the callback links none of
+    # them and queues for verification instead, and this column names the
+    # candidates for the clerk who resolves it — a list of
+    # ``{"patient_id": <uuid>, "reason": "demographic"}``. Data minimisation
+    # (section 8.4): ids and a reason only, never a name, ABHA number or
+    # demographic value, so this column cannot grow into a patient register.
+    # Null on every other branch, exactly like ``link_token_enc`` above.
+    match_candidates = models.JSONField(null=True)
 
     class Meta:
         db_table = "abdm.callback_log"

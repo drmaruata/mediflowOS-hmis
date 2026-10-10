@@ -336,8 +336,18 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def verification_queue(self, request):
-        """List patients pending identity verification (P-REG-6)."""
-        queryset = self.get_queryset().filter(verification_status="pending")
+        """List patients pending identity verification (P-REG-6).
+
+        ``ambiguous`` rows are ABDM multi-candidate queue entries (ABD-009): a
+        scan matched several registrations, none was linked, and a human must
+        pick the right one (the candidates are named on the callback's log
+        row). They share this queue with ``pending`` registrations because the
+        work is the same — confirm identity — and a clerk resolving that scan
+        must see it next to every other record awaiting verification.
+        """
+        queryset = self.get_queryset().filter(
+            verification_status__in=["pending", "ambiguous"]
+        )
         return Response(PatientSerializer(queryset, many=True).data)
 
     # --- ABDM outbound ABHA actions (REG-009) ---------------------------

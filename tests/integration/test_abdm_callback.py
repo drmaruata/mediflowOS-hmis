@@ -23,6 +23,13 @@ ABD-011 (the consent event is written to ``abdm.consent_event``, not merely buil
 in memory) and ABD-012 (the link token is sealed at rest and never echoed back).
 Both are pinned below, including the data-minimisation rule that the consent
 table carries no profile data at all.
+
+The ABD-008/ABD-009 branch matrix is pinned here too: an exact ABHA match links,
+a single demographic candidate links as weak evidence, several candidates create
+no link at all but one verification-queue entry, and no match registers a
+provisional patient. Each branch asserts the patient row count it leaves behind,
+because the multi-candidate branch used to collapse into the provisional create
+— a scan for a real, registered patient silently minting a second record.
 """
 import hashlib
 import hmac
@@ -31,13 +38,17 @@ import uuid
 
 import pytest
 from django.conf import settings
+from django.contrib.auth import get_user_model
 from django.test import override_settings
 from django.urls import reverse
 from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.abdm_gateway.models import ABHACallbackLog, ConsentEvent
-from apps.identity_tenancy.models import Department, Facility, Tenant
+from apps.identity_tenancy.models import (
+    Department, Facility, Role, Tenant, UserMembership,
+)
+from apps.identity_tenancy.tokens import TenantAwareTokenSerializer
 from apps.opd.models import Token
 from apps.patient_registry.models import Patient
 from common.crypto import decrypt, derive_keys
@@ -182,6 +193,295 @@ def test_unmatched_profile_is_registered_pending_verification():
     assert patient.verification_status == "pending"
     assert patient.abha_number == "123456789012"
     assert patient.consent_flags["abdm_scan_and_share"] is True
+
+
+# --- ABD-008/ABD-009: the match branch matrix --------------------------------
+#
+# Four branches, each asserting the patient row count it leaves behind, because
+# the multi-candidate branch used to collapse into the provisional create: a scan
+# for a real, already-registered patient silently minted a second record and a
+# token against it.
+
+
+def _demographic_profile(name="Asha Verma", year=1984, gender="F"):
+    """A profile that carries demographics only — no ABHA number (ABD-008).
+
+    Without an ABHA number the match can only be demographic, which is what
+    exercises the candidates/none branches.
+    """
+    return {"demographics": {"name": name, "yearOfBirth": year, "gender": gender}}
+
+
+def _make_queue_client(tenant, username):
+    """JWT-authenticated client whose token carries the tenant's claims.
+
+    Same shape as the registration suite's helper: the tenant claim on the
+    access token is what ``TenantBoundJWTAuthentication`` binds, so this client
+    reads the verification queue the way front-desk staff do.
+    """
+    user = get_user_model().objects.create_user(
+        username=username, password="testpass123"
+    )
+    role = Role.objects.create(tenant=tenant, name=f"role-{username}", permissions=[])
+    UserMembership.objects.create(user=user, tenant=tenant, role=role, active=True)
+    refresh = TenantAwareTokenSerializer.get_token(user)
+    client = APIClient()
+    client.credentials(HTTP_AUTHORIZATION=f"Bearer {str(refresh.access_token)}")
+    return client
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_exact_abha_match_links_without_demoting_a_verified_patient():
+    """An exact ABHA match links the existing record and leaves its status alone.
+
+    ABHA is a strong identifier: the gateway is restating a number the front
+    desk already confirmed, so linking must not write ``pending`` over
+    ``verified`` and put a confirmed patient back in the verification queue.
+    The target is deliberately created ``verified`` with different demographics
+    to prove the ABHA digest path — not a name match — found it.
+    """
+    tenant, _, _ = _tenant_with_opd()
+    target = Patient.objects.create(
+        tenant_id=tenant.id, uhid="UHID-ABHA-EXACT", abha_number="123456789012",
+        verification_status="verified",
+        demographics={"name": "Someone Else Entirely", "gender": "F", "yearOfBirth": 1970},
+    )
+
+    response = _post(APIClient(), _payload())
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["token"] is not None
+    assert body["patient_id"] == str(target.id)
+    target.refresh_from_db()
+    assert target.verification_status == "verified"
+    # Linked, not registered: no second patient row exists.
+    assert Patient.objects.count() == 1
+    assert Token.objects.count() == 1
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_single_demographic_candidate_links_and_stays_pending():
+    """One demographic match links, but as weak evidence: the record stays pending.
+
+    The profile carries no ABHA number, so name + birth year + gender is all the
+    evidence there is. The link is kept (a token against the right patient is
+    better than a duplicate), yet nobody has confirmed the identity, so the
+    record must stay in the verification queue for the front desk.
+    """
+    tenant, _, _ = _tenant_with_opd()
+    candidate = Patient.objects.create(
+        tenant_id=tenant.id, uhid="UHID-DEMO-ONE",
+        demographics={"name": "Asha Verma", "gender": "F", "year_of_birth": 1984},
+    )
+
+    response = _post(APIClient(), _payload(profile=_demographic_profile()))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["patient_id"] == str(candidate.id)
+    assert body["token"] is not None
+    candidate.refresh_from_db()
+    assert candidate.verification_status == "pending"
+    assert Patient.objects.count() == 1
+    assert Token.objects.count() == 1
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_demographic_match_never_demotes_a_verified_patient():
+    """A gateway guess must not demote a front-desk-verified record (ABD-009).
+
+    The single candidate is already ``verified`` — somebody checked the identity
+    document. A demographic-only match is weak evidence, so it may confirm
+    nothing new, but writing ``pending`` over ``verified`` would queue a
+    confirmed patient for re-verification, a demotion the gateway has no
+    standing to make.
+    """
+    tenant, _, _ = _tenant_with_opd()
+    candidate = Patient.objects.create(
+        tenant_id=tenant.id, uhid="UHID-DEMO-VERIFIED", verification_status="verified",
+        demographics={"name": "Asha Verma", "gender": "F", "year_of_birth": 1984},
+    )
+
+    response = _post(APIClient(), _payload(profile=_demographic_profile()))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["patient_id"] == str(candidate.id)
+    candidate.refresh_from_db()
+    assert candidate.verification_status == "verified"
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_multiple_candidates_queue_for_verification_without_a_token():
+    """ABD-009: two demographic matches create no link and issue no token.
+
+    Linking either candidate would be a coin toss between two registered
+    patients, so the callback creates exactly one verification-queue entry
+    (``ambiguous``), records both candidate ids on the log for the clerk who
+    resolves it, and acknowledges 200 with a null token: the scan was received
+    and the consent honoured, but identity resolution is queued work.
+    """
+    tenant, _, _ = _tenant_with_opd()
+    first = Patient.objects.create(
+        tenant_id=tenant.id, uhid="UHID-AMB-1",
+        demographics={"name": "Shared Name", "gender": "M", "year_of_birth": 1980},
+    )
+    second = Patient.objects.create(
+        tenant_id=tenant.id, uhid="UHID-AMB-2",
+        demographics={"name": "Shared Name", "gender": "M", "year_of_birth": 1980},
+    )
+
+    response = _post(
+        APIClient(),
+        _payload(profile=_demographic_profile(name="Shared Name", year=1980, gender="M")),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["token"] is None
+
+    queue = Patient.objects.get(verification_status="ambiguous")
+    assert body["patient_id"] == str(queue.id)
+    assert queue.uhid.startswith("ABDM")
+    assert queue.demographics["name"] == "Shared Name"
+    assert queue.demographics["yearOfBirth"] == 1980
+    assert queue.consent_flags["abdm_scan_and_share"] is True
+    # The profile carries no ABHA number, so the queue entry has none either.
+    assert queue.abha_number is None
+    # Two candidates plus exactly one queue entry — no provisional patient.
+    assert Patient.objects.count() == 3
+
+    log = ABHACallbackLog.objects.get(request_id="req-1")
+    assert log.status == "ambiguous"
+    assert log.token_issued is None
+    assert log.matched_patient_id == queue.id
+    # Data minimisation: candidate ids and a reason, never a name or identifier.
+    assert {(row["patient_id"], row["reason"]) for row in log.match_candidates} == {
+        (str(first.id), "demographic"),
+        (str(second.id), "demographic"),
+    }
+    assert "Shared Name" not in json.dumps(log.match_candidates)
+    # Nothing to link yet: no link token is minted for an unresolved identity.
+    assert log.link_token_enc is None
+    assert Token.objects.count() == 0
+    # The consent happened at scan time (DPDP); only identity is queued.
+    assert ConsentEvent.objects.count() == 1
+    assert ConsentEvent.objects.get().patient_id == queue.id
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_no_match_creates_exactly_one_provisional_patient_with_a_token():
+    """No candidate: one provisional patient, one token, one log row.
+
+    The unchanged ABD-008 fall-through — the branch the ambiguous case used to
+    be mistaken for — pinned with row counts so a future refactor cannot
+    silently change it into a queue entry.
+    """
+    _tenant_with_opd()
+
+    response = _post(APIClient(), _payload(profile=_demographic_profile()))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["token"] is not None
+    assert Patient.objects.count() == 1
+    patient = Patient.objects.get()
+    assert patient.id == uuid.UUID(body["patient_id"])
+    assert patient.verification_status == "pending"
+    assert ABHACallbackLog.objects.get().status == "ok"
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_ambiguous_queue_entry_is_visible_only_to_its_tenant():
+    """ABD-009: the queue entry surfaces to tenant A's staff and never to tenant B.
+
+    Denial by scoping, not by error type: tenant B's authenticated call is a
+    well-formed 200 that simply has nothing in it. A 403 or 404 would confirm
+    that some entry exists somewhere, and the queue points at PHI. The queue is
+    also pinned to carry both statuses — ``pending`` registrations and the
+    ``ambiguous`` ABDM rows live in one queue because the work is the same.
+    """
+    tenant_a, _, _ = _tenant_with_opd(slug="hospital-a", hip_id="hip-a")
+    tenant_b, _, _ = _tenant_with_opd(slug="hospital-b", hip_id="hip-b")
+    # Two front-desk-verified patients sharing name and birth year make the
+    # profile ambiguous for tenant A.
+    Patient.objects.create(
+        tenant_id=tenant_a.id, uhid="UHID-QA-1", verification_status="verified",
+        demographics={"name": "Queue Case", "gender": "M", "year_of_birth": 1990},
+    )
+    Patient.objects.create(
+        tenant_id=tenant_a.id, uhid="UHID-QA-2", verification_status="verified",
+        demographics={"name": "Queue Case", "gender": "M", "year_of_birth": 1990},
+    )
+    pending = Patient.objects.create(
+        tenant_id=tenant_a.id, uhid="UHID-QA-3",
+        demographics={"name": "Walk In", "gender": "F", "year_of_birth": 1960},
+    )
+
+    response = _post(
+        APIClient(),
+        _payload(
+            facilityId="hip-a",
+            profile=_demographic_profile(name="Queue Case", year=1990, gender="M"),
+        ),
+    )
+    assert response.status_code == 200
+    queue_id = response.json()["patient_id"]
+
+    client_a = _make_queue_client(tenant_a, "clerk-a")
+    response_a = client_a.get("/api/v1/patients/verification_queue/")
+    assert response_a.status_code == 200
+    assert {row["id"]: row["verification_status"] for row in response_a.data} == {
+        queue_id: "ambiguous",
+        str(pending.id): "pending",
+    }
+
+    client_b = _make_queue_client(tenant_b, "clerk-b")
+    response_b = client_b.get("/api/v1/patients/verification_queue/")
+    assert response_b.status_code == 200
+    assert list(response_b.data) == []
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+def test_replay_of_an_ambiguous_request_creates_no_second_queue_entry():
+    """ABD-006: a replay returns the first acknowledgement and writes nothing new.
+
+    The idempotency early-return precedes the atomic block, so a replayed
+    ambiguous scan must not reach the queue-entry, consent or log writes at
+    all — and the duplicate ack carries the original null token and the queue
+    entry's id, so the gateway side sees a stable answer.
+    """
+    tenant, _, _ = _tenant_with_opd()
+    for suffix in ("1", "2"):
+        Patient.objects.create(
+            tenant_id=tenant.id, uhid=f"UHID-REPLAY-{suffix}",
+            demographics={"name": "Replay Case", "gender": "M", "year_of_birth": 1975},
+        )
+    client = APIClient()
+    profile = _demographic_profile(name="Replay Case", year=1975, gender="M")
+
+    first = _post(client, _payload(profile=profile))
+    second = _post(client, _payload(profile=profile), count=2)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert second.json()["status"] == "duplicate"
+    assert second.json()["token"] is None
+    assert second.json()["patient_id"] == first.json()["patient_id"]
+
+    assert Patient.objects.filter(verification_status="ambiguous").count() == 1
+    assert Patient.objects.count() == 3
+    assert ABHACallbackLog.objects.count() == 1
+    assert ConsentEvent.objects.count() == 1
+    assert Token.objects.count() == 0
 
 
 @pytest.mark.integration

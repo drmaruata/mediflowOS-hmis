@@ -5,7 +5,8 @@ Architecture doc section 8.4 requires:
 2. Resolve tenant from HIP ID, then set RLS context
 3. Idempotency on gateway request ID
 4. Strict timestamp and payload validation
-5. Match by ABHA number, then demographics
+5. Match by ABHA number, then demographics — a multi-candidate match queues
+   for human verification instead of guessing (ABD-009)
 6. Issue OPD token; heavy work async
 7. Record consent event; store link token encrypted
 
@@ -33,6 +34,7 @@ from common.throttling import AbdmHipThrottle
 from .consent import hash_profile, record_consent_event, store_link_token
 from .models import ABHACallbackLog
 from .serializers import ABHACallbackAckSerializer, ABHACallbackSerializer
+from .services import resolve_profile
 
 logger = logging.getLogger(__name__)
 
@@ -172,41 +174,6 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         except ABHACallbackLog.DoesNotExist:
             return None
 
-    def _match_patient(self, profile: dict, tenant_id: str):
-        """Match by ABHA number, then demographics (ABD-008, ABD-009).
-
-        The ABHA probe crosses the REG-008 ``abha_number_idx`` digest via
-        ``filter_by_abha`` — the gateway carries the plaintext number (the
-        person scanned it), so exact-digest matching finds the encrypted row
-        and never falls back to a ciphertext scan.
-        """
-        from apps.patient_registry.models import Patient
-        abha_number = profile.get("abhaNumber") or profile.get("healthId")
-        if abha_number:
-            try:
-                return Patient.objects.filter_by_abha(
-                    tenant_id, abha_number
-                ).get()
-            except Patient.DoesNotExist:
-                pass
-
-        # Candidate search by name + year of birth + gender
-        demographics = profile.get("demographics") or {}
-        name = demographics.get("name") or profile.get("name", "")
-        year = demographics.get("yearOfBirth") or profile.get("yearOfBirth")
-        gender = demographics.get("gender") or profile.get("gender")
-        if name and year:
-            candidates = Patient.objects.filter(
-                tenant_id=tenant_id,
-                demographics__name__icontains=name,
-                demographics__year_of_birth=year,
-            )
-            if gender:
-                candidates = candidates.filter(demographics__gender=gender)
-            if candidates.count() == 1:
-                return candidates.first()
-        return None  # Will create provisional
-
     def _resolve_department(self, raw_department_id):
         """Resolve a department the gateway supplied to a real, local department.
 
@@ -249,6 +216,22 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             .first()
         )
 
+    def _generate_abdm_uhid(self) -> str:
+        """Mint an ``ABDM``-prefixed UHID that is free in this tenant.
+
+        Shared by the provisional and the ambiguous queue entry because the
+        UHID must exist before the row does (it is NOT NULL) and a repeat would
+        violate ``(tenant_id, uhid)``. The ``ABDM`` prefix keeps gateway-minted
+        rows visibly distinct from the counter's ``UHID-`` series, which is what
+        a clerk sees when a queue entry has to be resolved by hand.
+        """
+        from apps.patient_registry.models import Patient
+
+        while True:
+            uhid = f"ABDM{uuid.uuid4().hex[:12].upper()}"
+            if not Patient.objects.filter(tenant_id=self._tenant_id, uhid=uhid).exists():
+                return uhid
+
     def _create_provisional_patient(self, profile: dict):
         """Create a pending patient record for an unmatched ABDM profile (REG-004).
 
@@ -262,16 +245,45 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         demographics = profile.get("demographics") or {}
         abha_number = profile.get("abhaNumber") or profile.get("healthId")
 
-        while True:
-            uhid = f"ABDM{uuid.uuid4().hex[:12].upper()}"
-            if not Patient.objects.filter(tenant_id=self._tenant_id, uhid=uhid).exists():
-                break
+        return Patient.objects.create(
+            tenant_id=self._tenant_id,
+            uhid=self._generate_abdm_uhid(),
+            abha_number=abha_number or None,
+            verification_status="pending",
+            demographics={
+                "name": demographics.get("name") or profile.get("name", ""),
+                "gender": demographics.get("gender") or profile.get("gender"),
+                "yearOfBirth": demographics.get("yearOfBirth") or profile.get("yearOfBirth"),
+            },
+            consent_flags={"abdm_scan_and_share": True},
+        )
+
+    def _create_ambiguous_queue_entry(self, profile: dict):
+        """Register a multi-candidate scan as one ambiguous queue entry (ABD-009).
+
+        Several registrations fit the scan equally well, and linking any one of
+        them is a coin toss between real patients — so nothing is linked. One
+        row is written with ``verification_status="ambiguous"``: the front desk
+        gets a queue entry to resolve, and the acknowledgement still carries its
+        id so the gateway can tell the scanning patient what happened. The
+        candidates a clerk must choose between live on the log row
+        (``match_candidates``), not here: this patient table must not become a
+        place where one patient's scan points at other patients beyond the ids
+        needed to resolve it.
+
+        Same shape as the provisional patient (REG-004) apart from the status —
+        the demographics are unverified gateway data either way.
+        """
+        from apps.patient_registry.models import Patient
+
+        demographics = profile.get("demographics") or {}
+        abha_number = profile.get("abhaNumber") or profile.get("healthId")
 
         return Patient.objects.create(
             tenant_id=self._tenant_id,
-            uhid=uhid,
+            uhid=self._generate_abdm_uhid(),
             abha_number=abha_number or None,
-            verification_status="pending",
+            verification_status="ambiguous",
             demographics={
                 "name": demographics.get("name") or profile.get("name", ""),
                 "gender": demographics.get("gender") or profile.get("gender"),
@@ -404,9 +416,80 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                     status=status.HTTP_404_NOT_FOUND,
                 )
 
-            # ABD-008/009: match patient, registering one when nothing matches
-            patient = self._match_patient(profile, tenant_id)
-            if patient is None:
+            # ABD-008/009: resolve the shared profile — an exact ABHA match, a
+            # single demographic candidate, several (ambiguous) or none.
+            resolution = resolve_profile(profile=profile, tenant_id=tenant_id)
+
+            if resolution.kind == "candidates":
+                # ABD-009: several registrations fit this scan, so none of them
+                # is linked. Exactly one queue entry is created, the consent is
+                # still recorded, and the callback is acknowledged 200 with a
+                # null token — the scan was received and the consent honoured,
+                # but identity resolution is now queued work for the front desk.
+                patient = self._create_ambiguous_queue_entry(profile)
+
+                # ABD-011: the consent still happened — the patient scanned and
+                # shared at the counter — so it is still recorded, naming the
+                # queue entry this scan produced. Deferring the record would
+                # leave a real grant unlogged because identity work was
+                # outstanding; only the identity resolution is queued.
+                consent_event = record_consent_event(
+                    tenant_id=tenant_id,
+                    patient_id=patient.id,
+                    request_id=request_id,
+                    source_app=payload.get("sourceApp") or "ABDM",
+                    purpose="registration",
+                    facility_id=facility_id,
+                    raw_profile_hash=hash_profile(profile),
+                )
+
+                log = ABHACallbackLog.objects.create(
+                    tenant_id=tenant_id,
+                    request_id=request_id,
+                    facility_abdm_id=hip_id,
+                    ip=request.META.get("REMOTE_ADDR"),
+                    profile=json.dumps(profile)[:4000],  # truncate large payloads
+                    matched_patient_id=patient.id,
+                    token_issued=None,
+                    status="ambiguous",
+                    match_candidates=[
+                        {"patient_id": str(candidate.id), "reason": "demographic"}
+                        for candidate in resolution.candidates
+                    ],
+                )
+                # store_link_token is deliberately not called here: the token
+                # exists to complete care-context linking against a *resolved*
+                # patient, and until a human picks the right candidate there is
+                # nothing to link it to. ``link_token_enc`` stays NULL.
+
+                # The idempotency ledger row above is what makes the replay
+                # early-return work for this branch too; returning from inside
+                # atomic() commits the queue entry, consent and log together.
+                ack = ABHACallbackAckSerializer({
+                    "status": "ambiguous",
+                    "token": None,
+                    "request_id": request_id,
+                    "patient_id": str(patient.id),
+                    "consent_event": consent_event,
+                })
+                return Response(ack.data, status=status.HTTP_200_OK)
+
+            if resolution.kind == "matched":
+                patient = resolution.patient
+                # A demographic match is weak evidence: name, birth year and
+                # gender agree, but nobody confirmed them, so the record goes
+                # back into the verification queue. A record the front desk
+                # already verified is never demoted by a gateway guess —
+                # ``pending`` written over ``verified`` would queue a confirmed
+                # patient. An exact ABHA match skips this write entirely: it is
+                # the strong identifier and changes nothing about the status.
+                if (
+                    resolution.matched_by == "demographic"
+                    and patient.verification_status != "verified"
+                ):
+                    patient.verification_status = "pending"
+                    patient.save(update_fields=["verification_status"])
+            else:
                 patient = self._create_provisional_patient(profile)
 
             # ABD-010: issue token

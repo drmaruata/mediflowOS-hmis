@@ -9,8 +9,16 @@ class ABHACallbackSerializer(serializers.ModelSerializer):
         fields = "__all__"
         # link_token_enc is server-written only (ABD-012): the gateway posts a
         # profile share, never a link token, and the plaintext value is not
-        # accepted anywhere in the API.
-        read_only_fields = ["id", "timestamp", "tenant_id", "link_token_enc"]
+        # accepted anywhere in the API. match_candidates is server-written for
+        # the same reason (ABD-009): it is the callback log's own record of
+        # which patients a scan could have been, never a gateway input.
+        read_only_fields = [
+            "id",
+            "timestamp",
+            "tenant_id",
+            "link_token_enc",
+            "match_candidates",
+        ]
 
 
 class ConsentEventAckSerializer(serializers.Serializer):

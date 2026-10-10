@@ -164,7 +164,12 @@ class Patient(models.Model):
     abha_address_idx = models.CharField(max_length=64, null=True, blank=True)
     mobile_idx = models.CharField(max_length=64, null=True, blank=True)
     # ----------------------------------------------------------------------
-    verification_status = models.CharField(max_length=16, default="pending")  # pending | verified
+    # pending | ambiguous | verified. ``ambiguous`` is written only by the ABDM
+    # gateway when a scan matches several registrations (ABD-009); ``verified``
+    # is set by the verify action, which ``ambiguous`` rows do not pass through
+    # (resolving them links an existing patient, so the queue entry is
+    # superseded rather than flipped).
+    verification_status = models.CharField(max_length=16, default="pending")
     verified_at = models.DateTimeField(null=True, blank=True)
     # REG-005. ``blank`` + empty default is the expand-only, non-breaking shape:
     # existing rows predate the column and are backfilled to "unrecorded"
