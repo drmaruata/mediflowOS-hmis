@@ -189,6 +189,20 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
             )
         return predicate
 
+    def retrieve(self, request, *args, **kwargs):
+        """Patient detail read — writes an AUD-001 read event.
+
+        Recorded synchronously inside the request transaction: a patient record
+        is PHI, and who opened it has to be traceable before the response
+        returns. ``get_object`` is the mixin's tenant-scoped lookup, so a
+        foreign patient id answers 404 and logs nothing.
+        """
+        from apps.audit.services import audit_read
+
+        patient = self.get_object()
+        audit_read(patient, request)
+        return Response(self.get_serializer(patient).data)
+
     @action(detail=False, methods=["get"])
     def search(self, request):
         """UHID / name / mobile / ABHA / age lookup for the counter (REG-002).
@@ -257,7 +271,16 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
                 self._birth_year_q([target - 1, target, target + 1])
             )
 
-        return Response(PatientSerializer(queryset[:20], many=True).data)
+        from apps.audit.services import audit_read
+
+        # Materialise the page once: it is serialised for the response *and*
+        # iterated to log a read for each returned patient (AUD-001). The page
+        # size — the fixed 20-row slice below — bounds the write volume, so a
+        # busy counter logs reads in lockstep with the rows it actually shows.
+        page = list(queryset[:20])
+        for patient in page:
+            audit_read(patient, request)
+        return Response(PatientSerializer(page, many=True).data)
 
     @staticmethod
     def _duplicate_candidate(patient):
