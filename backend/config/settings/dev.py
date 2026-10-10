@@ -10,6 +10,11 @@ os.environ.setdefault(
     "PATIENT_FIELDS_KEY", "mediflow-dev-patient-fields-key-reg-008"
 )
 
+# ABD-005: deliberately left unset. The ABDM sandbox hands out no shared
+# secret, so a local developer cannot sign a callback; DEBUG=True below is the
+# documented fail-open mode (the endpoint logs a warning and accepts). Export
+# ABDM_CLIENT_SECRET to exercise the real HMAC path locally.
+
 from .base import *  # noqa: E402,F401,F403
 
 DEBUG = True

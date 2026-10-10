@@ -64,7 +64,6 @@ claimed as delivered (re-verified against the code each time
 this file is regenerated):
 
 - **ABD-002** (partial) - QR regenerate is implemented (`qr-codes/{id}/regenerate/`); the revoke half of the requirement has no endpoint
-- **ABD-005** (not implemented) - `ABHACallbackViewSet` accepts any non-empty X-ABDM-Signature or Bearer header — presence-only, no secret comparison (verified backend/apps/abdm_gateway/views.py `_authenticate`)
 - **ABD-011** (not implemented) - the consent event is built and returned in the acknowledgement but never written to any table
 - **ABD-012** (not implemented) - the link token is `secrets.token_urlsafe(32)` and discarded — no encryption, no storage (placeholder comment for KMS)
 - **AUD-002** (partial) - AuditEvent.hash_chain exists but is never computed — the log is append-only in practice, not tamper-evident
@@ -84,7 +83,7 @@ this file is regenerated):
 | ABD-002 | The system shall let administrators regenerate or revoke a QR code | M | R1 | partial |
 | ABD-003 | The system shall accept ABDM profile-share callbacks on an authenticated, rate-limited endpoint | M | R1 | partial |
 | ABD-004 | The system shall resolve the tenant and facility from the callback's facility identifier and shall set tenant context before any data access | M | R1 | partial |
-| ABD-005 | The system shall verify the authenticity of every gateway call per the ABDM specification and reject unauthenticated calls | M | R1 | **not implemented** |
+| ABD-005 | The system shall verify the authenticity of every gateway call per the ABDM specification and reject unauthenticated calls | M | R1 | partial |
 | ABD-006 | The system shall process each gateway request identifier at most once (idempotency) and return the original outcome on retry | M | R1 | partial |
 | ABD-007 | The system shall validate timestamps and payload fields and respond with a well-formed acknowledgement including the issued token | M | R1 | partial |
 | ABD-008 | The system shall match a shared profile first by ABHA number within the tenant, then by demographic candidate search | M | R1 | partial |

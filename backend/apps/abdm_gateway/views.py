@@ -11,13 +11,17 @@ Architecture doc section 8.4 requires:
 
 This endpoint is intentionally anonymous (gateway carries no user JWT).
 """
+import hashlib
+import hmac
 import json
 import logging
 import secrets
 import uuid
 from datetime import datetime, timezone as dt_tz
 
+from django.conf import settings
 from django.db import transaction
+from django.http.request import RawPostDataException
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -34,6 +38,15 @@ logger = logging.getLogger(__name__)
 
 class _NoOpdDepartment(Exception):
     """Raised when the tenant has no department able to hold an OPD token."""
+
+
+class _ForeignDepartment(Exception):
+    """Raised when the gateway supplies a department that is not ours.
+
+    Kept distinct from ``_NoOpdDepartment`` so the view can answer a foreign
+    id with 404 (the named department does not exist *for this tenant*) rather
+    than 409 (this tenant has no OPD department at all).
+    """
 
 
 class ABHACallbackViewSet(viewsets.ViewSet):
@@ -60,7 +73,26 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             return False
         now = timezone.now()
         delta = abs((now - callback_dt).total_seconds())
-        return delta <= 300  # 5-minute window per ABDM spec
+        # Window per the ABDM spec, configurable because a gateway whose clock
+        # drifts would otherwise have every callback refused. Read through
+        # settings so a test can narrow it.
+        return delta <= settings.ABDM_MAX_SKEW_SECONDS
+
+    def _validate_payload_schema(self, payload: dict) -> str | None:
+        """Check the mandatory callback keys, naming the first one missing.
+
+        Returns ``None`` when the payload is well formed, otherwise the field
+        name that is absent or empty. A malformed callback used to be patched
+        over — a fabricated ``requestId`` defeated idempotency (ABD-006) and
+        ``profile or payload`` registered patients from transport fields
+        (ABD-007) — so the key that is missing is reported instead.
+        """
+        if not isinstance(payload, dict):
+            return "payload"
+        for key in ("requestId", "timestamp", "profile"):
+            if not payload.get(key):
+                return key
+        return None
 
     def _resolve_tenant_from_hip(self, hip_id: str):
         """Resolve tenant from the facility's ABDM HIP ID (ABD-004)."""
@@ -72,23 +104,65 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         return str(facility.tenant_id), str(facility.id)
 
     def _authenticate_call(self, request) -> bool:
-        """Authenticate the gateway call per ABDM specification (ABD-005).
+        """Verify the gateway's HMAC-SHA256 signature over the raw body (ABD-005).
 
-        The exact mechanism depends on the ABDM sandbox version in use.
-        This implementation accepts either a shared secret header or a
-        JWT-style bearer token — both are valid per the adapter pattern
-        documented in architecture doc section 8.2.
+        The gateway signs the exact bytes it posts with
+        ``HMAC-SHA256(ABDM_CLIENT_SECRET)`` and sends the hex digest in
+        ``X-ABDM-Signature``; this recomputes the digest over the bytes
+        actually received and compares with :func:`hmac.compare_digest`. The
+        raw body is what gets signed, never a re-serialization of the parsed
+        payload: key order and separators are the client's choice, so parsing
+        and dumping again would break the digest of a legitimate call.
+
+        Presence-only headers used to authenticate here — any non-empty
+        ``X-ABDM-Signature``, ``X-Authorization`` or ``Bearer`` token was
+        accepted, which proved nothing and let any caller write into a
+        tenant. Only a matching digest does now.
+
+        The ABDM sandbox issues no shared secret yet, so an empty
+        ``ABDM_CLIENT_SECRET`` is the local-development case: under ``DEBUG``
+        the call is accepted with a warning (there is no secret to verify
+        against), and outside it the call is refused. Read through ``settings``
+        rather than at import time so tests can flip both values.
+
+        The secret and the signature are never logged.
         """
-        # Check for ABDM-supplied signature header
-        sig = request.headers.get("X-ABDM-Signature") or request.headers.get("X-Authorization")
-        if sig:
+        signature = request.headers.get("X-ABDM-Signature") or ""
+        if not signature:
+            # DEBUG only excuses an *unverifiable* signature, never a missing
+            # one: a caller that sends no credential at all is refused
+            # regardless of environment.
+            return False
+
+        secret = settings.ABDM_CLIENT_SECRET
+        if not secret:
+            if not settings.DEBUG:
+                logger.warning(
+                    "ABDM callback refused: ABDM_CLIENT_SECRET is unset and "
+                    "DEBUG is off, so no signature can be verified"
+                )
+                return False
+            logger.warning(
+                "ABDM callback: ABDM_CLIENT_SECRET is unset, so the "
+                "X-ABDM-Signature cannot be verified — accepting because "
+                "DEBUG is on"
+            )
             return True
-        # Check for a bearer token
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            return True
-        # No credential — reject (the gateway callback is not anonymous)
-        return False
+
+        try:
+            body = request.body
+        except RawPostDataException:
+            # Something upstream already consumed the stream (Django raises
+            # this rather than returning a truncated body), so there is
+            # nothing to verify against. Refuse rather than guess.
+            logger.warning("ABDM callback refused: request body is unreadable")
+            return False
+
+        expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        # Compared as bytes, not str: the header value is attacker-controlled
+        # and a non-ASCII one makes hmac.compare_digest raise TypeError
+        # (a 500) instead of simply failing to match.
+        return hmac.compare_digest(expected.encode("ascii"), signature.encode("utf-8"))
 
     def _idempotent_check(self, request_id: str, tenant_id: str):
         """Check for a duplicate request ID (ABD-006)."""
@@ -136,10 +210,19 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         """Resolve a department the gateway supplied to a real, local department.
 
         The gateway is not trusted to name our departments: it sends whatever
-        the scanning facility had configured, which may be absent, may not be a
-        UUID, or may be a UUID from an entirely different tenant. Falling back
-        to the facility's first OPD-enabled department keeps a scan working
-        instead of writing a row keyed on garbage.
+        the scanning facility had configured. An id that is absent, blank or
+        not a UUID is unusable rather than hostile, so it falls back to the
+        facility's first OPD-enabled department with a warning — a scan for a
+        real patient should not be lost to a QR code minted without one.
+
+        An id that *is* a well-formed UUID but resolves to no department of this
+        tenant is a different case: it names a department that exists, just not
+        here. Silently rerouting that scan to an unrelated department would
+        queue the patient for the wrong service and put the resulting token in
+        the wrong series, so it raises instead.
+
+        Must be called with the tenant session bound: the fallback lookup is
+        row-level-security scoped and returns nothing without it.
         """
         from apps.identity_tenancy.models import Department
 
@@ -157,6 +240,7 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 ).first()
                 if department is not None:
                     return department
+                raise _ForeignDepartment(str(candidate))
 
         return (
             Department.objects.filter(tenant_id=self._tenant_id, opd_enabled=True)
@@ -241,6 +325,17 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
+        # ABD-007: required keys, before any of them is used or defaulted
+        missing_key = self._validate_payload_schema(payload)
+        if missing_key is not None:
+            return Response(
+                {
+                    "status": "rejected",
+                    "detail": f"Missing required callback field: {missing_key}",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # ABD-007: validate timestamp
         if not self._validate_timestamp(payload):
             return Response(
@@ -248,17 +343,21 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Extract key fields
-        request_id = payload.get("requestId") or payload.get("id") or secrets.token_uuid4().hex
+        # Extract key fields. The schema check above guarantees requestId and
+        # profile exist; neither is defaulted any further.
+        request_id = payload["requestId"]
         hip_id = payload.get("facilityId") or payload.get("hipId") or ""
-        profile = payload.get("profile") or payload
+        profile = payload["profile"]
 
         # ABD-004: resolve tenant from HIP ID
         tenant_facility = self._resolve_tenant_from_hip(hip_id)
         if not tenant_facility:
+            # Not found rather than malformed: the gateway named a facility
+            # this installation does not host, so there is nothing to route
+            # the callback to. 400 implied the request itself was wrong.
             return Response(
                 {"status": "rejected", "detail": "Unknown facility HIP ID"},
-                status=status.HTTP_400_BAD_REQUEST,
+                status=status.HTTP_404_NOT_FOUND,
             )
         tenant_id, facility_id = tenant_facility
 
@@ -283,15 +382,33 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         with transaction.atomic():
             bind_tenant_session(tenant_id, facility_id)
 
+            # ABD-010: resolve the department the gateway named *before* the
+            # patient is matched or registered. A refusal from here returns a
+            # response, and returning from inside atomic() commits the block,
+            # so nothing may have been written yet for the commit to keep.
+            try:
+                department = self._resolve_department(
+                    payload.get("departmentId") or payload.get("intakePointId")
+                )
+            except _ForeignDepartment:
+                logger.warning(
+                    "ABDM callback: supplied department is not part of tenant %s",
+                    tenant_id,
+                )
+                return Response(
+                    {
+                        "status": "rejected",
+                        "detail": "Supplied department is not part of this facility",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
             # ABD-008/009: match patient, registering one when nothing matches
             patient = self._match_patient(profile, tenant_id)
             if patient is None:
                 patient = self._create_provisional_patient(profile)
 
             # ABD-010: issue token
-            department = self._resolve_department(
-                payload.get("departmentId") or payload.get("intakePointId")
-            )
             try:
                 token = self._issue_token(department, patient.id)
             except _NoOpdDepartment:

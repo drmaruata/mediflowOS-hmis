@@ -40,6 +40,25 @@ ABDM_SANDBX_BASE_URL = (
     require_sandbox_base_url(_abdm_sandbox_url) if _abdm_sandbox_url else ""
 )
 
+# ABD-005: shared secret the ABDM gateway signs Scan and Share callbacks with
+# — HMAC-SHA256 over the raw request body, hex digest sent in
+# ``X-ABDM-Signature``. There is deliberately **no default**: a published empty
+# secret would reduce the check to the presence test the requirement forbids.
+# The sandbox issues no shared secret yet, so the callback reads this at request
+# time and fails closed when it is empty, except under DEBUG, where a local
+# developer has no way to obtain one (dev.py documents that asymmetry).
+# test.py supplies a fixed literal so the suite is deterministic.
+ABDM_CLIENT_SECRET = os.getenv("ABDM_CLIENT_SECRET", "")
+
+# ABD-007: tolerance for the gateway's callback timestamp, 5 minutes per the
+# ABDM specification. A misconfigured window must not silently disable the
+# replay check it guards, so a non-numeric or non-positive value falls back to
+# the default rather than widening the window.
+_abdm_max_skew = os.getenv("ABDM_MAX_SKEW_SECONDS", "")
+ABDM_MAX_SKEW_SECONDS = 300
+if _abdm_max_skew.isdigit() and int(_abdm_max_skew) > 0:
+    ABDM_MAX_SKEW_SECONDS = int(_abdm_max_skew)
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",

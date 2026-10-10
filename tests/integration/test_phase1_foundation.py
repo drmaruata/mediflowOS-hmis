@@ -457,37 +457,45 @@ class TestABDMCallbackAPI:
         assert response.status_code == status.HTTP_200_OK
         assert response.data["status"] == "ok"
 
-    def test_stale_timestamp_rejected(self):
-        """A timestamp outside the 5-minute window is refused (ABD-007)."""
-        response = self.client.post(
-            "/api/v1/abdm-callbacks/",
+    def test_stale_timestamp_rejected(self, post_signed_callback):
+        """A timestamp outside the 5-minute window is refused (ABD-007).
+
+        The payload is a complete, well-formed callback so the refusal can only
+        come from the timestamp: a missing key is answered first, and for the
+        key it names.
+        """
+        response = post_signed_callback(
+            self.client,
             {
                 "requestId": "req-stale-1",
                 "facilityId": "HIP-ABDM-001",
                 "timestamp": "2020-01-01T00:00:00Z",
+                "profile": {"abhaNumber": "111111111111"},
             },
-            format="json",
-            HTTP_X_AUTHORIZATION="gateway-shared-secret",
         )
         assert response.status_code == status.HTTP_400_BAD_REQUEST
         assert "timestamp" in response.data["detail"].lower()
 
-    def test_unknown_hip_rejected(self):
-        """A HIP ID that maps to no facility is refused (ABD-004)."""
-        response = self.client.post(
-            "/api/v1/abdm-callbacks/",
+    def test_unknown_hip_rejected(self, post_signed_callback):
+        """A HIP ID that maps to no facility is refused (ABD-004).
+
+        404, not 400: the gateway named a facility this installation does not
+        host, which is a resource it cannot find rather than a malformed
+        request.
+        """
+        response = post_signed_callback(
+            self.client,
             {
                 "requestId": "req-unknown-hip",
                 "facilityId": "HIP-DOES-NOT-EXIST",
                 "timestamp": timezone.now().isoformat(),
+                "profile": {"abhaNumber": "222222222222"},
             },
-            format="json",
-            HTTP_X_AUTHORIZATION="gateway-shared-secret",
         )
-        assert response.status_code == status.HTTP_400_BAD_REQUEST
+        assert response.status_code == status.HTTP_404_NOT_FOUND
         assert "hip" in response.data["detail"].lower()
 
-    def test_callback_is_idempotent(self):
+    def test_callback_is_idempotent(self, post_signed_callback):
         """Replaying a request ID returns the first result, not a new token (ABD-006)."""
         payload = {
             "requestId": "req-idem-1",
@@ -495,20 +503,10 @@ class TestABDMCallbackAPI:
             "timestamp": timezone.now().isoformat(),
             "profile": {"abhaNumber": "999999999999"},
         }
-        first = self.client.post(
-            "/api/v1/abdm-callbacks/",
-            payload,
-            format="json",
-            HTTP_X_AUTHORIZATION="gateway-shared-secret",
-        )
+        first = post_signed_callback(self.client, payload)
         assert first.status_code == status.HTTP_200_OK
 
-        second = self.client.post(
-            "/api/v1/abdm-callbacks/",
-            payload,
-            format="json",
-            HTTP_X_AUTHORIZATION="gateway-shared-secret",
-        )
+        second = post_signed_callback(self.client, payload)
         assert second.status_code == status.HTTP_200_OK
         assert second.data["status"] == "duplicate"
         # Exactly one token must exist - the replay must not issue a second one.

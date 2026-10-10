@@ -8,6 +8,14 @@ import os
 # otherwise refuse to start.
 os.environ["PATIENT_FIELDS_KEY"] = "kepi-12-unit-passphrase"
 
+# ABD-005: the shared secret the callback verifies its HMAC against. Set before
+# importing base so the deterministic value reaches the settings object, and so
+# the fail-closed path for an unset secret is only ever taken by a test that
+# overrides it on purpose. ``_signed_request`` in
+# tests/integration/test_abdm_callback.py signs with ``settings``, so any value
+# works — this one only keeps the suite independent of the host environment.
+os.environ.setdefault("ABDM_CLIENT_SECRET", "kepi-15-unit-passphrase")
+
 from .base import *  # noqa: E402,F401,F403
 
 DEBUG = False

@@ -60,12 +60,6 @@ KNOWN_GAPS = {
         "QR regenerate is implemented (`qr-codes/{id}/regenerate/`); the revoke "
         "half of the requirement has no endpoint",
     ),
-    "ABD-005": (
-        "**not implemented**",
-        "`ABHACallbackViewSet` accepts any non-empty X-ABDM-Signature or "
-        "Bearer header — presence-only, no secret comparison (verified "
-        "backend/apps/abdm_gateway/views.py `_authenticate`)",
-    ),
     "ABD-011": (
         "**not implemented**",
         "the consent event is built and returned in the acknowledgement but "
