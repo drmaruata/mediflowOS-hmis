@@ -653,6 +653,24 @@ class TestAuditRetentionPurge:
 
         assert purge_expired(tenant_id=self.tenant.id, retention_days=365) == 3
 
+    def test_purge_without_retention_days_uses_the_setting(self, settings):
+        """The caller may omit the window; the setting supplies it (AUD-004).
+
+        Task 23 schedules ``purge_expired``; requiring every caller to remember
+        the retention value is how a job silently ends up purging nothing (or
+        everything). ``None`` must resolve to ``settings.AUDIT_RETENTION_DAYS``
+        — the same env-overridable, default-365 value the settings suite pins.
+        """
+        settings.AUDIT_RETENTION_DAYS = 30
+        stale = _backdate(_append_chained(self.tenant.id, entity_id="P-stale"), 40)
+        fresh = _append_chained(self.tenant.id, entity_id="P-fresh")
+
+        deleted = purge_expired(tenant_id=self.tenant.id)
+
+        assert deleted == 1
+        assert not AuditEvent.objects.filter(pk=stale.pk).exists()
+        assert AuditEvent.objects.filter(pk=fresh.pk).exists()
+
     def test_purge_of_everything_leaves_an_empty_valid_chain(self):
         """A full purge is the honest end state of the window, not a failure."""
         _backdate(_append_chained(self.tenant.id, entity_id="P-stale"), 400)

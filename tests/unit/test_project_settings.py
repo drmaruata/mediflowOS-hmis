@@ -124,7 +124,12 @@ def test_audit_hmac_key_may_be_absent_in_debug(monkeypatch):
     dev.py supplies a deterministic value so a local database keeps verifying
     across restarts; this only checks that the *guard* is debug aware, and
     that an unkeyed chain is a deliberately-taken dev state rather than a
-    production default.
+    production default. The pin must not be misread as "an empty key works":
+    in the state it asserts, ``AUDIT_HMAC_KEY == ""``, ``_hmac_key`` (and so
+    every append and verify) raises — the developer mode runs only because
+    ``config.settings.dev`` supplies a value of its own, and exporting an
+    empty one by hand leaves an unrunnable server, exactly as the
+    PATIENT_FIELDS_KEY pin above.
     """
     import importlib
     import sys

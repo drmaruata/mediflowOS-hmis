@@ -15,10 +15,15 @@ per tenant and strictly ordered, so two tenants writing side by side never
 cross-link, and a row commits to everything recorded before it in its own
 tenant. Verifying is recomputing: :func:`verify_chain` rebuilds every digest
 from the stored columns and names the first row whose recomputed hash does
-not match, which is what makes an in-place ``UPDATE`` visible. All three
-writers (the mixin, :func:`audit_read`, and the QR regenerate path) go
-through :func:`append_event`, because a row nobody chains is a gap no
-verifier can explain.
+not match, which is what makes an in-place ``UPDATE`` visible. The ordering
+key is the ``auto_now_add`` ``occurred_at`` stamp, so a host clock stepping
+backwards between two appends in one tenant would order the rows against
+their append order and verify would report a false positive on untouched
+rows — a trade-off accepted because the stamp is the only per-row sequence
+that survives a worker restart, and the exposure is confined to the tenant
+whose host misbehaves. All three writers (the mixin, :func:`audit_read`, and
+the QR regenerate path) go through :func:`append_event`, because a row nobody
+chains is a gap no verifier can explain.
 
 AUD-004 adds a retention purge. Deleting rows trims the chain, it does not
 break it: :func:`verify_chain` re-anchors on the oldest *surviving* chained
@@ -60,15 +65,22 @@ CHAIN_FIELDS = (
     "user_id",
 )
 
-#: The model field ``user_id`` is stored through. Writers pass
-#: ``auth.User.pk``, which is an *integer*, while the row stores (and reads
-#: back as) ``uuid.UUID(int=<that int>)``. Hashing the raw int would
-#: canonicalise to ``5`` while the verifier reading the row back
-#: canonicalises to the UUID string, so no authenticated write could ever
-#: verify. Coercing through the field's own ``to_python`` is the conversion
-#: the save performs, which makes the hashed value the stored value by
-#: construction.
-_USER_ID_FIELD = AuditEvent._meta.get_field("user_id")
+#: The coercion each chained value goes through before it is hashed, keyed by
+#: field name: the model field's own ``to_python`` — the conversion ``save``
+#: performs for every field class here (CharField, GenericIPAddressField and
+#: UUIDField all route ``get_prep_value`` through it; the TextField ``reason``
+#: keeps an identity ``to_python``, and a non-text ``reason`` cannot be stored
+#: at all, so there is no stored value it could disagree with). Hashing the
+#: *coerced* value rather than the raw kwarg is what makes the digest written
+#: and the digest recomputed from the row agree by construction: writers pass
+#: ``auth.User.pk`` as an *integer* while the row stores — and reads back as —
+#: ``uuid.UUID(int=<that int>)``, so hashing the raw int would canonicalise
+#: to ``5`` while the verifier canonicalises to the UUID string, and no
+#: authenticated write could ever verify. ``None`` skips the coercion: every
+#: chained column is nullable, and NULL is what an omitted kwarg resolves to.
+_CHAIN_COERCE = {
+    name: AuditEvent._meta.get_field(name).to_python for name in CHAIN_FIELDS
+}
 
 
 def _canonical_fields(source) -> dict:
@@ -77,17 +89,20 @@ def _canonical_fields(source) -> dict:
     ``source`` is either the writer's kwargs dict or an ``AuditEvent``
     instance; both sides go through this one function. A name the writer
     omitted resolves to ``None``, matching the row's NULL default, so an
-    omitted column and a stored NULL hash to the same value.
+    omitted column and a stored NULL hash to the same value. A non-None value
+    is coerced through the field's own ``to_python`` (``_CHAIN_COERCE``), so
+    the value hashed is the value the row stores whichever side it came from.
 
     Raises:
-        django.core.exceptions.ValidationError: if ``user_id`` is neither
-            ``None``, a UUID nor an integer pk.
+        django.core.exceptions.ValidationError: if a chained value cannot be
+            coerced — e.g. ``user_id`` that is neither ``None``, a UUID nor
+            an integer pk.
     """
     canonical = {}
     for name in CHAIN_FIELDS:
         value = source.get(name) if isinstance(source, dict) else getattr(source, name)
-        if name == "user_id" and value is not None:
-            value = _USER_ID_FIELD.to_python(value)
+        if value is not None:
+            value = _CHAIN_COERCE[name](value)
         canonical[name] = value
     return canonical
 
@@ -173,9 +188,20 @@ def _chain_lock_key(tenant_id) -> int:
     :func:`hash`, which is salted per process and would give two workers
     different locks for the same tenant. A collision merely shares a lock,
     costing serialisation between two tenants and never correctness.
+
+    The digest is truncated to **15 hex digits (60 bits), not a full 16**:
+    ``int(digest[:16], 16)`` is an unsigned 64-bit value and exceeds
+    ``2**63`` for about half of all tenant ids (49.92% of 200,000 measured
+    uuid4s), while ``pg_advisory_xact_lock`` takes a signed ``bigint``.
+    psycopg3 routes an int at or above ``2**63`` to the numeric dumper,
+    PostgreSQL then fails function resolution, and ``append_event`` raises
+    inside its atomic block — a 500 on every audited write for that tenant.
+    Sixty bits keeps distinct tenants on distinct locks in practice (a
+    collision costs only serialisation) while staying inside signed bigint
+    range for every input.
     """
     digest = hashlib.sha256(str(tenant_id).encode("utf-8")).hexdigest()
-    return int(digest[:16], 16)
+    return int(digest[:15], 16)
 
 
 def append_event(*, tenant_id, **fields) -> AuditEvent:
@@ -295,13 +321,20 @@ def verify_chain(*, tenant_id) -> dict:
     return {"valid": first_bad is None, "checked": checked, "first_bad": first_bad}
 
 
-def purge_expired(*, tenant_id, retention_days: int) -> int:
+def purge_expired(*, tenant_id, retention_days: int | None = None) -> int:
     """Delete this tenant's audit events older than ``retention_days`` (AUD-004).
 
     Returns the number of rows deleted. The cutoff is a strict ``<`` against
     ``timezone.now() - timedelta(days=retention_days)``, so a row landing
     exactly on the boundary survives. Only this tenant's rows are considered:
     one hospital's retention policy must not delete another's evidence.
+
+    When ``retention_days`` is omitted it resolves to
+    ``settings.AUDIT_RETENTION_DAYS`` — the env-overridable, default-365
+    placeholder documented in ``base.py`` (OQ-08 still open with the
+    customer). Resolving it here rather than at every call site is what stops
+    a scheduled job (Task 23) from quietly running with a different window
+    than the operator configured simply because no value was passed.
 
     The purge **only ever deletes**. It does not rewrite the surviving rows'
     ``hash_chain``, because an audit store that edits its own rows is not
@@ -321,6 +354,8 @@ def purge_expired(*, tenant_id, retention_days: int) -> int:
     the table — an append-only export or a countersignature — which is out of
     scope for R1.
     """
+    if retention_days is None:
+        retention_days = settings.AUDIT_RETENTION_DAYS
     cutoff = timezone.now() - timedelta(days=retention_days)
     with transaction.atomic():
         deleted, _ = (

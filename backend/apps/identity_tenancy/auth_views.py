@@ -161,8 +161,10 @@ class BreakGlassView(APIView):
         with transaction.atomic():
             # Model imports are local (cross-app), mirroring the ABDM views:
             # neither audit nor platform imports identity_tenancy, so this is
-            # purely a readability choice.
-            from apps.audit.models import AuditEvent
+            # purely a readability choice. ``services.append_event`` is
+            # imported the same way ``common.tenant`` does it — a module-level
+            # import would be an import cycle through common.tenant.
+            from apps.audit.services import append_event
             from apps.platform.models import Notification
 
             access = BreakGlassAccess.objects.create(
@@ -178,7 +180,15 @@ class BreakGlassView(APIView):
             # are the resource, not the grant row — so the review chain reads
             # "who opened patient UH-A-0001, why", which an access_id alone
             # would only reach through a second query.
-            AuditEvent.objects.create(
+            #
+            # The row goes through append_event rather than a direct
+            # ``AuditEvent.objects.create`` (AUD-002): an unchained row keeps
+            # the column's empty default, which ``verify_chain`` reads as a
+            # pre-chain row and skips — so the reason below could be edited
+            # in place, or the row deleted by hand, while the grant endpoint
+            # still answered "valid: true". Stored values are unchanged; the
+            # digest is the addition.
+            append_event(
                 tenant_id=tenant_id,
                 user_id=request.user.pk,
                 action="break-glass",

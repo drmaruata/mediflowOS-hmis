@@ -446,6 +446,50 @@ class TestBreakGlassAuditAndRevocation:
             assert alert.delivered is False
             assert "Emergency admission, awaiting bed" in alert.body
 
+    def test_break_grant_audit_row_joins_the_hash_chain(self, users):
+        """The AUD-001 break-glass row must chain, or its UPDATE is invisible.
+
+        A row written straight with ``AuditEvent.objects.create`` keeps the
+        column's empty default, and ``verify_chain`` reads an empty hash as a
+        pre-chain row it skips — so the grant would answer ``valid: true``
+        while a hand-edited ``reason`` sat in the trail. AUD-002 chains every
+        writer, break-glass included. This pins the grant's row as a chain
+        member: it carries a digest, the verify pass covers it, and touching
+        ``reason`` afterwards fails verification naming that row. The row is
+        deliberately written behind an earlier event, because the oldest
+        surviving chained row is the walk's re-anchor and its own digest is
+        accepted by design (AUD-004's concession) — a first-ever grant is the
+        one row whose in-place edit the chain cannot see, exactly as the
+        purge's re-anchor pins describe.
+        """
+        from apps.audit.models import AuditEvent
+        from apps.audit.services import append_event, verify_chain
+
+        # An earlier event, so the grant is not the anchor row.
+        append_event(
+            tenant_id=TENANT_A,
+            action="read",
+            entity_type="registry.patient",
+            entity_id="P-earlier",
+        )
+        self._grant()
+
+        event = AuditEvent.objects.get(action="break-glass")
+        assert event.hash_chain, (
+            "the break-glass audit row must carry a chain digest (AUD-002)"
+        )
+        assert verify_chain(tenant_id=TENANT_A) == {
+            "valid": True,
+            "checked": 2,
+            "first_bad": None,
+        }
+
+        event.reason = "a justification rewritten after the fact"
+        event.save(update_fields=["reason"])
+        tampered = verify_chain(tenant_id=TENANT_A)
+        assert tampered["valid"] is False
+        assert tampered["first_bad"] == str(event.id)
+
     def test_break_grant_without_reason_still_400(self, users):
         """No reason header, no grant — and no audit or alert row either.
 

@@ -333,6 +333,40 @@ $env:CELERY_BROKER_URL = "redis://localhost:6379/0"
 > $env:PATIENT_FIELDS_KEY = "a-long-random-passphrase-only-the-hospital-knows"
 > ```
 
+> **AUDIT_HMAC_KEY (AUD-002):** the audit trail is a tamper-evident
+> HMAC-SHA256 hash chain — every row's `hash_chain` is `HMAC(key, prev_hash +
+> canonical(fields))`, recomputed by `GET /api/v1/audit-log/verify/` — so this
+> key is what makes the chain unspoofable: an unkeyed HMAC is just a hash, and
+> without a real key anyone who can read `audit.event` could recompute, and
+> therefore forge, the chain. It must be explicitly exported in any non-DEBUG
+> environment: `base.py` refuses to start without it (`ImproperlyConfigured`),
+> mirroring the `PATIENT_FIELDS_KEY` guard above, so the failure is a
+> refusal to start rather than a silently unverifiable log.
+> `config.settings.dev` and `config.settings.test` supply deterministic
+> values, so a local database keeps verifying across restarts (a random key
+> per boot would be a silent rotation every start). A note on DEBUG: with
+> `DEBUG=true` the variable is *tolerated* at settings import, but an empty
+> value leaves the chain unrunnable — `_hmac_key` raises on every append and
+> verify — so the practical dev state is the deterministic value
+> `config.settings.dev` installs, not a hand-exported empty one. Example:
+>
+> ```powershell
+> $env:AUDIT_HMAC_KEY = "$([Guid]::NewGuid().ToString('N') * 2)"
+> ```
+>
+> **AUDIT_RETENTION_DAYS (AUD-004):** how many days of audit history the
+> retention purge keeps (`purge_expired`), defaulting to **365** when unset
+> and overridable per deployment. The SRS requires "a configurable retention
+> policy" without naming a period, and the architecture doc leaves long-term
+> audit retention open with the customer (OQ-08), so 365 is a documented
+> placeholder, not a compliance claim. A non-numeric or non-positive value
+> falls back to the default rather than silently disabling or widening the
+> purge. Example:
+>
+> ```powershell
+> $env:AUDIT_RETENTION_DAYS = "2555"  # seven years, a common statutory floor
+> ```
+
 > The project defaults to PostgreSQL on `localhost` and Redis at `redis://redis:6379/0` in many settings. If you are using local services instead of containers, update these values accordingly.
 
 ### 4. Run database migrations
