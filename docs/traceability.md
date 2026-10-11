@@ -28,7 +28,7 @@ the frontend, so Modelled/API/RLS read `no` for them by construction.
 | Reqs | App | Phase | Count | Modelled | API | Routes | RLS |
 | ---: | --- | --- | ---: | --- | --- | ---: | --- |
 | ABD | patient_registry | R1 | `17` | yes | yes | `31` | yes |
-| AUD | audit | R1 | `4` | yes | yes | `6` | yes |
+| AUD | audit | R1 | `4` | yes | yes | `8` | yes |
 | BBK | blood_bank | R4 | `8` | yes | yes | `1` | yes |
 | BIL | billing_insurance | R2 | `6` | yes | yes | `21` | yes |
 | EMG | emergency | R5 | `3` | yes | yes | `9` | yes |
@@ -64,7 +64,6 @@ claimed as delivered (re-verified against the code each time
 this file is regenerated):
 
 - **ABD-017** (deferred) - sandbox profile-share replay test is gated on `ABDM_SANDBOX_RUN` with real credentials; no recorded run in this environment — see `docs/abdm-sandbox-runbook.md`
-- **AUD-002** (partial) - AuditEvent.hash_chain exists but is never computed — the log is append-only in practice, not tamper-evident
 - **PLT-004** (not implemented) - every Celery task body is `pass` except Task 18's `task_scan_callback_failures` (ABD-014), and there is no CELERY_BEAT_SCHEDULE — no background job runs on a schedule
 - **QOS-001** (not implemented) - indicator catalogue exists in docs/ but no loader has been written; the 406 records are not in the database
 - **REG-009** (deferred) - the outbound ABDM sandbox ABHA adapter shipped (create/verify actions on the patient endpoint, `apps/abdm_gateway/client.py`, 503 `ABDM_SANDBOX_UNCONFIGURED` fail-closed path, env + IntegrationAdapter base-URL resolution) but the official sandbox create/verify spec (endpoint paths, payloads, OTP flow) is unresolved — the enrollment paths are patterned on the community-mirrored sandbox v1 spec and must be re-verified before production

@@ -648,9 +648,13 @@ class QRCodeViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         qr.regenerated_at = timezone.now()
         qr.save(update_fields=["encode_data", "regenerated_at"])
 
-        from apps.audit.models import AuditEvent
+        # AUD-002: written through append_event so the row joins the tenant's
+        # chain; a direct AuditEvent.objects.create would leave a hole no
+        # verify pass could explain. ``source`` passes through **fields and
+        # stays part of the chained field set.
+        from apps.audit.services import append_event
 
-        AuditEvent.objects.create(
+        append_event(
             tenant_id=self.get_tenant_id(),
             user_id=(
                 request.user.pk if request.user.is_authenticated else None

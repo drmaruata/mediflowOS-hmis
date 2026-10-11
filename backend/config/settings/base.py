@@ -59,6 +59,40 @@ ABDM_MAX_SKEW_SECONDS = 300
 if _abdm_max_skew.isdigit() and int(_abdm_max_skew) > 0:
     ABDM_MAX_SKEW_SECONDS = int(_abdm_max_skew)
 
+# AUD-002: HMAC-SHA256 key the audit hash chain is computed under. There is
+# deliberately **no default**: an unkeyed HMAC is just a hash, so anyone who
+# can read ``audit.event`` could recompute and forge the chain, and
+# tamper-evidence would be a claim rather than a control. A non-DEBUG settings
+# import therefore refuses to start without one, mirroring the
+# PATIENT_FIELDS_KEY guard above. dev.py and test.py supply deterministic
+# values *before* they ``from .base import *`` — a local database must keep
+# verifying across restarts, and a random key would make every restart a key
+# rotation; production must set AUDIT_HMAC_KEY in the environment.
+AUDIT_HMAC_KEY = os.getenv("AUDIT_HMAC_KEY", "")
+if not DEBUG and not AUDIT_HMAC_KEY:
+    raise ImproperlyConfigured(
+        "AUDIT_HMAC_KEY must be set when DEBUG is off: the audit trail is a "
+        "tamper-evident HMAC chain (AUD-002) computed under this key, and an "
+        "unkeyed chain can be recomputed - and therefore forged - by anyone "
+        "who can read the table. dev.py/test.py set a value; production must "
+        "export one."
+    )
+
+# AUD-004: audit retention window in days, consumed by ``purge_expired``
+# (Task 23 schedules the beat entry). The SRS states the requirement —
+# "retain audit records per a configurable retention policy" — but names no
+# period, and the architecture doc leaves long-term audit retention as an
+# open question with the customer (OQ-08), so 365 is a documented
+# placeholder, not a compliance claim: it is the value an operator overrides
+# per deployment. A non-numeric or non-positive value falls back to the
+# default rather than disabling the purge, the same guard
+# ABDM_MAX_SKEW_SECONDS uses, so a mis-typed setting cannot silently widen or
+# shrink the window.
+_audit_retention_days = os.getenv("AUDIT_RETENTION_DAYS", "")
+AUDIT_RETENTION_DAYS = 365
+if _audit_retention_days.isdigit() and int(_audit_retention_days) > 0:
+    AUDIT_RETENTION_DAYS = int(_audit_retention_days)
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",

@@ -16,6 +16,12 @@ os.environ["PATIENT_FIELDS_KEY"] = "kepi-12-unit-passphrase"
 # works — this one only keeps the suite independent of the host environment.
 os.environ.setdefault("ABDM_CLIENT_SECRET", "kepi-15-unit-passphrase")
 
+# AUD-002: the HMAC key the audit hash chain is computed under. A fixed
+# literal so a chain written by one test verifies in another regardless of
+# the host environment, and so base's non-DEBUG guard (an unverifiable chain
+# must not start) is satisfied without exporting anything.
+os.environ.setdefault("AUDIT_HMAC_KEY", "kepi-21-unit-passphrase")
+
 from .base import *  # noqa: E402,F401,F403
 
 DEBUG = False

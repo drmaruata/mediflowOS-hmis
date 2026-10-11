@@ -162,31 +162,28 @@ class TenantScopedQuerysetMixin:
         super().perform_destroy(instance)
 
     def _write_audit_log(self, instance, action):
-        """Helper to write audit log entries for DRF writes."""
+        """Helper to write audit log entries for DRF writes (AUD-001)."""
         tenant_id = self.get_tenant_id()
         if not tenant_id:
             return
-            
-        try:
-            from apps.audit.models import AuditEvent
-        except ImportError:
-            return
-            
-        user_id = self.request.user.pk if self.request.user.is_authenticated else None
-        
-        # Entity type is the table name, entity ID is the stringified PK.
-        entity_type = instance._meta.db_table
-        entity_id = str(instance.pk)
-        
-        ip = self.request.META.get("REMOTE_ADDR")
-        
-        AuditEvent.objects.create(
+
+        # Imported here, not at module scope: common/tenant.py is imported by
+        # the middleware that runs for every request, and apps.audit.services
+        # imports back from common.tenant, so a module-level import would be a
+        # cycle on the first request that never loads the app registry.
+
+        from apps.audit.services import append_event
+
+        append_event(
             tenant_id=tenant_id,
-            user_id=user_id,
+            user_id=(
+                self.request.user.pk if self.request.user.is_authenticated else None
+            ),
             action=action,
-            entity_type=entity_type,
-            entity_id=entity_id,
-            source_ip=ip,
+            # Entity type is the table name, entity ID is the stringified PK.
+            entity_type=instance._meta.db_table,
+            entity_id=str(instance.pk),
+            source_ip=self.request.META.get("REMOTE_ADDR"),
             reason=self.request.headers.get("X-Break-Glass-Reason"),
         )
 

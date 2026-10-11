@@ -15,6 +15,12 @@ os.environ.setdefault(
 # documented fail-open mode (the endpoint logs a warning and accepts). Export
 # ABDM_CLIENT_SECRET to exercise the real HMAC path locally.
 
+# AUD-002: a deterministic dev key so a local audit database keeps verifying
+# across restarts (a random value would make every restart a key rotation and
+# every stored chain unverifiable). setdefault keeps a developer's own
+# exported AUDIT_HMAC_KEY. Mirrors the PATIENT_FIELDS_KEY treatment above.
+os.environ.setdefault("AUDIT_HMAC_KEY", "mediflow-dev-audit-hmac-key-aud-002")
+
 from .base import *  # noqa: E402,F401,F403
 
 DEBUG = True

@@ -96,11 +96,11 @@ KNOWN_GAPS = {
         "True after login and require_mfa roles are denied every "
         "default-permission endpoint (fail-closed)",
     ),
-    "AUD-002": (
-        "partial",
-        "AuditEvent.hash_chain exists but is never computed — the log is "
-        "append-only in practice, not tamper-evident",
-    ),
+    # Task 21 deleted AUD-002: the chain is now real — every writer routes
+    # through `apps/audit/services.append_event`, `hash_chain` is an
+    # HMAC-SHA256 over the tenant's previous hash and the canonical field set,
+    # and `GET /api/v1/audit-log/verify/` recomputes it and names the first
+    # row that fails to match.
     "PLT-004": (
         "**not implemented**",
         "every Celery task body is `pass` except Task 18's "
