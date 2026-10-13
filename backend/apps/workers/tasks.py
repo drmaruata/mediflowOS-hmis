@@ -1,4 +1,36 @@
-"""Workers — Celery tasks."""
+"""Workers — Celery tasks (PLT-004, INT-014, AUD-004, ABD-014, PLT-001).
+
+Two families of task live here, and the split is the whole design:
+
+* **per-tenant tasks** — ``dispatch_notification``, ``purge_expired_audit_events``,
+  ``run_scheduled_job`` and ``scan_abdm_callback_failures``. Each takes its
+  tenant context explicitly (an argument, or a row whose own tenant is bound
+  from it), opens its own ``transaction.atomic()`` and calls
+  ``bind_tenant_session`` *inside* it. AGENTS.md §4 is explicit that a task
+  must never run without tenant context, and ``common/tenant.py`` is explicit
+  that ``set_config(..., is_local=true)`` is transaction-scoped — binding
+  outside the block would be silently discarded and the queries would run
+  unscoped.
+
+* **dispatchers** — the ``dispatch_*`` tasks the beat schedule points at. A
+  static ``CELERY_BEAT_SCHEDULE`` is frozen when the settings module is
+  imported, while tenants are created at runtime, so the schedule cannot carry
+  a tenant id. Each dispatcher is therefore zero-argument: it enumerates the
+  tenants and enqueues the per-tenant task over them. The tenant ids reach the
+  work through the message, not through the schedule.
+
+Every task carries the same retry policy below and an idempotency guard, because
+a task that may be retried must not double-write: the notification sweep leaves
+``delivered`` to the consumer, the job claim is a conditional UPDATE, the purge
+is a delete, and the ABDM alert matches a constant title inside its window. The
+permanent no-op paths (a notification row that is gone, a job already claimed)
+return instead of raising, so ``autoretry_for`` never spins on a condition
+retrying cannot fix.
+
+Task 18's ABD-014 alert is here under the name the R1 plan pins:
+``task_scan_callback_failures`` became ``scan_abdm_callback_failures`` so every
+task in this module reads the same way. Its behaviour is unchanged.
+"""
 import logging
 from datetime import timedelta
 
@@ -11,24 +43,40 @@ from common.tenant import bind_tenant_session
 logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, max_retries=3)
-def compute_indicators(self, tenant_id, period_start, period_end):
-    """Nightly indicator computation for a tenant."""
-    # Placeholder — will be implemented with the indicator engine
-    pass
+#: Retry policy shared by every task (PLT-004: "retry, back-off and
+#: visibility"). Applied as one dict so a task added later cannot quietly land
+#: with a different policy than the ones already live — the test suite asserts
+#: these attributes on every registered task, which is the backstop for a task
+#: written without it.
+RETRY_POLICY = {
+    "autoretry_for": (Exception,),
+    "max_retries": 5,
+    # Exponential: Celery waits ``2 ** retries`` seconds, so 2s, 4s, 8s, 16s and
+    # 32s across the five attempts.
+    "retry_backoff": True,
+    # Caps the wait at 600s — Celery's own default, pinned here rather than
+    # inherited, so an upstream default change cannot silently stretch a retry
+    # storm. ``retry_jitter`` is deliberately left unset: Celery enables it by
+    # default, and jitter is what stops every worker for one tenant retrying in
+    # lockstep.
+    "retry_backoff_max": 600,
+}
 
+#: How many tenants one dispatcher run will fan out over. A dispatcher is a
+#: single Celery message, so a deployment large enough to exceed this has to
+#: notice — the result carries ``truncated`` — rather than silently sweep a
+#: fixed prefix forever.
+TENANT_ENUMERATION_LIMIT = 500
 
-@shared_task(bind=True, max_retries=3)
-def sync_abdm_callback(self, callback_id):
-    """Process ABDM callback asynchronously."""
-    pass
+#: How many due ``platform.scheduled_job`` rows one dispatcher run will claim
+#: per tenant. One hospital's backlog must not crowd every other hospital's
+#: jobs out of a single message; the remainder is picked up on the next pass.
+DUE_JOB_LIMIT = 100
 
-
-@shared_task(bind=True, max_retries=3)
-def send_notification(self, tenant_id, payload):
-    """Send a notification via the notification engine."""
-    pass
-
+#: How many undelivered notifications one dispatcher run will push per tenant,
+#: for the same reason. A row past the bound is swept again, which is safe
+#: because the only thing that clears a row is a consumer receiving it.
+PENDING_NOTIFICATION_LIMIT = 100
 
 #: ABD-014: how far back the scan looks. One hour is long enough that a burst
 #: of rejections is a signal rather than a spike, and short enough that the
@@ -40,7 +88,8 @@ FAILURE_WINDOW = timedelta(hours=1)
 #: gateway refuses a bad call cheaply (an HMAC mismatch costs one hash), so a
 #: real misconfiguration or an abusive sender shows up as a burst within
 #: minutes, and single bad calls from a misbehaving source app are not an
-#: incident. Task 23 wires the schedule; nothing runs this until then.
+#: incident. The ``scan-abdm-callback-failures`` beat entry runs this hourly, so
+#: every hour is covered exactly once.
 FAILURE_THRESHOLD = 5
 
 #: ABD-014: the alert title. Deliberately a constant rather than a message
@@ -60,8 +109,196 @@ CALLBACK_FAILURE_ALERT_TITLE = "ABDM callback failure burst"
 FAILURE_STATUS = "rejected"
 
 
-@shared_task
-def task_scan_callback_failures(tenant_id):
+@shared_task(**RETRY_POLICY)
+def dispatch_notification(notification_id, tenant_id):
+    """Push one persisted notification to its tenant's sockets (PLT-001, INT-012).
+
+    The tenant is an explicit argument rather than being read off the row, and
+    the reason is the RLS policy on ``platform.notification``: the table carries
+    a ``tenant_isolation`` policy whose predicate is
+    ``tenant_id = current_setting('app.tenant_id')``, and it fails closed when
+    the setting is unset. Reading the row *first* to discover its tenant would
+    therefore return nothing on PostgreSQL and the task would treat every real
+    notification as missing — it would work in the SQLite suite and nowhere
+    else. It is also the pk-only read AGENTS.md §4 forbids. So the dispatcher,
+    which already knows the tenant, passes it in, and the lookup names both
+    ids: a fabricated id belonging to another hospital matches nothing.
+
+    ``delivered`` is *not* flipped here. The flip belongs to the consumer that
+    actually sends the frame (T22): a task that marked the row delivered would
+    claim success for a push that may have reached no socket at all, and the
+    row would then be excluded from every later sweep. With no socket connected
+    the row stays ``delivered=False``, which is the honest state and the one
+    that gets it swept again.
+
+    A row that is gone or already delivered is a no-op that returns a reason
+    instead of raising: a retried dispatch must not spin on a condition
+    retrying cannot fix.
+    """
+    with transaction.atomic():
+        bind_tenant_session(str(tenant_id))
+
+        # Imported inside the task rather than at module scope: this module is
+        # imported by Celery's autodiscovery while the app registry is still
+        # being populated, and apps.platform.views pulls in DRF and the channel
+        # layer. Task 18's models were imported the same way.
+        from apps.platform.models import Notification
+        from apps.platform.serializers import NotificationSerializer
+        from apps.platform.views import _push_notification
+
+        notification = (
+            Notification.objects.filter(id=notification_id, tenant_id=tenant_id).first()
+        )
+        if notification is None:
+            logger.info(
+                "notification %s not found for tenant %s; nothing to push",
+                notification_id,
+                tenant_id,
+            )
+            return _dispatch_result(
+                notification_id,
+                tenant_id,
+                pushed=False,
+                reason="no such notification row",
+            )
+        if notification.delivered:
+            # Already pushed and received: a second frame would re-open a
+            # notification the user has already seen.
+            return _dispatch_result(
+                notification_id,
+                tenant_id,
+                pushed=False,
+                reason="already delivered",
+            )
+
+        # Reused rather than reimplemented so this and the view's push path
+        # cannot drift apart. It logs and swallows a channel-layer failure by
+        # design (T22): the row is already committed, so raising would turn a
+        # succeeded write into a 500 and the client would retry it into a
+        # duplicate. A push that failed leaves ``delivered`` False, so the next
+        # sweep picks the row up again — that is the recovery path, and it is
+        # why the retry policy on this task exists for database errors rather
+        # than for the transport.
+        _push_notification(str(tenant_id), NotificationSerializer(notification).data)
+
+    return _dispatch_result(notification_id, tenant_id, pushed=True)
+
+
+@shared_task(**RETRY_POLICY)
+def purge_expired_audit_events(tenant_id):
+    """Delete this tenant's audit events past the retention window (AUD-004).
+
+    Scheduled nightly at 02:00 by the ``purge-expired-audit-events`` beat entry,
+    off-peak. The retention window is resolved inside :func:`purge_expired` from
+    ``settings.AUDIT_RETENTION_DAYS``, so a scheduled job cannot run with a
+    different window than the operator configured just because the caller
+    forgot to pass one.
+
+    Idempotent by nature: the second run finds nothing left inside the window
+    and deletes zero. ``audit.event`` is RLS-protected, so the binding below is
+    what makes the delete land on this tenant's rows and only those — the
+    purge of one hospital's retention policy must never touch another's
+    evidence.
+    """
+    from apps.audit.services import purge_expired
+
+    # The session binding has to live inside the transaction (see
+    # common/tenant.py): ``set_config(..., is_local=true)`` is
+    # transaction-scoped, so binding outside the block would be discarded and
+    # the queries would run with no tenant context at all.
+    with transaction.atomic():
+        bind_tenant_session(str(tenant_id))
+        deleted = purge_expired(tenant_id=tenant_id)
+
+    return {"tenant_id": str(tenant_id), "deleted": deleted}
+
+
+@shared_task(**RETRY_POLICY)
+def run_scheduled_job(job_id):
+    """Claim one due ``platform.scheduled_job`` row and run it (PLT-004).
+
+    ``platform.scheduled_job`` carries no RLS policy — migration
+    ``apps/platform/migrations/0004_enable_row_level_security.py`` freezes only
+    ``platform.notification`` and ``platform.feature_flag`` — so the row is
+    resolved first and its own tenant becomes the session context. Application
+    scoping is therefore the only control on this table, and every write below
+    is filtered by ``row.tenant_id`` so the row's tenant bounds the whole run
+    even though the database does not enforce it.
+
+    Re-entrancy is the claim: a single
+    ``UPDATE ... WHERE id = %s AND tenant_id = %s AND status = 'pending'``.
+    A row already claimed updates zero rows and the task returns, so a
+    scheduler that fires twice, or a worker that replays the message, executes
+    the job once and leaves exactly one ``started_at`` and one result. This is
+    the guarantee ``ScheduledJobViewSet`` can show a user, and it is why the
+    claim must stay a conditional UPDATE rather than a read-then-write: two
+    workers reading ``pending`` would both proceed.
+
+    In R1 no ``job_type`` has an implementation (see ``_JOB_HANDLERS``), so a
+    claimed job is parked as ``failed`` with a reason. A parked job must not
+    sit ``running`` forever with no result to show: that would hide a real
+    starvation from the very visibility surface PLT-004 asks for.
+    """
+    from apps.platform.models import ScheduledJob
+
+    with transaction.atomic():
+        row = (
+            ScheduledJob.objects.filter(id=job_id)
+            .values("id", "tenant_id", "job_type")
+            .first()
+        )
+        if row is None:
+            logger.warning("scheduled job %s not found; nothing to run", job_id)
+            return _job_result(job_id, ran=False, status="missing")
+
+        bind_tenant_session(str(row["tenant_id"]))
+        claimed = ScheduledJob.objects.filter(
+            id=row["id"], tenant_id=row["tenant_id"], status="pending"
+        ).update(status="running", started_at=timezone.now())
+        if not claimed:
+            status = (
+                ScheduledJob.objects.filter(id=row["id"])
+                .values_list("status", flat=True)
+                .first()
+            )
+            return _job_result(
+                job_id,
+                ran=False,
+                status=status,
+                tenant_id=row["tenant_id"],
+                reason="already claimed",
+            )
+
+        # R1 ships no engine for any job_type — the indicator engine
+        # (``indicator_computation``), the report generator
+        # (``report_generation``) and the async callback re-processor (``sync``)
+        # are all post-R1. The claim above is still real work: it is what a
+        # future handler will be invoked under, and it is what stops a
+        # scheduler from double-running a job in the meantime.
+        reason = f"{row['job_type']} has no R1 implementation — engine deferred"
+        ScheduledJob.objects.filter(id=row["id"], tenant_id=row["tenant_id"]).update(
+            status="failed",
+            completed_at=timezone.now(),
+            result={"reason": reason},
+        )
+        logger.info(
+            "scheduled job %s (%s) parked: %s",
+            job_id,
+            row["job_type"],
+            reason,
+        )
+        return _job_result(
+            job_id,
+            ran=False,
+            status="failed",
+            tenant_id=row["tenant_id"],
+            job_type=row["job_type"],
+            reason=reason,
+        )
+
+
+@shared_task(**RETRY_POLICY)
+def scan_abdm_callback_failures(tenant_id):
     """Alert a tenant's administrators on a burst of ABDM callback failures (ABD-014).
 
     The tenant id is an explicit argument (AGENTS.md async rule: a task never
@@ -164,6 +401,199 @@ def task_scan_callback_failures(tenant_id):
             len(recipients),
         )
         return _scan_result(tenant_id, failures, alerted=True)
+
+
+@shared_task(**RETRY_POLICY)
+def dispatch_audit_retention_purge():
+    """Beat entry ``purge-expired-audit-events``: nightly retention sweep.
+
+    A static ``CELERY_BEAT_SCHEDULE`` cannot carry tenant ids, so it points
+    here and this task enumerates the tenants and fans the real work out. That
+    is also why the sweep is a pass over tenants and not a single query:
+    ``audit.event`` is RLS-protected, so each tenant's purge has to run inside
+    its own bound session, and a job that did not bind would delete nothing
+    while looking like it worked.
+    """
+    tenants, bound = _tenant_plan()
+    for tenant_id in tenants:
+        purge_expired_audit_events.delay(tenant_id)
+    return _dispatch_report("purge-expired-audit-events", len(tenants), len(tenants), bound)
+
+
+@shared_task(**RETRY_POLICY)
+def dispatch_abdm_callback_failure_scan():
+    """Beat entry ``scan-abdm-callback-failures``: hourly ABD-014 sweep.
+
+    Hourly because the scan's own window is an hour: a shorter cadence would
+    re-count the same burst inside the same window and be swallowed by the
+    title-constant idempotency guard anyway.
+    """
+    tenants, bound = _tenant_plan()
+    for tenant_id in tenants:
+        scan_abdm_callback_failures.delay(tenant_id)
+    return _dispatch_report(
+        "scan-abdm-callback-failures", len(tenants), len(tenants), bound
+    )
+
+
+@shared_task(**RETRY_POLICY)
+def dispatch_due_scheduled_jobs():
+    """Beat entry ``run-due-scheduled-jobs``: enqueue every job whose time came.
+
+    Every five minutes, because a job row carries its own ``scheduled_at`` and
+    the sweep only has to be frequent enough that a due job is picked up
+    promptly. A finer interval would hammer the broker for jobs that cannot run
+    yet; a coarser one would leave a job scheduled for 09:00 waiting until
+    09:10. Five minutes bounds the delay at a value nobody notices.
+    """
+    now = timezone.now()
+    tenants, bound = _tenant_plan()
+    enqueued = 0
+    for tenant_id in tenants:
+        # Collected and committed *before* the enqueue: a ``.delay()`` issued
+        # inside this transaction would, under ``CELERY_TASK_ALWAYS_EAGER``,
+        # run the job inside the dispatcher's own transaction and nest it as a
+        # savepoint.
+        for job_id in _due_job_ids(tenant_id, now):
+            run_scheduled_job.delay(str(job_id))
+            enqueued += 1
+    return _dispatch_report("run-due-scheduled-jobs", len(tenants), enqueued, bound)
+
+
+@shared_task(**RETRY_POLICY)
+def dispatch_pending_notifications():
+    """Beat entry ``dispatch-pending-notifications``: push every undelivered row.
+
+    Every minute, because the notifications this carries are clinical alerts a
+    provider is waiting on (PLT-001) — a minute's latency on an alert is the
+    whole cost, and the sweep is one filtered, bounded read per tenant.
+
+    This is also the recovery path for a push that failed: the consumer is what
+    flips ``delivered``, so a row no socket ever received stays
+    ``delivered=False`` and is swept again on the next pass.
+    """
+    tenants, bound = _tenant_plan()
+    enqueued = 0
+    for tenant_id in tenants:
+        for notification_id in _undelivered_notification_ids(tenant_id):
+            dispatch_notification.delay(str(notification_id), tenant_id)
+            enqueued += 1
+    return _dispatch_report(
+        "dispatch-pending-notifications", len(tenants), enqueued, bound
+    )
+
+
+def _tenant_plan(bound=TENANT_ENUMERATION_LIMIT):
+    """The tenants one dispatcher run will fan out over, and the bound applied.
+
+    ``identity.tenant`` is the one table in the schema with no ``tenant_id``
+    column and no RLS policy — it is the tenancy root, and the platform
+    administrator has to list every tenant to onboard one (TEN-010) — so this
+    read needs no bound session. Everything the dispatchers read afterwards is
+    either RLS-protected or tenant-owned, so each per-tenant step rebinds
+    before it queries.
+
+    Ordered by ``(created_at, id)`` so the bounded prefix is stable between
+    runs: a tenant created early is not skipped on one pass and swept on the
+    next. The bound itself is what makes an over-large deployment visible
+    instead of silently under-swept — see ``_dispatch_report``.
+    """
+    from apps.identity_tenancy.models import Tenant
+
+    tenants = [
+        str(tenant_id)
+        for tenant_id in Tenant.objects.order_by("created_at", "id").values_list(
+            "id", flat=True
+        )[:bound]
+    ]
+    return tenants, bound
+
+
+def _due_job_ids(tenant_id, now, limit=DUE_JOB_LIMIT):
+    """Ids of this tenant's pending jobs whose ``scheduled_at`` has passed.
+
+    Scoped by tenant at the application level, because ``platform.scheduled_job``
+    has no RLS policy and a filter is the only thing keeping one hospital's
+    queue out of another's sweep. Ordered by ``scheduled_at`` so the oldest
+    waiting job is claimed first.
+    """
+    from apps.platform.models import ScheduledJob
+
+    with transaction.atomic():
+        bind_tenant_session(tenant_id)
+        return list(
+            ScheduledJob.objects.filter(
+                tenant_id=tenant_id, status="pending", scheduled_at__lte=now
+            )
+            .order_by("scheduled_at", "id")
+            .values_list("id", flat=True)[:limit]
+        )
+
+
+def _undelivered_notification_ids(tenant_id, limit=PENDING_NOTIFICATION_LIMIT):
+    """Ids of this tenant's persisted-but-undelivered notifications.
+
+    Scoped by tenant both in the filter and through the session binding, since
+    ``platform.notification`` is RLS-protected: the binding is what makes the
+    query return this tenant's rows at all. Ordered by ``created_at`` so the
+    oldest unread alert is pushed first.
+    """
+    from apps.platform.models import Notification
+
+    with transaction.atomic():
+        bind_tenant_session(tenant_id)
+        return list(
+            Notification.objects.filter(
+                tenant_id=tenant_id, persisted=True, delivered=False
+            )
+            .order_by("created_at", "id")
+            .values_list("id", flat=True)[:limit]
+        )
+
+
+def _dispatch_report(schedule, tenants, enqueued, bound):
+    """What a dispatcher run did — PLT-004's visibility half.
+
+    ``truncated`` is the operator's signal that the bound was hit and another
+    pass is needed. Counts and ids only: a task result lives in a backend that
+    may sit outside the hospital's boundary, so it carries no notification body
+    and no audit content (the :func:`_scan_result` convention).
+    """
+    return {
+        "schedule": schedule,
+        "tenants": tenants,
+        "enqueued": enqueued,
+        "truncated": tenants >= bound,
+    }
+
+
+def _dispatch_result(notification_id, tenant_id, *, pushed, reason=None):
+    """The dispatch task's return value: whether a frame went out, and why not."""
+    result = {
+        "tenant_id": str(tenant_id),
+        "notification_id": str(notification_id),
+        "pushed": pushed,
+    }
+    if reason is not None:
+        result["reason"] = reason
+    return result
+
+
+def _job_result(job_id, *, ran, status, tenant_id=None, job_type=None, reason=None):
+    """The job task's return value: the terminal state, and nothing else.
+
+    Counts and ids only (the :func:`_scan_result` convention): a task result is
+    stored in a backend that may sit outside the hospital's boundary, so it
+    carries no job payload, no patient reference and no report content.
+    """
+    result = {"job_id": str(job_id), "ran": ran, "status": status}
+    if tenant_id is not None:
+        result["tenant_id"] = str(tenant_id)
+    if job_type is not None:
+        result["job_type"] = job_type
+    if reason is not None:
+        result["reason"] = reason
+    return result
 
 
 def _scan_result(tenant_id, failures, *, alerted):

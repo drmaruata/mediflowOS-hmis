@@ -3,6 +3,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from celery.schedules import crontab
 from django.core.exceptions import ImproperlyConfigured
 
 from apps.abdm_gateway.client import require_sandbox_base_url
@@ -267,7 +268,47 @@ CHANNEL_LAYERS = {
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
+# PLT-004/INT-014: beat drives the schedulers through the DatabaseScheduler,
+# which seeds these static entries into periodic-task rows on startup, so an
+# operator can also add or disable one from the admin without a deploy.
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+# PLT-004/INT-014: the scheduled background work. INT-014 is explicit that
+# delivery and execution must not depend on Django Channels, which is why these
+# live here and not in a consumer.
+#
+# Every entry points at a zero-argument *dispatcher* in
+# ``apps/workers/tasks.py`` rather than at the per-tenant task. A static
+# schedule dict is evaluated once, when the settings module is imported, while
+# tenants are created at runtime — so a schedule cannot name a tenant, and a
+# beat entry that tried to pass a tenant id would be pinned to whichever tenant
+# happened to exist at deploy time. Each dispatcher enumerates the tenants and
+# enqueues the tenant-scoped task over them, which also puts each tenant's work
+# in its own bound session (``platform.notification`` and ``audit.event`` are
+# RLS-protected and read nothing at all without one).
+#
+# The intervals: a daily window for the retention purge (AUD-004, off-peak), an
+# hourly cadence matching the ABD-014 failure window, a five-minute sweep of
+# due job rows (a job carries its own ``scheduled_at``), and a one-minute sweep
+# of undelivered notifications (PLT-001, clinical alerts someone is waiting on).
+CELERY_BEAT_SCHEDULE = {
+    "purge-expired-audit-events": {
+        "task": "apps.workers.tasks.dispatch_audit_retention_purge",
+        "schedule": crontab(hour=2, minute=0),
+    },
+    "scan-abdm-callback-failures": {
+        "task": "apps.workers.tasks.dispatch_abdm_callback_failure_scan",
+        "schedule": crontab(minute=0),
+    },
+    "run-due-scheduled-jobs": {
+        "task": "apps.workers.tasks.dispatch_due_scheduled_jobs",
+        "schedule": crontab(minute="*/5"),
+    },
+    "dispatch-pending-notifications": {
+        "task": "apps.workers.tasks.dispatch_pending_notifications",
+        "schedule": crontab(minute="*"),
+    },
+}
 
 SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 SESSION_CACHE_ALIAS = "default"

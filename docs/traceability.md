@@ -64,7 +64,6 @@ claimed as delivered (re-verified against the code each time
 this file is regenerated):
 
 - **ABD-017** (deferred) - sandbox profile-share replay test is gated on `ABDM_SANDBOX_RUN` with real credentials; no recorded run in this environment — see `docs/abdm-sandbox-runbook.md`
-- **PLT-004** (not implemented) - every Celery task body is `pass` except Task 18's `task_scan_callback_failures` (ABD-014), and there is no CELERY_BEAT_SCHEDULE — no background job runs on a schedule
 - **QOS-001** (not implemented) - indicator catalogue exists in docs/ but no loader has been written; the 406 records are not in the database
 - **REG-009** (deferred) - the outbound ABDM sandbox ABHA adapter shipped (create/verify actions on the patient endpoint, `apps/abdm_gateway/client.py`, 503 `ABDM_SANDBOX_UNCONFIGURED` fail-closed path, env + IntegrationAdapter base-URL resolution) but the official sandbox create/verify spec (endpoint paths, payloads, OTP flow) is unresolved — the enrollment paths are patterned on the community-mirrored sandbox v1 spec and must be re-verified before production
 - **TEN-004** (partial) - RequirePermission reads the token's `permissions` claim and gates the role/membership writes, tenant CRUD and the quality catalogue, RoleSerializer rejects `platform.` codes on tenant-scoped roles at the write path (platform scope = Role.tenant is None; token-level scope binding deferred), and role/membership/scheduled-job querysets are tenant-scoped — but most endpoints still authorise by authentication alone, and facility/department-scoped permissions (TEN-005) are unimplemented
@@ -251,7 +250,7 @@ this file is regenerated):
 | PLT-001 | The system shall provide the real-time notification engine for authorised in-app notifications and clinically relevant alerts, with notification state persisted before realtime delivery | M | R1 | partial |
 | PLT-002 | The system shall provide a live vitals dashboard for authorised ICU/ward users using Django Channels when connected, with REST fallback when the WebSocket is unavailable | M | R5 | partial |
 | PLT-003 | The system shall provide REST polling/refetching for non-vitals operational displays including bed status, OPD queues/token displays and emergency boards | M | R1 | partial |
-| PLT-004 | The system shall run background jobs reliably with retry, back-off and visibility using Celery/Celery Beat | M | R1 | **not implemented** |
+| PLT-004 | The system shall run background jobs reliably with retry, back-off and visibility using Celery/Celery Beat | M | R1 | partial |
 | PLT-005 | The system shall provide file storage for documents and evidence with access control | M | R1 | partial |
 | PLT-006 | The system shall support feature flags per tenant | S | R1 | partial |
 | PLT-007 | The system shall provide in-app and external notifications with user preferences | S | R2 | partial |

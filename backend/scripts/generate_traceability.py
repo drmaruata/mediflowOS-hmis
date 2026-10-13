@@ -101,12 +101,15 @@ KNOWN_GAPS = {
     # HMAC-SHA256 over the tenant's previous hash and the canonical field set,
     # and `GET /api/v1/audit-log/verify/` recomputes it and names the first
     # row that fails to match.
-    "PLT-004": (
-        "**not implemented**",
-        "every Celery task body is `pass` except Task 18's "
-        "`task_scan_callback_failures` (ABD-014), and there is no "
-        "CELERY_BEAT_SCHEDULE — no background job runs on a schedule",
-    ),
+    # Task 23 deleted PLT-004: the four Celery tasks are real bodies in
+    # `apps/workers/tasks.py` (`dispatch_notification`,
+    # `purge_expired_audit_events`, `run_scheduled_job`,
+    # `scan_abdm_callback_failures`), each with retry, exponential back-off and
+    # an idempotency guard, and `CELERY_BEAT_SCHEDULE` carries four entries
+    # seeded through django_celery-beat's DatabaseScheduler. What PLT-004 does
+    # not yet cover is the *engines* behind the job types — the indicator and
+    # report generators are post-R1 — which is a different requirement (QOS)
+    # than running background jobs reliably.
     "QOS-001": (
         "**not implemented**",
         "indicator catalogue exists in docs/ but no loader has been written; "

@@ -53,7 +53,7 @@ from apps.identity_tenancy.tokens import TenantAwareTokenSerializer
 from apps.opd.models import Token
 from apps.patient_registry.models import Patient
 from apps.platform.models import Notification
-from apps.workers.tasks import task_scan_callback_failures
+from apps.workers.tasks import scan_abdm_callback_failures
 from common.crypto import decrypt, derive_keys
 
 CALLBACK_URL = "/api/v1/abdm-callbacks/"
@@ -905,7 +905,7 @@ def _run_scan(tenant):
     the task synchronously through the real task entry point rather than
     calling the function directly.
     """
-    return task_scan_callback_failures.delay(str(tenant.id))
+    return scan_abdm_callback_failures.delay(str(tenant.id))
 
 
 class TestCallbackFailureBurstAlert:
