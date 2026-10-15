@@ -370,9 +370,14 @@ $env:CELERY_BROKER_URL = "redis://localhost:6379/0"
 > **MAX_UPLOAD_MB (PLT-005):** the size cap, in megabytes, for a single
 > document uploaded to `POST /api/v1/files/`, defaulting to **10** when unset.
 > The API also rejects extensions outside an allow-list (pdf, png, jpg, csv,
-> json) and refuses an upload whose resolved path would escape the tenant's
-> storage directory, so this is the cap on a *documented-type* upload rather
-> than the first check to fire. A non-numeric or non-positive value falls back
+> json), so this is the cap on a *documented-type* upload rather than the
+> first check to fire. A hostile **filename** is not rejected: it is renamed
+> into one safe path component under a server-generated per-upload directory,
+> because refusing it would tell the sender their name was interesting, and the
+> stored path is inside the tenant's own directory either way. The **download**
+> route is the one that refuses a stored path — with a 404 — when it does not
+> resolve under `MEDIA_ROOT`, or when its first component is not the tenant that
+> owns the row. A non-numeric or non-positive value falls back
 > to the default rather than silently disabling the cap. Example:
 >
 > ```powershell

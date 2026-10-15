@@ -80,7 +80,11 @@ class Migration(migrations.Migration):
 #
 # ``platform`` is listed with its *original* table pair and 0001, because this
 # registry describes the 0004 migration each app already has. ``platform.file``
-# is deliberately absent from PLAN and lives in STANDALONE below.
+# is deliberately absent from PLAN and lives in STANDALONE below, as is
+# ``abdm.consent_event``: both tables were created after their app's 0004 was
+# written, so no 0004 can name them. PLAN is what ``__main__`` *writes*, so
+# anything here is a claim about an applied migration - ``verify_plan`` is the
+# check that keeps that claim true.
 PLAN = {
     "identity_tenancy": (
         ["identity.facility", "identity.department", "identity.ward", "identity.bed",
@@ -92,7 +96,7 @@ PLAN = {
         "0003_alter_intakepoint_tenant_id_alter_qrcode_tenant_id",
     ),
     "abdm_gateway": (
-        ["abdm.callback_log", "abdm.consent_event"],
+        ["abdm.callback_log"],
         "0001_initial",
     ),
     "opd": (["opd.token", "opd.encounter"], "0003_alter_opdencounter_tenant_id"),
@@ -162,13 +166,116 @@ class StandaloneEntry:
 #: them, and are registered here anyway: this registry is what a later reader -
 #: or the person adding the next tenant-owned table to the same app - consults
 #: to find out that the table is covered somewhere other than 0004.
+#:
+#: Two shapes are registered, and both satisfy the same contract the check
+#: below asserts (a ``TABLES`` tuple naming the protected tables):
+#:
+#: - a dedicated RLS-only migration, attached after the migration that created
+#:   the table (``platform.file`` in ``0006``);
+#: - RLS attached inside the model migration that creates the table, which is
+#:   what ``abdm.consent_event`` did in ``0005`` - one migration rather than two
+#:   for a table that does not exist yet, and the same pattern as
+#:   ``identity_tenancy`` 0007 and ``opd`` 0005.
 STANDALONE = {
+    "abdm_gateway": StandaloneEntry(
+        filename="0005_abhacallbacklog_link_token_enc_consentevent.py",
+        previous="0004_enable_row_level_security",
+        tables=("abdm.consent_event",),
+    ),
     "platform": StandaloneEntry(
         filename="0006_enable_row_level_security.py",
         previous="0005_platformfile_scheduledjob_delete_featureflag_and_more",
         tables=("platform.file",),
     ),
 }
+
+
+def _ensure_django() -> None:
+    """Configure Django so the checks below can import migration modules.
+
+    Importing one executes ``from common import rls``, which needs the settings
+    module loaded. ``setup()`` reads configuration and builds the app registry;
+    it opens no database connection, so running this script still cannot touch
+    one. An explicit ``DJANGO_SETTINGS_MODULE`` in the environment wins, which
+    is how the pytest suite reaches these functions under
+    ``config.settings.test``.
+
+    The project root goes on ``sys.path`` first because this file is run by
+    path, which puts ``scripts/`` there and not ``backend/`` - so ``config``
+    and ``apps`` would otherwise be unimportable.
+    """
+    import os
+    import sys
+
+    root = str(BACKEND.parent)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.dev")
+    import django
+
+    django.setup()
+
+
+def _migration_module(module: str, filename: str):
+    """Import one migration module by app and filename, or ``None``.
+
+    Migration module names begin with a digit, so they cannot be reached by an
+    ``import`` statement - ``import_module`` is the only way in, and every check
+    below needs it.
+    """
+    try:
+        return importlib.import_module(
+            f"apps.{module}.migrations.{filename[: -len('.py')]}"
+        )
+    except ImportError:
+        return None
+
+
+def verify_plan() -> tuple[str, ...]:
+    """Check every PLAN entry still matches the 0004 migration on disk.
+
+    Returns the problems found, empty when the registry and the applied files
+    agree. This is the check ``__main__`` runs before it writes anything,
+    because the hazard is asymmetric and silent: ``write()`` regenerates all 18
+    files unconditionally, and a PLAN entry that has drifted from its migration
+    is rewritten to name a different set of tables than the one that was
+    applied. Nothing downstream notices - RLS is DDL with no model state, so
+    ``makemigrations --check`` has nothing to compare and an environment that
+    already ran the original file keeps the original policy forever.
+
+    Three things are compared per entry, because each can drift on its own:
+    the frozen table list, the migration the entry depends on, and the rendered
+    file itself. The last one is what answers the question the other two exist
+    to support - "if this script ran right now, would it rewrite an applied
+    migration?" - and it also catches the template drifting away from the files
+    it is supposed to have produced.
+    """
+    problems = []
+    for module, (tables, previous) in PLAN.items():
+        path = BACKEND / module / "migrations" / FILENAME
+        if not path.exists():
+            problems.append(f"{module}/{FILENAME}: missing")
+            continue
+        migration = _migration_module(module, FILENAME)
+        if migration is None:
+            problems.append(f"{module}/{FILENAME}: not importable")
+            continue
+        declared = tuple(migration.TABLES)
+        if declared != tuple(tables):
+            problems.append(
+                f"{module}/{FILENAME}: declares {declared}, PLAN says {tuple(tables)}"
+            )
+        dependencies = tuple(tuple(dep) for dep in migration.Migration.dependencies)
+        if (module, previous) not in dependencies:
+            problems.append(
+                f"{module}/{FILENAME}: depends on {dependencies}, "
+                f"PLAN says {previous}"
+            )
+        if path.read_text(encoding="utf-8") != _render(module, tables, previous):
+            problems.append(
+                f"{module}/{FILENAME}: on disk differs from what this script writes"
+            )
+    return tuple(problems)
 
 
 def verify_standalone() -> tuple[str, ...]:
@@ -185,9 +292,10 @@ def verify_standalone() -> tuple[str, ...]:
         if not path.exists():
             problems.append(f"{module}/{entry.filename}: missing")
             continue
-        migration = importlib.import_module(
-            f"apps.{module}.migrations.{entry.filename[: -len('.py')]}"
-        )
+        migration = _migration_module(module, entry.filename)
+        if migration is None:
+            problems.append(f"{module}/{entry.filename}: not importable")
+            continue
         declared = tuple(migration.TABLES)
         if declared != entry.tables:
             problems.append(
@@ -197,21 +305,52 @@ def verify_standalone() -> tuple[str, ...]:
     return tuple(problems)
 
 
-def write(module: str, tables: list[str], previous: str) -> None:
+def _render(module: str, tables: list[str], previous: str) -> str:
+    """The exact text ``write()`` would put on disk for one PLAN entry.
+
+    Shared with :func:`verify_plan` so that the comparison is against what this
+    script would write *now*, not a second copy of the template that could drift
+    from the first.
+    """
     dependencies = f"(\"{module}\", \"{previous}\"),"
     listing = "\n".join(f'    "{table}",' for table in tables)
     body = TEMPLATE.replace("{tables}", listing).format(dependencies=dependencies)
+    return HEADER + body
+
+
+def write(module: str, tables: list[str], previous: str) -> None:
     path = BACKEND / module / "migrations" / FILENAME
-    path.write_text(HEADER + body, encoding="utf-8")
+    path.write_text(_render(module, tables, previous), encoding="utf-8")
 
 
 if __name__ == "__main__":
+    _ensure_django()
+    # Verified before anything is written, not after: the point of the check is
+    # to stop the rewrite, and a check that runs afterwards has already let it
+    # happen. Every entry is reported by name rather than only as a count,
+    # because "17 of 18 matched" does not say *which* one did not.
+    plan_problems = verify_plan()
+    standalone_problems = verify_standalone()
+    for problem in plan_problems:
+        print(f"  PLAN MISMATCH: {problem}")
+    for problem in standalone_problems:
+        print(f"  STANDALONE MISMATCH: {problem}")
+
+    if plan_problems or standalone_problems:
+        raise SystemExit(
+            "Nothing was written: fix the registry above until it matches the "
+            "applied migrations, then re-run."
+        )
+
     for name, (tables, previous) in PLAN.items():
         write(name, tables, previous)
         print(f"  {name}/{FILENAME} ({len(tables)} table(s))")
-    print(f"{len(PLAN)} RLS migration(s) written")
 
-    problems = verify_standalone()
-    for problem in problems:
-        print(f"  MISSING: {problem}")
-    print(f"{len(STANDALONE)} standalone RLS migration(s) checked")
+    # Every entry was compared byte-for-byte against the file it would rewrite
+    # before a single byte was written, so reaching this line means the run
+    # regenerated 18 files without changing any of them.
+    print(
+        f"{len(PLAN)} RLS migration(s) written, all byte-identical to the "
+        f"versions already applied; {len(STANDALONE)} standalone RLS "
+        f"migration(s) checked"
+    )

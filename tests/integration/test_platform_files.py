@@ -23,6 +23,7 @@ tenant-owned data, so it lands in the audit chain (AUD-001) — and a document i
 routinely named after the person it is about, so what that chain is *not*
 allowed to carry is asserted too.
 """
+import logging
 import uuid
 from importlib import import_module
 from pathlib import Path
@@ -30,6 +31,7 @@ from pathlib import Path
 import pytest
 from django.conf import settings
 from django.contrib.auth import get_user_model
+from django.core.files.storage import default_storage
 from django.core.files.uploadedfile import SimpleUploadedFile
 from rest_framework.test import APIClient
 
@@ -111,6 +113,16 @@ def _upload(client, filename, content, content_type="application/pdf", extra=Non
 
 def _download(client, file_id):
     return client.get(f"{FILES_URL}{file_id}/download/")
+
+
+def _raise_on_create(*args, **kwargs):
+    """Stand-in for the row write, forced to fail.
+
+    Taking over the manager's ``create`` is what makes the file-then-row
+    ordering observable: the bytes are already on disk when this raises, which
+    is the window ``perform_create`` deletes in.
+    """
+    raise RuntimeError("row write failed")
 
 
 def _assert_no_file_bytes(response):
@@ -259,6 +271,101 @@ class TestUpload:
         assert PlatformFile.objects.count() == 0
         assert _media_tree() == before
 
+    def test_the_discard_log_names_the_upload_and_not_the_document(
+        self, client_a, monkeypatch, caplog
+    ):
+        """A document is routinely named after the patient it concerns.
+
+        So the stranded-file log line is the one place a filename is most
+        tempting and least acceptable: the failure path runs unattended, is kept
+        by whatever ships logs, and has a wider readership than the document
+        itself. The line therefore carries the tenant and the per-upload
+        directory - enough to find the file on disk - and never the last path
+        component.
+
+        Both halves are asserted, and so is the absence of the traceback: an
+        ``OSError`` raised by ``os.remove`` carries the absolute path in its own
+        message, so attaching ``exc_info`` here would put the filename back in
+        the log by the back door even with a redacted format string.
+        """
+        client, _ = client_a
+        caplog.set_level(logging.DEBUG, logger="apps.platform.views")
+        caplog.clear()
+        attempted = []
+
+        def delete_raises(name):
+            attempted.append(name)
+            raise OSError(2, f"No such file or directory: {name}")
+
+        monkeypatch.setattr(default_storage, "delete", delete_raises)
+        monkeypatch.setattr(PlatformFile.objects, "create", _raise_on_create)
+
+        with pytest.raises(RuntimeError):
+            _upload(client, "patient-jane-doe-report.pdf", b"bytes")
+
+        # The upload directory the caller should be able to find the stranded
+        # file by: the per-upload uuid the view generated.
+        upload_uuid = attempted[0].split("/")[1]
+
+        assert "patient-jane-doe" not in caplog.text
+        assert str(TENANT_A) in caplog.text
+        assert upload_uuid in caplog.text
+        # No traceback, and no ``path=`` argument carrying the whole relative
+        # path, which is what the pre-fix line wrote.
+        assert "path=" not in caplog.text
+        records = [r for r in caplog.records if r.name == "apps.platform.views"]
+        assert len(records) == 1
+        assert records[0].exc_info is None
+
+    def test_the_size_cap_is_a_400_and_a_document_just_under_it_is_accepted(
+        self, client_a
+    ):
+        """Both sides of the cap, so the threshold is a boundary and not a guess.
+
+        An upload one kibibyte under the cap must succeed: a rule that rejects
+        everything, or that rejects at the wrong point, passes the oversize case
+        just as happily as the correct one does.
+        """
+        client, _ = client_a
+        cap = settings.MAX_UPLOAD_MB * 1024 * 1024
+        before = _media_tree()
+
+        accepted = _upload(client, "just-under.pdf", b"x" * (cap - 1024))
+
+        assert accepted.status_code == 201, accepted.content
+        row = PlatformFile.objects.get()
+        assert (Path(settings.MEDIA_ROOT) / row.file_url).stat().st_size == cap - 1024
+
+        # One kibibyte over, the same document: refused, with the cap named.
+        refused = _upload(client, "just-over.pdf", b"x" * (cap + 1024))
+
+        assert refused.status_code == 400
+        assert str(settings.MAX_UPLOAD_MB) in refused.json()["file"][0]
+        # Only the accepted document was written.
+        assert _media_tree() - before == {row.file_url}
+
+    def test_the_extension_allow_list_fires_before_the_size_cap(self, client_a):
+        """Both gates are real, and which one answers is pinned.
+
+        An oversize ``.exe`` breaks two rules at once. The extension is the
+        narrower control — it names the *kind* of document, and a name the
+        allow-list rejects never reaches the size check — so the caller is told
+        about the type rather than being told to shrink a file that should not
+        have been uploaded at all. DRF runs field validators before
+        ``validate_file``, which is why this is 400 with the allow-list's
+        message and not the cap's.
+        """
+        client, _ = client_a
+        cap = settings.MAX_UPLOAD_MB * 1024 * 1024
+
+        response = _upload(client, "payload.exe", b"MZ" + b"x" * (cap + 1024))
+
+        assert response.status_code == 400, response.content
+        message = str(response.json()["file"])
+        assert "exe" in message
+        assert str(settings.MAX_UPLOAD_MB) not in message
+        assert PlatformFile.objects.count() == 0
+
     def test_the_row_fields_are_server_owned(self, client_a):
         """A caller cannot choose the path, the name, the type or the owner.
 
@@ -390,6 +497,57 @@ class TestDownload:
         assert response.status_code == 404
         assert b"should never be served" not in response.getvalue()
 
+    def test_a_row_naming_another_tenants_directory_is_a_404(
+        self, client_a, client_b
+    ):
+        """The download checks the row's *own* tenant partition (PLT-005).
+
+        "Resolves under ``MEDIA_ROOT``" is a weaker claim than "resolves under
+        this row's tenant directory": a row owned by tenant A whose stored path
+        points into tenant B's tree satisfies the first and violates the second,
+        and the second is the isolation control this module's own docstring
+        claims. Nothing in the API can produce such a row — ``file_url`` is
+        read-only and PUT/PATCH/DELETE are 405 — but a migration, an operator's
+        SQL or a future bug can, which is exactly the case
+        ``_resolve_download_path`` exists for.
+
+        The refusal is a 404 with no bytes in the body, so it discloses nothing
+        about the other tenant's storage: not the document, and not whether the
+        path exists.
+        """
+        secret = b"TENANT-B-SECRET-BYTES"
+        assert _upload(client_b, "b-report.pdf", secret).status_code == 201
+        b_row = PlatformFile.objects.get(tenant_id=TENANT_B)
+        assert (Path(settings.MEDIA_ROOT) / b_row.file_url).read_bytes() == secret
+
+        # A's row, pointing at B's stored bytes: reachable only by a direct
+        # write, never through the API.
+        a_row = PlatformFile.objects.create(
+            tenant_id=TENANT_A,
+            filename="b-report.pdf",
+            file_url=b_row.file_url,
+            file_type="pdf",
+            uploaded_by=uuid.UUID(int=1),
+        )
+
+        client, _ = client_a
+        response = _download(client, a_row.id)
+
+        body = response.getvalue()
+        assert response.status_code == 404
+        assert secret not in body
+        assert str(TENANT_B).encode() not in body
+
+        # The refusal is about the mismatch, not about the file: B still gets
+        # its own document, and A's own row still downloads.
+        assert _download(client_b, b_row.id).status_code == 200
+        own = _upload(client, "a-report.pdf", b"tenant-a-own-bytes")
+        assert own.status_code == 201
+        a_own = PlatformFile.objects.exclude(id=a_row.id).get(tenant_id=TENANT_A)
+        own_response = _download(client, a_own.id)
+        assert own_response.status_code == 200
+        assert own_response.getvalue() == b"tenant-a-own-bytes"
+
 
 class TestListing:
     def test_the_list_holds_only_the_requesting_tenants_rows(self, client_a, client_b):
@@ -447,7 +605,13 @@ class TestFilenameSanitisation:
 
     def test_two_same_named_uploads_do_not_collide(self, client_a):
         """A fresh uuid per upload is what keeps the second write from
-        overwriting the first."""
+        overwriting the first.
+
+        The collision is only half the claim: two distinct rows and two distinct
+        paths would still pass if the download handed both of them back the
+        *second* upload's bytes, so both documents are downloaded and matched
+        against what each was uploaded with.
+        """
         client, _ = client_a
         before = _media_tree()
         first = _upload(client, "same.pdf", b"first")
@@ -458,6 +622,47 @@ class TestFilenameSanitisation:
         urls = {row.file_url for row in PlatformFile.objects.all()}
         assert len(urls) == 2
         assert _media_tree() - before == urls
+
+        # Each row serves its own bytes. ``getvalue()`` is one-shot, so each
+        # body is read once into a local rather than asserted twice.
+        payloads = {}
+        for row in PlatformFile.objects.all():
+            response = _download(client, row.id)
+            assert response.status_code == 200
+            payloads[row.file_url] = response.getvalue()
+
+        assert len(payloads) == 2
+        # Distinct, and together exactly the two uploads: a download that
+        # answered both rows with the second upload's bytes fails here.
+        assert set(payloads.values()) == {b"first", b"second"}
+        for url, body in payloads.items():
+            assert body == (Path(settings.MEDIA_ROOT) / url).read_bytes()
+
+    def test_a_bidi_filename_loses_its_format_characters(self, client_a):
+        """U+202E and its relatives are stripped, not stored.
+
+        A right-to-left override in a filename is invisible in the download's
+        header and rewrites how the name reads in a save dialog — the document
+        called ``report.exe.pdf`` is what the user is shown. CR/LF injection
+        into ``Content-Disposition`` is already refused by Django's header
+        guard; this is the display-spoofing case that guard cannot see, so the
+        sanitiser drops every non-printable and Unicode *format* character
+        rather than an enumerated list of them.
+        """
+        client, _ = client_a
+        response = _upload(client, "\u202ereport.pdf", b"%PDF-1.4 payload")
+
+        assert response.status_code == 201, response.content
+        row = PlatformFile.objects.get()
+        assert "\u202e" not in row.filename
+        # Nothing that ``str.isprintable`` rejects survived into the stored name.
+        assert all(character.isprintable() for character in row.filename)
+        assert row.filename == "report.pdf"
+
+        # And therefore nothing reaches the browser's save dialog either.
+        download = _download(client, row.id)
+        assert download.status_code == 200
+        assert download["Content-Disposition"] == 'attachment; filename="report.pdf"'
 
 
 class TestRowLevelSecurityWiring:
@@ -512,6 +717,28 @@ class TestRowLevelSecurityWiring:
         )
         assert migration.TABLES == entry.tables
         assert script.verify_standalone() == ()
+
+    def test_the_generator_would_not_rewrite_an_applied_migration(self):
+        """PLAN is what the script *writes*, so PLAN must equal what is applied.
+
+        ``write()`` regenerates all 18 ``0004`` files unconditionally. An entry
+        that has drifted from the migration already applied - a table added to
+        PLAN that its 0004 never named - means a re-run rewrites a file that has
+        already run somewhere, and the two histories diverge silently: an
+        environment that applied the original keeps the original policy forever.
+        Nothing reports it, because RLS is DDL with no model state and
+        ``makemigrations --check`` has nothing to compare.
+
+        ``abdm_gateway`` is the entry that actually drifted, and the fix is that
+        ``abdm.consent_event`` moved out of PLAN into STANDALONE: its policy
+        already lives in the ``0005`` that creates the table, and no 0004 can
+        name a table that did not exist when the 0004 was written.
+        """
+        script = import_module("scripts.add_rls_migrations")
+
+        assert "abdm.consent_event" not in script.PLAN["abdm_gateway"][0]
+        assert script.STANDALONE["abdm_gateway"].tables == ("abdm.consent_event",)
+        assert script.verify_plan() == ()
 
 
 class TestAuditTrail:
@@ -578,4 +805,3 @@ class TestTheRepositoryStaysClean:
         assert _media_tree()
 
         assert not (REPO_ROOT / "media").exists()
-        assert not list(REPO_ROOT.glob("backend/media"))

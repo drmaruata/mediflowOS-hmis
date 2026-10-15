@@ -36,9 +36,10 @@ class PlatformFile(models.Model):
     the ORM's ``create()`` does not call, so a value the view derives after
     validation is written verbatim. The stored path fits the column's
     200 characters by construction - a tenant uuid (36), a separator, an upload
-    uuid (36), a separator and at most :data:`MAX_FILENAME_LENGTH` characters
-    of sanitised filename (80) - see ``apps.platform.views`` for the cap and
-    the arithmetic.
+    uuid (36), a separator, and a sanitised filename of at most 81 characters
+    (the :data:`MAX_FILENAME_LENGTH` budget of 80 plus the dot and extension the
+    truncation preserves) - see ``apps.platform.views`` for the cap and the
+    arithmetic, which comes to 155 at worst.
 
     ``uploaded_by`` is a ``UUIDField`` holding the coerced pk of the
     authenticated principal, not a foreign key: the application users live in

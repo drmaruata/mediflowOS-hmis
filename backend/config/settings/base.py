@@ -130,6 +130,13 @@ MEDIA_ROOT = os.getenv("MEDIA_ROOT", str(BASE_DIR / "media"))
 # at which Django stops buffering an upload in memory and streams it to a
 # temporary file, so its 2.5 MB default is the behaviour wanted here - a
 # 10 MB document is spooled to disk, not held in RAM.
+#
+# Blast radius, stated because it is not upload-scoped: this is a project-wide
+# request-body ceiling, so raising it means every endpoint - not only the
+# uploads route - tolerates an 11 MB body before Django refuses it. The cost is
+# request-handling memory on every route; the endpoint-level caps below are
+# still what refuse an oversize document, and no other endpoint accepts a body
+# this large, so the wider ceiling is headroom rather than a new limit.
 DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_MB * 1024 * 1024 + 1024 * 1024
 
 INSTALLED_APPS = [

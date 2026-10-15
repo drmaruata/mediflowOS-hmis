@@ -6,7 +6,6 @@ from pathlib import Path
 
 from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
-from django.core.exceptions import SuspiciousFileOperation
 from django.core.files.storage import default_storage
 from django.http import FileResponse
 from django.utils import timezone
@@ -22,16 +21,24 @@ from .serializers import NotificationSerializer, PlatformFileSerializer, Schedul
 
 logger = logging.getLogger(__name__)
 
-#: Longest sanitised original filename the platform stores (PLT-005).
+#: Budget for the sanitised filename the platform stores (PLT-005).
 #:
 #: The cap exists because ``PlatformFile.file_url`` is a ``URLField`` whose
 #: column is 200 characters, and the stored path is
-#: ``<tenant_id>/<upload uuid>/<filename>``. A tenant id is 36 characters, an
-#: upload uuid is 36, and they take two separators, so the filename is capped at
-#: 80 to leave room - if it were not, the *row* would fail to save after the
-#: file had already been written, which is the orphaned-file case this comment
-#: is here to prevent. The cap is applied after sanitising, not before, so a
-#: traversal payload cannot be rebuilt out of the bytes it leaves behind.
+#: ``<tenant_id>/<upload uuid>/<filename>``. A tenant id is 36 characters and an
+#: upload uuid is 36, and the two take a separator each, so 73 characters of the
+#: column are spoken for before the name starts.
+#:
+#: 80 is a *budget*, and the name that comes out of it is at most 81 characters:
+#: the truncation below caps the stem at ``80 - len(extension)`` so the dot and
+#: the extension survive, and they are then added on top. The longest stored
+#: path is therefore 36 + 1 + 36 + 1 + 81 = 155, not 154 - measured, and 45
+#: characters inside the column. If the cap were not applied, the *row* would
+#: fail to save after the file had already been written, which is the
+#: orphaned-file case this comment is here to prevent.
+#:
+#: The cap is applied after sanitising, not before, so a traversal payload
+#: cannot be rebuilt out of the bytes it leaves behind.
 MAX_FILENAME_LENGTH = 80
 
 #: Characters that are never allowed in a stored filename (PLT-005).
@@ -42,6 +49,10 @@ MAX_FILENAME_LENGTH = 80
 #: stripped because they are how a name is made to *look* harmless to a
 #: validator while still resolving differently, and because they make a row
 #: impossible to display. ``..`` is removed as a literal, for the same reason.
+#:
+#: This is an enumeration and it is not the whole answer: Unicode *format*
+#: characters such as the bidi override U+202E cannot be listed, which is why
+#: :func:`_sanitise_filename` follows it with a ``str.isprintable`` pass.
 _FORBIDDEN_FILENAME_CHARS = str.maketrans("", "", "/\\\x00\r\n\t")
 
 
@@ -96,6 +107,16 @@ def _sanitise_filename(raw_name: str) -> str:
     # is left of ``..`` to the next component and leave ``...`` behind, which
     # still normalises away from its own directory on some filesystems.
     candidate = raw_name.replace("..", "").translate(_FORBIDDEN_FILENAME_CHARS)
+    # Then everything the Unicode categories call "Other" or "Separator":
+    # ``isprintable`` rejects control characters, unassigned code points and -
+    # the reason this pass exists - *format* characters. A bidi override is
+    # invisible in the download's ``Content-Disposition`` and reorders how the
+    # name reads in a save dialog, so a document called ``report.exe.pdf`` is
+    # what the user is shown. They cannot be enumerated the way ``\r\n`` can,
+    # and Django's own multipart parser runs this same filter - repeating it
+    # here means this function is the control on its own account rather than
+    # one that happens to sit behind another one.
+    candidate = "".join(character for character in candidate if character.isprintable())
     # Strip a trailing dot or space, which Windows treats as part of the name
     # and other systems do not.
     candidate = candidate.strip().rstrip(".")
@@ -175,25 +196,63 @@ def _store_upload(relative_path: str, uploaded) -> str:
     return default_storage.save(relative_path, uploaded)
 
 
-def _discard_upload(relative_path: str) -> None:
+def _upload_directory_id(relative_path: str) -> str:
+    """The per-upload uuid directory of a stored path, or ``"-"``.
+
+    Derived from the path rather than passed alongside it because the name
+    storage reports back may not be the one that was requested, and this is the
+    directory the *stored* file actually landed in - which is the one an
+    operator has to look for.
+
+    ``"-"`` rather than the whole path when the shape is not the expected one:
+    the fallback exists so that an unexpected path cannot be leaked through the
+    log line that was added to keep it out of the logs.
+    """
+    parts = relative_path.split("/")
+    return parts[1] if len(parts) > 2 else "-"
+
+
+def _discard_upload(relative_path: str, tenant_id) -> None:
     """Delete a stored file whose row failed to land.
 
     The write is ordered file-then-row, so a failure between the two leaves a
     document nobody owns: readable by no view, counted by no quota, and
     invisible to any cleanup that works from the table. Deleting it here keeps
     storage and rows agreeing.
+
+    The failure is logged by tenant and upload directory and never by path. A
+    document is routinely named after the patient it concerns, so the last
+    component of a storage path is PHI-adjacent, and this line is the one place
+    it would land: it runs unattended, on the failure path, in whatever log
+    aggregation ships next, which has a wider readership than the document
+    itself. The tenant and the uuid are what an operator needs to find the file
+    on disk, so the line stays actionable without naming anything.
+
+    ``exc_info`` is deliberately *not* attached, which is why this is
+    ``logger.error`` and not ``logger.exception``: the ``OSError`` that
+    ``os.remove`` raises carries the absolute path in its own message, so the
+    traceback would restore the filename the format string just removed. The
+    exception's class and ``errno`` are logged instead, which is what
+    distinguishes a permission failure from a missing file.
     """
     try:
         default_storage.delete(relative_path)
-    except OSError:
+    except OSError as exc:
         # Logged, not raised: the caller is already unwinding from the failure
         # that stranded the file, and a second exception would replace the
         # response with a 500 that hides the original cause.
-        logger.exception("could not delete stranded upload path=%s", relative_path)
+        logger.error(
+            "could not delete stranded upload tenant_id=%s upload_uuid=%s "
+            "error=%s errno=%s",
+            tenant_id,
+            _upload_directory_id(relative_path),
+            type(exc).__name__,
+            exc.errno,
+        )
 
 
-def _resolve_download_path(relative_path: str) -> Path:
-    """Resolve a row's stored path, refusing anything outside ``MEDIA_ROOT``.
+def _resolve_download_path(platform_file: PlatformFile) -> Path:
+    """Resolve a row's stored path, refusing anything outside its own tenant.
 
     Defence in depth, and labelled as such: the upload path cannot produce a
     traversal because the filename is sanitised and the uuid directory is
@@ -201,7 +260,30 @@ def _resolve_download_path(relative_path: str) -> Path:
     by some other route - a data migration, an operator's SQL, a future bug -
     and would otherwise be served. Returning 404 rather than 400 keeps the
     refusal indistinguishable from the row not existing.
+
+    The row is the argument rather than its ``file_url`` because the check has
+    two halves and only the row carries both of them. Containment under
+    ``MEDIA_ROOT`` proves the path is somewhere the server chose to store
+    files; it says nothing about *whose* directory that is. A row owned by one
+    tenant whose stored path points into another tenant's tree - written the
+    same way, by a route the API does not expose - passes containment and
+    streams the wrong hospital's document, which is the one failure this
+    function is named for. The tenant id is therefore compared against the
+    stored path's own first component, and the row is what makes that
+    comparison possible.
+
+    A bare ``file_url`` string is deliberately not accepted as the argument:
+    the tenant has to come from the row, because a tenant parsed out of the
+    path by the caller and compared against the same path is a check that
+    cannot fail.
     """
+    relative_path = platform_file.file_url or ""
+    if relative_path.split("/", 1)[0] != str(platform_file.tenant_id):
+        # Not an OSError/ValueError case, so it is raised rather than caught
+        # below: it is a refusal, not a resolution failure, and it must not be
+        # reported as one. 404 for the same reason - a mismatched row must be
+        # indistinguishable from a row that does not exist.
+        raise NotFound("The requested file is not available.")
     media_root = Path(default_storage.location).resolve()
     try:
         resolved = (media_root / relative_path).resolve()
@@ -209,7 +291,7 @@ def _resolve_download_path(relative_path: str) -> Path:
         # a string prefix: ``/srv/media-evil`` shares a prefix with
         # ``/srv/media`` and is not inside it.
         resolved.relative_to(media_root)
-    except (OSError, ValueError, SuspiciousFileOperation) as exc:
+    except (OSError, ValueError) as exc:
         raise NotFound("The requested file is not available.") from exc
     if not resolved.is_file():
         raise NotFound("The requested file is not available.")
@@ -331,7 +413,7 @@ class PlatformFileViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
             # The name the storage reported, not the one that was requested:
             # deleting the requested name would leave the renamed file behind,
             # which is the orphan this is here to prevent.
-            _discard_upload(stored_path)
+            _discard_upload(stored_path, tenant_id)
             raise
 
         # Write an audit trail event (AUD-001), the same way the mixin does for
@@ -353,11 +435,12 @@ class PlatformFileViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         helper is documented as unsuitable for production and answers from the
         filesystem with no permission check whatsoever, so it would hand any
         document to any caller who guessed its path. Serving through the view
-        is what puts authentication, the tenant filter and the path containment
-        check in front of the bytes.
+        is what puts authentication, the tenant filter and both path checks -
+        the row's own tenant partition, then containment under ``MEDIA_ROOT`` -
+        in front of the bytes.
         """
         platform_file = self.get_object()
-        path = _resolve_download_path(platform_file.file_url)
+        path = _resolve_download_path(platform_file)
 
         # ``as_attachment`` sets Content-Disposition with the *original*
         # filename, so the response names the document the uploader chose
