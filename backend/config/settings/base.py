@@ -94,6 +94,44 @@ AUDIT_RETENTION_DAYS = 365
 if _audit_retention_days.isdigit() and int(_audit_retention_days) > 0:
     AUDIT_RETENTION_DAYS = int(_audit_retention_days)
 
+# PLT-005: file storage for documents and evidence, with access control.
+#
+# MAX_UPLOAD_MB caps the decoded size of a single upload. The clinical
+# artefacts the requirement names - scanned reports, lab result CSVs, the
+# occasional photograph - are documents, not media streams, so 10 MB is a
+# working default rather than a tuned one. A non-numeric or non-positive value
+# falls back to the default instead of disabling the cap, mirroring the
+# ABDM_MAX_SKEW_SECONDS guard above: a mistyped setting must not silently
+# become "no limit", and must not become zero either, which would refuse
+# every upload including an empty one.
+_max_upload_mb = os.getenv("MAX_UPLOAD_MB", "")
+MAX_UPLOAD_MB = 10
+if _max_upload_mb.isdigit() and int(_max_upload_mb) > 0:
+    MAX_UPLOAD_MB = int(_max_upload_mb)
+
+# MEDIA_ROOT is where the uploaded bytes live. It is an absolute path so that a
+# change of working directory cannot move the storage out from under the rows
+# that reference it - the download view resolves ``file_url`` against it, and a
+# relative value would make the same row point somewhere else depending on who
+# started the process. The default keeps uploads inside the backend directory;
+# a deployment is expected to mount a volume and override it.
+MEDIA_ROOT = os.getenv("MEDIA_ROOT", str(BASE_DIR / "media"))
+
+# Django caps a request body at 2.5 MB by default (DATA_UPLOAD_MAX_MEMORY_SIZE)
+# and raises SuspiciousOperation - surfaced as a 400 - when it is exceeded.
+# That ceiling sits *below* the legal upload size above, so without this a
+# compliant 10 MB document would be refused before the view, the serializer or
+# the allow-list ever ran, and the refusal would have nothing to do with any
+# rule the caller can see. It is raised to the cap plus a megabyte of headroom
+# for the multipart envelope (field names, boundaries, headers), which the
+# file bytes themselves do not count against but the surrounding request does.
+#
+# FILE_UPLOAD_MAX_MEMORY_SIZE is deliberately left alone: it is the threshold
+# at which Django stops buffering an upload in memory and streams it to a
+# temporary file, so its 2.5 MB default is the behaviour wanted here - a
+# 10 MB document is spooled to disk, not held in RAM.
+DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_MB * 1024 * 1024 + 1024 * 1024
+
 INSTALLED_APPS = [
     "django.contrib.admin",
     "django.contrib.auth",

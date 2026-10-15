@@ -366,6 +366,29 @@ $env:CELERY_BROKER_URL = "redis://localhost:6379/0"
 > ```powershell
 > $env:AUDIT_RETENTION_DAYS = "2555"  # seven years, a common statutory floor
 > ```
+>
+> **MAX_UPLOAD_MB (PLT-005):** the size cap, in megabytes, for a single
+> document uploaded to `POST /api/v1/files/`, defaulting to **10** when unset.
+> The API also rejects extensions outside an allow-list (pdf, png, jpg, csv,
+> json) and refuses an upload whose resolved path would escape the tenant's
+> storage directory, so this is the cap on a *documented-type* upload rather
+> than the first check to fire. A non-numeric or non-positive value falls back
+> to the default rather than silently disabling the cap. Example:
+>
+> ```powershell
+> $env:MAX_UPLOAD_MB = "25"  # a facility scanning large multi-page reports
+> ```
+>
+> **MEDIA_ROOT (PLT-005):** the absolute filesystem directory that uploaded
+> documents live in, defaulting to `<repo>/backend/media`. Each document is
+> stored under `<tenant_id>/<upload-uuid>/<sanitised filename>` there, so the
+> tenant partition is part of the path and two same-named uploads from one
+> hospital never collide. `config.settings.test` overrides this to a per-run
+> temporary directory so the suite never writes into the working tree. Example:
+>
+> ```powershell
+> $env:MEDIA_ROOT = "D:\mediflow\uploads"  # a mounted volume in production
+> ```
 
 > The project defaults to PostgreSQL on `localhost` and Redis at `redis://redis:6379/0` in many settings. If you are using local services instead of containers, update these values accordingly.
 

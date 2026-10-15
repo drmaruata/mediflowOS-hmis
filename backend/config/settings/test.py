@@ -1,5 +1,8 @@
 """Settings for fast, isolated backend tests."""
+import atexit
 import os
+import shutil
+import tempfile
 
 # REG-008: the test passphrase is a *fixed literal* so the crypto-coupling
 # integration tests (tests/integration/test_patient_encryption.py derives its
@@ -56,3 +59,26 @@ CACHES = {"default": {"BACKEND": "django.core.cache.backends.locmem.LocMemCache"
 CHANNEL_LAYERS = {"default": {"BACKEND": "channels.layers.InMemoryChannelLayer"}}
 REST_FRAMEWORK = {**REST_FRAMEWORK, "DEFAULT_THROTTLE_CLASSES": []}
 CELERY_TASK_ALWAYS_EAGER = True
+
+# PLT-005: uploads go to a scratch directory *outside* the repository tree.
+# base.py defaults MEDIA_ROOT to backend/media, which is fine for a real run
+# but would leave every test-written document in the working tree - a git
+# status that is never clean, and a document staged for commit by accident.
+# A unique directory per run also keeps two concurrent pytest processes from
+# fighting over the same paths, which matters because the path shape is
+# asserted to the byte in tests/integration/test_platform_files.py.
+#
+# The cap is 1 MB so the oversize test writes just over a megabyte instead of
+# ten: the rule under test is "over the cap is refused", not "ten megabytes is
+# slow". The suite reads settings.MAX_UPLOAD_MB rather than hardcoding either
+# value, so raising it costs nothing.
+MAX_UPLOAD_MB = 1
+# Recomputed rather than inherited: base.py derived this from the *base* cap of
+# 10 MB, so the two would silently disagree once the cap above is lowered, and
+# an upload between 1 MB and 11 MB would be refused by Django before the view
+# ran - a 400 with a message that names no cap of this project's own. The
+# relationship the oversize test depends on is that the ceiling stays above the
+# cap plus the multipart envelope.
+DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_MB * 1024 * 1024 + 1024 * 1024
+MEDIA_ROOT = tempfile.mkdtemp(prefix="mediflow-test-media-")
+atexit.register(shutil.rmtree, MEDIA_ROOT, ignore_errors=True)
