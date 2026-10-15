@@ -2,7 +2,7 @@
 from django.conf import settings
 from django.core.validators import FileExtensionValidator
 from rest_framework import serializers
-from .models import Notification, PlatformFile, ScheduledJob
+from .models import FeatureFlag, Notification, PlatformFile, ScheduledJob
 
 #: Extensions the platform accepts (PLT-005).
 #:
@@ -37,6 +37,33 @@ class NotificationSerializer(serializers.ModelSerializer):
             "persisted",
             "delivered",
         ]
+
+
+class FeatureFlagSerializer(serializers.ModelSerializer):
+    """One feature switch, as the tenant's configuration API sees it (PLT-006).
+
+    Only ``enabled`` and ``description`` are writable, and both are the caller's
+    to choose. The other three are read-only for specific reasons:
+
+    ``tenant_id``
+        Server-owned. ``TenantScopedQuerysetMixin.perform_create`` stamps it from
+        the resolved request; a writable one would be a required input that every
+        caller answers from a header it chose (see the mixin's own note).
+    ``key``
+        Taken from the URL - the resource is *addressed* by its key. Echoing a
+        second copy in the body would add one more spelling of the same name to
+        keep in step, and the one that could disagree with the row's identity.
+    ``id``
+        Server-generated, and of no use to a caller that addresses flags by key.
+
+    Listed rather than ``"__all__"``: a column added to the model later must not
+    become a client-writable field here by default (AGENTS.md serializer rule).
+    """
+
+    class Meta:
+        model = FeatureFlag
+        fields = ["id", "tenant_id", "key", "enabled", "description"]
+        read_only_fields = ["id", "tenant_id", "key"]
 
 
 class PlatformFileSerializer(serializers.ModelSerializer):

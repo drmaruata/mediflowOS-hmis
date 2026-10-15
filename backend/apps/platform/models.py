@@ -20,6 +20,52 @@ class Notification(models.Model):
         indexes = [models.Index(fields=["tenant_id", "user_id", "read_at"])]
 
 
+class FeatureFlag(models.Model):
+    """One per-tenant feature switch (PLT-006).
+
+    Re-added by migration ``0007`` after ``0005`` dropped the model with
+    ``DeleteModel``. The re-add is a new ``CreateModel``, never a restoration of
+    the deleted table's definition: a migration must apply the same DDL it
+    applied when it was written, and the field set below is the model's *current*
+    state, not the one ``0001`` happened to create.
+
+    The row level security policy that ``0004`` attached to this table died with
+    it - PostgreSQL drops a table's policies when the table is dropped - so the
+    same migration re-enables it. Without that, the table would be created with
+    no policy while the registry still recorded ``0004`` as covering it: the one
+    failure nothing downstream reports, because RLS is DDL with no model state.
+
+    ``key`` is the feature's name in code and ``enabled`` its state for this
+    tenant alone. The pair is unique *per tenant*, not globally: two hospitals
+    rolling the same feature out at different times is the ordinary case, and a
+    global uniqueness constraint would make the second one a conflict.
+
+    ``enabled`` defaults to ``False`` and the read helper fails closed, so a
+    feature nobody configured is off rather than on.
+
+    ``description`` is free text an administrator writes for other humans. It is
+    ``NOT NULL`` with an empty-string default rather than nullable: "no
+    description" would otherwise have two spellings that every reader has to
+    handle, and ``NULL`` is not a state anyone sets deliberately.
+    """
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    tenant_id = models.UUIDField(db_index=True)
+    key = models.CharField(max_length=64)
+    enabled = models.BooleanField(default=False)
+    description = models.CharField(max_length=255, blank=True, default="")
+
+    class Meta:
+        db_table = "platform.feature_flag"
+        unique_together = [["tenant_id", "key"]]
+        # The unique index above leads with tenant_id and already covers both
+        # lookups this table has - the tenant-scoped list and the (tenant, key)
+        # probe - so this declaration repeats the intent explicitly rather than
+        # relying on what a unique index happens to cover. SetupProgress and
+        # ReferenceData declare theirs the same way.
+        indexes = [models.Index(fields=["tenant_id", "key"])]
+
+
 class PlatformFile(models.Model):
     """A stored document (PLT-005).
 

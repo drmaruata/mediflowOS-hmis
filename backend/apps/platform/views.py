@@ -1,6 +1,7 @@
 """Platform views."""
 import logging
 import os
+import re
 import uuid as uuid_lib
 from pathlib import Path
 
@@ -11,15 +12,31 @@ from django.http import FileResponse
 from django.utils import timezone
 from rest_framework import viewsets
 from rest_framework.decorators import action
-from rest_framework.exceptions import NotFound, PermissionDenied
+from rest_framework.exceptions import NotFound, PermissionDenied, ValidationError
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
 from common.tenant import TenantScopedQuerysetMixin
-from .models import Notification, PlatformFile, ScheduledJob
-from .serializers import NotificationSerializer, PlatformFileSerializer, ScheduledJobSerializer
+from .models import FeatureFlag, Notification, PlatformFile, ScheduledJob
+from .permissions import PrivilegedWriteMixin
+from .serializers import (
+    FeatureFlagSerializer,
+    NotificationSerializer,
+    PlatformFileSerializer,
+    ScheduledJobSerializer,
+)
 
 logger = logging.getLogger(__name__)
+
+#: The shape a feature flag key may take (PLT-006).
+#:
+#: Enforced on the URL segment, which this endpoint stores: the key becomes part
+#: of a feature-gate name in code as well as part of a URL, so it is held to what
+#: both can carry. Matched with ``fullmatch``, so it is anchored at both ends, and
+#: restricted to one case, so the key that arrives in a URL, the key that reaches a
+#: ``flag_enabled(...)`` call and the key in the database are one string rather
+#: than three spellings of it.
+FLAG_KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
 
 #: Budget for the sanitised filename the platform stores (PLT-005).
 #:
@@ -348,6 +365,126 @@ class NotificationViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         notification.read_at = timezone.now()
         notification.save(update_fields=["read_at"])
         return Response(NotificationSerializer(notification).data)
+
+
+class FeatureFlagViewSet(
+    PrivilegedWriteMixin, TenantScopedQuerysetMixin, viewsets.ModelViewSet
+):
+    """Per-tenant feature switches (PLT-006).
+
+    ``GET /api/v1/feature-flags/`` lists the tenant's flags to any authenticated
+    member of it. ``PUT`` (or ``PATCH``) on
+    ``/api/v1/feature-flags/{key}/`` sets one, and that is the whole write
+    surface: the key is the URL segment (``lookup_field``), the tenant is the
+    request's, and the row is created when it does not exist yet.
+
+    **PUT upserts, and that is why POST is not routed.** A feature flag has to be
+    settable before it exists - there is no row to PUT on the first time a
+    hospital decides to turn something on - and this is the only route that
+    creates one. It answers 200 whether or not the row was there, so repeating
+    the request is idempotent in status as well as in effect, which is what PUT
+    promises and what a 201-then-200 sequence would not.
+
+    DELETE is not routed either: removing the row would leave the feature reading
+    as off by absence while erasing the record that anyone decided it, with no
+    event in the audit trail to say so. Switching a feature off is a PUT of
+    ``enabled: false``.
+
+    ``PATCH`` is the same call with a partial body - it upserts on exactly the
+    same terms and changes only the fields it names - because a flag's whole
+    state is two short fields and a caller fixing one of them should not have to
+    resend the other.
+
+    Writes require a privileged membership in the request's tenant
+    (``IsPrivilegedTenantMember``); reads do not, because the client needs the
+    configuration to render the right screens whether or not it may change it.
+    """
+
+    serializer_class = FeatureFlagSerializer
+    #: The URL segment is the flag's key, not its primary key. Tenant scoping is
+    #: unchanged and still comes from the mixin's queryset - which is what makes a
+    #: cross-tenant key answer 404 rather than naming a row that exists.
+    lookup_field = "key"
+    #: Ordered so the list is deterministic; see PlatformFileViewSet for why an
+    #: unordered queryset is more than untidy under pagination.
+    queryset = FeatureFlag.objects.order_by("key")
+    http_method_names = ["get", "put", "patch", "head", "options"]
+
+    def update(self, request, *args, **kwargs):
+        """Set the named flag, creating it for this tenant if it is new.
+
+        DRF's ``UpdateModelMixin.update`` resolves the object with
+        ``get_object()`` and 404s when there is none, which is right for every
+        other viewset here and wrong for this one: the flag a hospital is turning
+        on does not exist yet. So the row is looked up tenant-scoped first and
+        the create branch runs the *same* validation and the *same*
+        ``perform_create`` the mixin would have run - which is what keeps the
+        tenant stamp and the audit event (AUD-001) on the create path identical
+        to every other tenant-owned write in this project.
+
+        A lookup that dropped the tenant filter would overwrite another
+        hospital's row here and still answer 200, which is why it goes through
+        ``self.get_queryset()`` - the mixin's tenant-scoped queryset - rather than
+        the model manager.
+        """
+        partial = kwargs.pop("partial", False)
+        key = self._validated_key(request)
+        instance = self.get_queryset().filter(key=key).first()
+
+        if instance is None:
+            serializer = self.get_serializer(data=request.data, partial=partial)
+            serializer.is_valid(raise_exception=True)
+            self.perform_create(serializer)
+            return Response(serializer.data)
+
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
+
+    def perform_create(self, serializer):
+        """Stamp the key from the URL alongside the mixin's tenant and audit.
+
+        ``key`` is read-only in the serializer because the URL is where it comes
+        from, which on this create path leaves it with nowhere to come from at
+        all - so it is injected here rather than by making the field writable and
+        asking every caller to keep a body value in step with the path. It is the
+        same value ``update`` looked the row up by, and it is validated the same
+        way, so a row's key is always a key this viewset would have accepted in
+        a URL.
+        """
+        serializer.validated_data[self.lookup_field] = self._validated_key(
+            self.request
+        )
+        super().perform_create(serializer)
+
+    def _validated_key(self, request) -> str:
+        """The flag key from the URL, or a 400 naming why it is unusable.
+
+        This is the one write on the endpoint that no client-side validation
+        reaches: the router hands the viewset whatever the path segment spelled,
+        and this endpoint stores it. The key becomes part of a feature-gate name
+        in code as well as part of a URL, so it is held to a shape both can
+        carry - lowercase, digits, and ``_``, ``-`` or ``.`` between them, within
+        the column's 64 characters.
+
+        Refused with a validation error rather than 404 because the key is
+        present and the *request* is what is wrong with it; a key the URL cannot
+        even express never reaches here, because the router's URL pattern does not
+        match it.
+        """
+        key = self.kwargs.get(self.lookup_url_kwarg or self.lookup_field, "")
+        if not isinstance(key, str) or not FLAG_KEY_PATTERN.fullmatch(key):
+            raise ValidationError(
+                {
+                    self.lookup_field: (
+                        "A feature flag key may contain only lowercase letters, "
+                        "digits, '_', '-' and '.', must start with a letter or "
+                        "digit, and may be at most 64 characters."
+                    )
+                }
+            )
+        return key
 
 
 class PlatformFileViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):

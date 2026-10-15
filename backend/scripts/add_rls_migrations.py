@@ -160,6 +160,14 @@ class StandaloneEntry:
     ``previous`` alone would be a partial record for a migration that declares
     two dependencies, and a registry that pins half an ordering does not pin it.
 
+    ``reapplies`` records the tables whose policy this migration *re-attaches* to
+    a table that already had one - see :func:`verify_reapplied`. Such a table is
+    legitimately named by two registry entries: by the PLAN entry that wrote the
+    original policy, and here. It is the only shape in which the two registries
+    overlap, and it is recorded rather than tolerated, because an overlap that is
+    not recorded is indistinguishable from two migrations racing to attach one
+    policy - the failure this registry exists to make impossible.
+
     Metadata only. Nothing in this script writes a standalone migration - they
     are hand-written, or generated once and committed - so registering an entry
     records where a table is protected without emitting anything.
@@ -170,6 +178,7 @@ class StandaloneEntry:
     tables: tuple[str, ...]
     declarations: tuple[str, ...] = ("TABLES",)
     additional_previous: tuple[str, ...] = ()
+    reapplies: tuple[str, ...] = ()
 
 
 #: Tables added to an app *after* its 0004 RLS migration was written.
@@ -200,6 +209,13 @@ class StandaloneEntry:
 #:   pattern the ``abdm_gateway``, ``opd``, ``patient_registry`` and the later
 #:   ``identity_tenancy`` entries use.
 #:
+#: - a *re-application*: the table already had a policy, an ``0004`` applied
+#:   somewhere, and the table was later dropped and re-created - so the policy
+#:   died with the table and has to be attached again. ``platform.feature_flag``
+#:   in ``0007`` is the only one. It is registered here *and* in PLAN, because
+#:   both statements are true of it, and recorded through ``reapplies`` so the
+#:   overlap is a checked fact rather than a hole in the disjointness rule.
+#:
 #: Named by entry rather than by file number on purpose: a bare "same as
 #: identity_tenancy 0007" is a claim about a filename that nothing verifies,
 #: which is how this registry drifted in the first place - six tables across
@@ -219,6 +235,21 @@ STANDALONE = {
             filename="0006_enable_row_level_security.py",
             previous="0005_platformfile_scheduledjob_delete_featureflag_and_more",
             tables=("platform.file",),
+        ),
+        # The one re-application in the registry. ``0004`` wrote the policy for
+        # this table and ``0005``'s DeleteModel dropped the table with it, so
+        # ``0007`` re-creates the table and re-enables the policy. It is a
+        # STANDALONE entry rather than a PLAN edit for the usual reason - PLAN is
+        # what this script *writes*, and rewriting an applied ``0004`` would fork
+        # the history - and it carries ``reapplies`` because the table is in PLAN
+        # as well. That is the overlap the disjointness rule has to survive, so
+        # it is the case that forces the rule to be stated as "every overlap is a
+        # recorded re-application" rather than "the two sets never overlap".
+        StandaloneEntry(
+            filename="0007_featureflag.py",
+            previous="0006_enable_row_level_security",
+            tables=("platform.feature_flag",),
+            reapplies=("platform.feature_flag",),
         ),
     ),
     "identity_tenancy": (
@@ -302,9 +333,9 @@ def standalone_tables() -> dict[str, tuple[str, StandaloneEntry]]:
     """Every registered table mapped to the entry that protects it.
 
     The lookup the registry exists for: given a table, where is its policy? It
-    raises on a duplicate rather than overwriting, because a table claimed twice
-    is either two migrations racing to enable the same policy or one of them
-    stale, and both are silent.
+    raises on a duplicate rather than overwriting, because two standalone
+    migrations naming one table is either two migrations racing to enable the
+    same policy or one of them stale, and both are silent.
     """
     found: dict[str, tuple[str, StandaloneEntry]] = {}
     for module, entry in standalone_entries():
@@ -312,6 +343,34 @@ def standalone_tables() -> dict[str, tuple[str, StandaloneEntry]]:
             if table in found:
                 raise ValueError(f"{table} is registered twice in STANDALONE")
             found[table] = (module, entry)
+    return found
+
+
+def reapplied_tables() -> dict[str, tuple[str, StandaloneEntry]]:
+    """Every table recorded as re-protected, mapped to the entry that re-applies.
+
+    A subset of :func:`standalone_tables` by construction - a table cannot be
+    re-applied without the migration declaring it - but keyed separately, because
+    the overlap with PLAN is the thing that has to be checked and the ordinary
+    tables must not be counted into it.
+    """
+    found: dict[str, tuple[str, StandaloneEntry]] = {}
+    for module, entry in standalone_entries():
+        for table in entry.reapplies:
+            if table in found:
+                raise ValueError(f"{table} is recorded as re-applied twice")
+            found[table] = (module, entry)
+    return found
+
+
+def plan_tables() -> dict[str, str]:
+    """Every table a generated ``0004`` writes, mapped to its app."""
+    found: dict[str, str] = {}
+    for module, (tables, _) in PLAN.items():
+        for table in tables:
+            if table in found:
+                raise ValueError(f"{table} is listed twice in PLAN")
+            found[table] = module
     return found
 
 
@@ -465,6 +524,116 @@ def verify_standalone() -> tuple[str, ...]:
                     f"{module}/{entry.filename}: depends on {dependencies}, "
                     f"registry says {expected}"
                 )
+        # A table recorded as re-applied must be one the migration declares.
+        # ``reapplies`` is how an entry tells PLAN "I am attaching a policy to a
+        # table you already wrote"; a re-application of a table the file never
+        # mentions would make the two registries disagree about where the policy
+        # is, which is the question neither could then answer.
+        undeclared = [table for table in entry.reapplies if table not in entry.tables]
+        if undeclared:
+            problems.append(
+                f"{module}/{entry.filename}: records {undeclared[0]} as "
+                f"re-applied but does not declare it"
+            )
+    return tuple(problems)
+
+
+def _migration_graph(module: str) -> dict[str, set[str]]:
+    """``{migration name: {predecessors within the app}}`` for one app.
+
+    Read from the files rather than from the registry, so an ordering claim is
+    checked against the migrations that carry it. ``previous`` and
+    ``additional_previous`` record the edges directly below; this is what answers
+    whether they compose - a re-application three migrations downstream of the
+    policy it re-applies is still downstream, and only the graph knows that.
+
+    Keyed by migration *name* without the ``.py`` suffix, because that is what a
+    ``dependencies`` entry holds, while ``StandaloneEntry.filename`` and
+    :data:`FILENAME` are filenames. :func:`_runs_after` normalises both sides.
+    """
+    directory = BACKEND / module / "migrations"
+    graph: dict[str, set[str]] = {}
+    for path in sorted(directory.glob("0*.py")):
+        migration = _migration_module(module, path.name)
+        if migration is None:
+            continue
+        graph[_migration_name(path.name)] = {
+            dep[1] for dep in migration.Migration.dependencies if dep[0] == module
+        }
+    return graph
+
+
+def _migration_name(filename: str) -> str:
+    """A migration file's name without its extension."""
+    return filename[: -len(".py")] if filename.endswith(".py") else filename
+
+
+def _runs_after(module: str, later: str, earlier: str) -> bool:
+    """Whether ``later`` transitively depends on ``earlier`` within ``module``."""
+    graph = _migration_graph(module)
+    target = _migration_name(earlier)
+    seen: set[str] = set()
+    stack = [_migration_name(later)]
+    while stack:
+        name = stack.pop()
+        if name == target:
+            return True
+        if name in seen:
+            continue
+        seen.add(name)
+        stack.extend(graph.get(name, ()))
+    return False
+
+
+def verify_reapplied() -> tuple[str, ...]:
+    """Check every recorded re-application is one, and is ordered correctly.
+
+    The rule this replaces: "PLAN and STANDALONE name no table twice". That rule
+    was true until ``platform.feature_flag`` was re-created - its policy had to
+    be re-attached by a new migration, so the table is now named by ``0004`` in
+    PLAN *and* by ``0007`` here, legitimately. Deleting the rule would have left
+    nothing in its place, and "a table is claimed by at most one entry" is not
+    available either: this table breaks it by design.
+
+    What replaces it is three claims, each of which can fail:
+
+    1. **Every overlap is a recorded re-application.** A standalone migration
+       naming a table a PLAN ``0004`` also names, without saying so, is the
+       original race between two migrations attaching one policy - so the
+       overlap is compared against the recorded set in both directions, and a
+       stale ``reapplies`` entry is as much a failure as a missing one.
+    2. **Every re-application names a table a PLAN entry wrote.** Otherwise it
+       re-applies a policy that never existed, which is a claim about a table the
+       registry cannot answer for.
+    3. **The re-application runs after the migration it re-applies.** A policy
+       attached before the one it restores, or before the table exists, is a
+       migration that fails on PostgreSQL and silently does nothing on the SQLite
+       the fast suite runs on.
+
+    A fourth property, that the table has a policy at all, is
+    ``tests/integration/test_rls_isolation.py``'s job: it needs a real PostgreSQL,
+    and a registry entry is metadata that cannot supply one.
+    """
+    problems = []
+    overlap = set(plan_tables()) & set(standalone_tables())
+    recorded = set(reapplied_tables())
+
+    for table in sorted(overlap - recorded):
+        problems.append(
+            f"{table}: named by both PLAN and STANDALONE but not recorded as "
+            "re-applied"
+        )
+    for table in sorted(recorded - overlap):
+        problems.append(
+            f"{table}: recorded as re-applied but not named by any PLAN entry"
+        )
+
+    for table, (module, entry) in sorted(reapplied_tables().items()):
+        if not _runs_after(module, entry.filename, FILENAME):
+            problems.append(
+                f"{module}/{entry.filename}: re-applies {table}, which PLAN "
+                f"protects in {FILENAME} - that migration does not run first"
+            )
     return tuple(problems)
 
 
@@ -494,12 +663,15 @@ if __name__ == "__main__":
     # because "17 of 18 matched" does not say *which* one did not.
     plan_problems = verify_plan()
     standalone_problems = verify_standalone()
+    reapplied_problems = verify_reapplied()
     for problem in plan_problems:
         print(f"  PLAN MISMATCH: {problem}")
     for problem in standalone_problems:
         print(f"  STANDALONE MISMATCH: {problem}")
+    for problem in reapplied_problems:
+        print(f"  REAPPLIED MISMATCH: {problem}")
 
-    if plan_problems or standalone_problems:
+    if plan_problems or standalone_problems or reapplied_problems:
         raise SystemExit(
             "Nothing was written: fix the registry above until it matches the "
             "applied migrations, then re-run."

@@ -27,6 +27,10 @@ BACKEND = Path(__file__).resolve().parents[2] / "backend"
 #: Unit: pure registry metadata, no database and no migration is applied.
 pytestmark = pytest.mark.unit
 
+#: The migration whose registration the falsification cases remove. Named once
+#: so the test that drops it and the test that counts it cannot drift apart.
+DROPPED = "0007_featureflag.py"
+
 
 def _script():
     return import_module("scripts.add_rls_migrations")
@@ -87,6 +91,34 @@ class TestCoverage:
 
         assert unregistered == []
 
+    def test_dropping_a_registry_entry_is_reported(self, monkeypatch):
+        """The coverage check above, falsified: remove an entry, and it bites.
+
+        The check reads the migrations from disk and the registry from the
+        module, so removing one entry is exactly the drift it exists to catch -
+        and this is the drift that matters most for ``0007``, whose whole purpose
+        is to re-attach a policy nothing else will re-attach. A registry that
+        had lost the entry would still answer "where is this table protected"
+        with 0004, which no longer protects it.
+        """
+        script = _script()
+        monkeypatch.setattr(
+            script,
+            "STANDALONE",
+            {
+                module: tuple(
+                    entry for entry in entries if entry.filename != DROPPED
+                )
+                or ()
+                for module, entries in script.STANDALONE.items()
+            },
+        )
+
+        registered = set(_registered())
+        unregistered = sorted(_rls_migration_files() - registered)
+
+        assert unregistered == [("platform", DROPPED)]
+
     def test_the_registry_names_nothing_that_does_not_exist(self):
         """The other direction: an entry with no migration protects nothing.
 
@@ -98,26 +130,145 @@ class TestCoverage:
 
         assert sorted(_rls_migration_files()) == sorted(registered)
 
-    def test_plan_and_standalone_name_no_table_twice(self):
-        """The two registries are disjoint, and none is lost.
+    def test_plan_and_standalone_overlap_only_where_a_reapplication_is_recorded(self):
+        """The disjointness rule, restated so this registry can still satisfy it.
 
-        A table in both means a generated ``0004`` and a standalone migration
-        racing to enable the same policy, with the rewritten history the whole
-        split exists to prevent.
+        The rule was "the two registries name no table twice", because a table in
+        both means a generated ``0004`` and a standalone migration racing to
+        enable the same policy. That stopped being satisfiable when
+        ``platform.feature_flag`` was re-created: ``0004`` had written that
+        table's policy, ``0005`` dropped the table with it, and ``0007`` has to
+        attach a policy again - so the table is genuinely named twice and one of
+        the two names is a *record of history*, not a second writer.
+
+        So the rule is narrowed rather than deleted, and each half is still
+        falsifiable. Every overlap is declared through ``reapplies`` (an overlap
+        nobody declared is the original race); no table is duplicated *within*
+        PLAN, which would be rewritten into two DDL statements for one policy,
+        silently; and no table is re-applied twice. The shape assertion at the
+        end keeps an emptied registry from passing a disjointness claim by being
+        empty.
         """
         script = _script()
         plan_listed = [table for tables, _ in script.PLAN.values() for table in tables]
-        standalone = set(script.standalone_tables())
-        plan_tables = set(plan_listed)
+        plan_written = set(plan_listed)
+        standalone_written = set(script.standalone_tables())
+        reapplied = set(script.reapplied_tables())
 
-        assert plan_tables & standalone == set()
-        # No duplicates within PLAN either: a table listed twice there is
-        # rewritten into two DDL statements for one policy, silently.
-        assert len(plan_listed) == len(plan_tables)
-        # Sanity on the shape of the answer, so an emptied registry cannot pass
-        # a disjointness assertion by being empty.
-        assert len(plan_tables) == 46
-        assert len(standalone) == 11
+        assert plan_written & standalone_written == reapplied
+        assert reapplied == {"platform.feature_flag"}
+        # No duplicates within PLAN: a table listed twice there is rewritten
+        # into two DDL statements for one policy, silently.
+        assert len(plan_listed) == len(plan_written)
+        assert len(standalone_written) == 12
+        # Sanity on the shape of the answer, so an emptied registry cannot pass a
+        # disjointness assertion by being empty.
+        assert len(plan_written) == 46
+
+    def test_every_reapplication_is_recorded_and_ordered(self, monkeypatch):
+        """The three claims that replaced disjointness, verified clean.
+
+        Run through the public function rather than by reading its source, so a
+        future edit cannot drop one of the checks and leave this green - and the
+        three falsification cases below drop each one in turn to show they bite.
+        """
+        script = _script()
+        monkeypatch.setattr(script, "STANDALONE", dict(script.STANDALONE))
+
+        assert script.verify_reapplied() == ()
+
+    def test_an_undeclared_overlap_is_reported(self, monkeypatch):
+        """A second writer for a PLAN table is the original race, and it fails.
+
+        The entry is the *correct* one in every other respect - right filename,
+        right dependency, right table list - so only the missing ``reapplies``
+        declaration distinguishes it, which is exactly the claim under test.
+        """
+        script = _script()
+        entry = next(e for e in script.STANDALONE["platform"] if e.reapplies)
+        undeclared = script.StandaloneEntry(
+            filename=entry.filename,
+            previous=entry.previous,
+            tables=entry.tables,
+        )
+        others = tuple(e for e in script.STANDALONE["platform"] if e is not entry)
+        monkeypatch.setattr(script, "STANDALONE", {"platform": (undeclared, *others)})
+
+        problems = script.verify_reapplied()
+
+        assert problems == (
+            "platform.feature_flag: named by both PLAN and STANDALONE but not "
+            "recorded as re-applied",
+        )
+
+    def test_a_reapplication_of_a_table_no_plan_entry_wrote_is_reported(
+        self, monkeypatch
+    ):
+        """Claiming to restore a policy that never existed is a failure too.
+
+        The re-application is recorded, and nothing else is wrong with it - which
+        is the point. A stale entry left behind after a table was dropped for
+        good would otherwise keep answering "this table is protected" for a
+        table the registry cannot point at.
+        """
+        script = _script()
+        entry = next(e for e in script.STANDALONE["platform"] if e.reapplies)
+        invented = script.StandaloneEntry(
+            filename=entry.filename,
+            previous=entry.previous,
+            tables=("platform.never_existed",),
+            reapplies=("platform.never_existed",),
+        )
+        # Added rather than swapped in, so the one legitimate re-application
+        # stays recorded and the single problem reported is attributable to the
+        # invented one.
+        monkeypatch.setattr(
+            script,
+            "STANDALONE",
+            {"platform": (invented, *script.STANDALONE["platform"])},
+        )
+
+        problems = script.verify_reapplied()
+
+        assert problems == (
+            "platform.never_existed: recorded as re-applied but not named by any "
+            "PLAN entry",
+        )
+
+    def test_a_reapplication_that_runs_before_the_policy_it_restores_is_reported(
+        self, monkeypatch
+    ):
+        """The ordering claim, read from the migration graph rather than asserted.
+
+        ``0007`` is three migrations downstream of ``0004``, so the recorded
+        ``previous`` alone does not prove the ordering - the dependency graph
+        does. Falsified by registering the re-application against ``0001``, which
+        is a real migration that genuinely precedes ``0004`` (it creates the
+        table, with no policy): on PostgreSQL the policy would then be attached
+        before the one it claims to restore, and on the SQLite the fast suite runs
+        on the whole thing would be a silent no-op.
+        """
+        script = _script()
+        entry = next(e for e in script.STANDALONE["platform"] if e.reapplies)
+        early = script.StandaloneEntry(
+            filename="0001_initial.py",
+            previous="0001_initial",
+            tables=entry.tables,
+            reapplies=entry.reapplies,
+        )
+        monkeypatch.setattr(
+            script,
+            "STANDALONE",
+            {"platform": (early, *(e for e in script.STANDALONE["platform"] if e is not entry))},
+        )
+
+        problems = script.verify_reapplied()
+
+        assert problems == (
+            "platform/0001_initial.py: re-applies platform.feature_flag, which "
+            "PLAN protects in 0004_enable_row_level_security.py - that "
+            "migration does not run first",
+        )
 
     def test_a_table_with_no_policy_is_recorded_as_deliberate(self):
         """``platform.scheduled_job`` is unprotected on purpose, and says so.
@@ -141,19 +292,25 @@ class TestCoverage:
         assert "tasks.py" in reason
 
     def test_the_accounting_is_complete_for_platform(self):
-        """The app this task added a table to: two tenant tables, one protected.
+        """The app every shape in this registry appeared in: all answers findable.
 
         ``platform.file`` arrived with its own ``0006`` because ``0004`` was
-        already applied; ``platform.scheduled_job`` arrived in the same
-        migration and is the deliberate gap. Both answers have to be findable in
-        this one file, which is the smallest version of the question the full
-        registry answers.
+        already applied; ``platform.feature_flag`` was dropped by ``0005`` and
+        re-added by ``0007``, which has to re-attach the policy as well; and
+        ``platform.scheduled_job`` arrived in the same migration and is the
+        deliberate gap. Three shapes - a new table, a re-added table, an
+        unprotected one - and all three answers have to be findable in this one
+        file, which is the smallest version of the question the full registry
+        answers.
         """
         script = _script()
 
         assert script.standalone_tables()["platform.file"][1].filename == (
             "0006_enable_row_level_security.py"
         )
+        reapply = script.standalone_tables()["platform.feature_flag"][1]
+        assert reapply.filename == "0007_featureflag.py"
+        assert reapply.reapplies == ("platform.feature_flag",)
         assert "platform.scheduled_job" in script.UNPROTECTED_TABLES
         assert "platform.scheduled_job" not in script.standalone_tables()
 
