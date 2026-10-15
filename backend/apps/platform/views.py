@@ -169,6 +169,23 @@ def _relative_upload_path(tenant_id, raw_name: str) -> tuple[str, str, str]:
     The upload uuid directory is what stops two same-named files from one
     tenant colliding, and it is generated server-side precisely so the client
     has no say in it.
+
+    The tenant id is normalised through ``uuid.UUID`` *here*, once, so the
+    directory is named by the id rather than by the spelling that arrived. The
+    download compares the stored path's first component against
+    ``str(row.tenant_id)`` - the canonical form a ``UUIDField`` reads back - so
+    a header sent in any other representation (``uuid4().hex``, uppercase)
+    would otherwise produce a row whose own document the owner can never fetch:
+    upload 201, download 404, with nothing wrong the caller could report.
+    Normalising at the write keeps that check a plain string comparison, which
+    cannot itself raise on a malformed path, and it leaves the directory name
+    equal to the tenant's real id rather than one of several spellings of it -
+    which matters on a case-insensitive filesystem, where two spellings of one
+    id are one directory and two tenants must not be.
+
+    A value the column would reject anyway raises here, before anything is
+    written, instead of after: the response is a 500 either way, but no bytes
+    reach storage and no orphan-delete runs for them.
     """
     sanitised = _sanitise_filename(raw_name)
     # The extension is taken from the sanitised name after the allow-list has
@@ -176,7 +193,7 @@ def _relative_upload_path(tenant_id, raw_name: str) -> tuple[str, str, str]:
     # actually accepted rather than the one the client claimed.
     _, extension = os.path.splitext(sanitised)
     file_type = extension.lstrip(".").lower()
-    relative = f"{tenant_id}/{uuid_lib.uuid4()}/{sanitised}"
+    relative = f"{uuid_lib.UUID(str(tenant_id))}/{uuid_lib.uuid4()}/{sanitised}"
     return relative, sanitised, file_type
 
 

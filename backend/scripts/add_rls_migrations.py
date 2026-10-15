@@ -79,12 +79,13 @@ class Migration(migrations.Migration):
 # in that app, so RLS is attached after the tenant_id contract migration.
 #
 # ``platform`` is listed with its *original* table pair and 0001, because this
-# registry describes the 0004 migration each app already has. ``platform.file``
-# is deliberately absent from PLAN and lives in STANDALONE below, as is
-# ``abdm.consent_event``: both tables were created after their app's 0004 was
-# written, so no 0004 can name them. PLAN is what ``__main__`` *writes*, so
-# anything here is a claim about an applied migration - ``verify_plan`` is the
-# check that keeps that claim true.
+# registry describes the 0004 migration each app already has. A table created
+# after its app's 0004 was written cannot be named by that 0004 - rewriting it
+# to name the table would fork the applied history - so every such table is
+# absent from PLAN and registered in STANDALONE below instead, with
+# UNPROTECTED_TABLES recording the tenant-owned tables that deliberately have no
+# policy. PLAN is what ``__main__`` *writes*, so anything here is a claim about
+# an applied migration - ``verify_plan`` is the check that keeps that claim true.
 PLAN = {
     "identity_tenancy": (
         ["identity.facility", "identity.department", "identity.ward", "identity.bed",
@@ -145,11 +146,30 @@ class StandaloneEntry:
     ``filename`` is the migration file in ``<module>/migrations/``,
     ``previous`` the migration it depends on, and ``tables`` the frozen table
     list that migration must declare.
+
+    ``declarations`` names the migration attributes ``tables`` is read from,
+    concatenated in that order, and defaults to the ``TABLES`` tuple the
+    generated migrations all use. It exists for the one migration whose policy
+    is not uniform - ``identity.role`` is platform-scoped rather than
+    tenant-owned, so it lists its tables under two names - and naming the
+    attributes rather than special-casing the file keeps the check uniform: a
+    migration that forgets to declare its tables is reported the same way
+    whichever shape it uses.
+
+    ``additional_previous`` records any further migrations the file depends on.
+    ``previous`` alone would be a partial record for a migration that declares
+    two dependencies, and a registry that pins half an ordering does not pin it.
+
+    Metadata only. Nothing in this script writes a standalone migration - they
+    are hand-written, or generated once and committed - so registering an entry
+    records where a table is protected without emitting anything.
     """
 
     filename: str
     previous: str
     tables: tuple[str, ...]
+    declarations: tuple[str, ...] = ("TABLES",)
+    additional_previous: tuple[str, ...] = ()
 
 
 #: Tables added to an app *after* its 0004 RLS migration was written.
@@ -165,29 +185,134 @@ class StandaloneEntry:
 #: So these get their own migration, depend on the last real migration before
 #: them, and are registered here anyway: this registry is what a later reader -
 #: or the person adding the next tenant-owned table to the same app - consults
-#: to find out that the table is covered somewhere other than 0004.
+#: to find out that the table is covered somewhere other than 0004. Keyed by
+#: module because an app can accumulate several of these (identity_tenancy has
+#: four), each in its own migration.
 #:
 #: Two shapes are registered, and both satisfy the same contract the check
-#: below asserts (a ``TABLES`` tuple naming the protected tables):
+#: below asserts (the attributes a migration declares its protected tables in,
+#: and the migrations it depends on):
 #:
 #: - a dedicated RLS-only migration, attached after the migration that created
-#:   the table (``platform.file`` in ``0006``);
+#:   the table - the ``platform`` and the ``identity.role`` entries;
 #: - RLS attached inside the model migration that creates the table, which is
-#:   what ``abdm.consent_event`` did in ``0005`` - one migration rather than two
-#:   for a table that does not exist yet, and the same pattern as
-#:   ``identity_tenancy`` 0007 and ``opd`` 0005.
+#:   one migration rather than two for a table that does not exist yet, and the
+#:   pattern the ``abdm_gateway``, ``opd``, ``patient_registry`` and the later
+#:   ``identity_tenancy`` entries use.
+#:
+#: Named by entry rather than by file number on purpose: a bare "same as
+#: identity_tenancy 0007" is a claim about a filename that nothing verifies,
+#: which is how this registry drifted in the first place - six tables across
+#: three apps had a policy attached in their own migration and appeared in no
+#: registry at all. ``tests/unit/test_rls_migration_registry.py`` now holds the
+#: registry to the migrations themselves, so the next one fails the suite.
 STANDALONE = {
-    "abdm_gateway": StandaloneEntry(
-        filename="0005_abhacallbacklog_link_token_enc_consentevent.py",
-        previous="0004_enable_row_level_security",
-        tables=("abdm.consent_event",),
+    "abdm_gateway": (
+        StandaloneEntry(
+            filename="0005_abhacallbacklog_link_token_enc_consentevent.py",
+            previous="0004_enable_row_level_security",
+            tables=("abdm.consent_event",),
+        ),
     ),
-    "platform": StandaloneEntry(
-        filename="0006_enable_row_level_security.py",
-        previous="0005_platformfile_scheduledjob_delete_featureflag_and_more",
-        tables=("platform.file",),
+    "platform": (
+        StandaloneEntry(
+            filename="0006_enable_row_level_security.py",
+            previous="0005_platformfile_scheduledjob_delete_featureflag_and_more",
+            tables=("platform.file",),
+        ),
+    ),
+    "identity_tenancy": (
+        # The one migration whose policy is not uniform: ``identity.role`` holds
+        # a hospital's roles alongside global platform roles with a null tenant,
+        # so it gets the platform-scoped predicate and the other two get the
+        # ordinary tenant-owned one. Two declarations, two dependencies - both
+        # recorded, because half an ordering is not an ordering.
+        StandaloneEntry(
+            filename="0006_enable_rls_identity_roles.py",
+            previous="0005_breakglassaccess_role_usermembership_and_more",
+            tables=("identity.role", "identity.user_membership",
+                    "identity.break_glass_access"),
+            declarations=("PLATFORM_SCOPED", "TENANT_OWNED"),
+            additional_previous=("0004_enable_row_level_security",),
+        ),
+        StandaloneEntry(
+            filename="0007_setupprogress.py",
+            previous="0006_enable_rls_identity_roles",
+            tables=("identity.setup_progress",),
+        ),
+        StandaloneEntry(
+            filename="0008_baselineinput_referencedata.py",
+            previous="0007_setupprogress",
+            tables=("identity.reference_data", "identity.baseline_input"),
+        ),
+        StandaloneEntry(
+            filename="0009_configrevision_and_bed_active.py",
+            previous="0008_baselineinput_referencedata",
+            tables=("identity.config_revision",),
+        ),
+    ),
+    "opd": (
+        StandaloneEntry(
+            filename="0005_tokenseries.py",
+            previous="0004_enable_row_level_security",
+            tables=("opd.token_series",),
+        ),
+    ),
+    "patient_registry": (
+        StandaloneEntry(
+            filename="0007_patientsequence.py",
+            previous="0006_patient_verified_at",
+            tables=("registry.sequence",),
+        ),
     ),
 }
+
+#: Tenant-owned tables that deliberately have no RLS policy, and why.
+#:
+#: Recorded here so the registry answers for every tenant-owned table rather
+#: than only the ones with a policy: a table absent from both PLAN and
+#: STANDALONE is otherwise indistinguishable from one nobody got round to.
+#: This is a record, not a work item - adding a policy is a deliberate decision
+#: with its own migration, and nothing here emits one.
+UNPROTECTED_TABLES = {
+    # Written by Celery, read through the worker's own scoping. See
+    # backend/apps/workers/tasks.py, the ``run_scheduled_job`` docstring:
+    # application scoping is the only control on this table.
+    "platform.scheduled_job": (
+        "deliberate - scoped by the worker; see backend/apps/workers/tasks.py"
+    ),
+}
+
+
+def standalone_entries() -> tuple[tuple[str, StandaloneEntry], ...]:
+    """Every registered entry as ``(module, entry)``, in a stable order.
+
+    Flat because that is how both callers want it: the verifier checks each one,
+    and the run summary counts them. An app with several entries contributes
+    several pairs, so the count is of migrations and not of apps.
+    """
+    return tuple(
+        (module, entry)
+        for module, entries in STANDALONE.items()
+        for entry in entries
+    )
+
+
+def standalone_tables() -> dict[str, tuple[str, StandaloneEntry]]:
+    """Every registered table mapped to the entry that protects it.
+
+    The lookup the registry exists for: given a table, where is its policy? It
+    raises on a duplicate rather than overwriting, because a table claimed twice
+    is either two migrations racing to enable the same policy or one of them
+    stale, and both are silent.
+    """
+    found: dict[str, tuple[str, StandaloneEntry]] = {}
+    for module, entry in standalone_entries():
+        for table in entry.tables:
+            if table in found:
+                raise ValueError(f"{table} is registered twice in STANDALONE")
+            found[table] = (module, entry)
+    return found
 
 
 def _ensure_django() -> None:
@@ -279,15 +404,32 @@ def verify_plan() -> tuple[str, ...]:
 
 
 def verify_standalone() -> tuple[str, ...]:
-    """Check each standalone migration exists and declares the tables registered.
+    """Check each standalone migration matches what the registry claims about it.
 
     Returns the problems found, empty when the registry and the files on disk
-    agree. Both halves matter: a registry entry with no migration leaves a
-    tenant table unprotected, and a migration no registry names is invisible to
-    the next person who adds a table to the same app.
+    agree. Three things are compared per entry, for the same reasons
+    :func:`verify_plan` compares three: the frozen table list, the migration the
+    entry depends on, and - through the first two - that the file is really
+    there and really is a migration.
+
+    The dependency check is the one that was missing. ``previous`` is recorded
+    as the migration an entry follows, and nothing used it: an entry naming a
+    migration that is not among its dependencies would pass every other check,
+    so the registry would assert an ordering the applied migrations do not have.
+    For the attached-in-the-model-migration shape - where RLS runs in the same
+    ``RunPython`` that creates the table - a wrong ``previous`` means the
+    policy is attached before the table exists, which is a migration that fails
+    on PostgreSQL and silently does nothing on SQLite.
+
+    Every recorded predecessor is checked, not just ``previous``, so an entry
+    listing a second dependency is held to it too.
+
+    Unlike PLAN, an entry here is never rewritten by a run, so the failure mode
+    is a false record rather than a divergent history. It still has to be caught
+    where the claim is made.
     """
     problems = []
-    for module, entry in STANDALONE.items():
+    for module, entry in standalone_entries():
         path = BACKEND / module / "migrations" / entry.filename
         if not path.exists():
             problems.append(f"{module}/{entry.filename}: missing")
@@ -296,12 +438,33 @@ def verify_standalone() -> tuple[str, ...]:
         if migration is None:
             problems.append(f"{module}/{entry.filename}: not importable")
             continue
-        declared = tuple(migration.TABLES)
-        if declared != entry.tables:
+        missing = [
+            attribute
+            for attribute in entry.declarations
+            if not hasattr(migration, attribute)
+        ]
+        if missing:
             problems.append(
-                f"{module}/{entry.filename}: declares {declared}, "
-                f"registry says {entry.tables}"
+                f"{module}/{entry.filename}: declares no {missing[0]!r}"
             )
+        else:
+            declared = tuple(
+                table
+                for attribute in entry.declarations
+                for table in getattr(migration, attribute)
+            )
+            if declared != entry.tables:
+                problems.append(
+                    f"{module}/{entry.filename}: declares {declared}, "
+                    f"registry says {entry.tables}"
+                )
+        dependencies = tuple(tuple(dep) for dep in migration.Migration.dependencies)
+        for expected in (entry.previous, *entry.additional_previous):
+            if (module, expected) not in dependencies:
+                problems.append(
+                    f"{module}/{entry.filename}: depends on {dependencies}, "
+                    f"registry says {expected}"
+                )
     return tuple(problems)
 
 
@@ -348,9 +511,10 @@ if __name__ == "__main__":
 
     # Every entry was compared byte-for-byte against the file it would rewrite
     # before a single byte was written, so reaching this line means the run
-    # regenerated 18 files without changing any of them.
+    # regenerated 18 files without changing any of them. The standalone count is
+    # of migrations, not of apps: an app can have several.
     print(
         f"{len(PLAN)} RLS migration(s) written, all byte-identical to the "
-        f"versions already applied; {len(STANDALONE)} standalone RLS "
+        f"versions already applied; {len(standalone_entries())} standalone RLS "
         f"migration(s) checked"
     )

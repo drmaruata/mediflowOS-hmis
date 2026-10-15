@@ -549,6 +549,65 @@ class TestDownload:
         assert own_response.getvalue() == b"tenant-a-own-bytes"
 
 
+#: The one tenant id, spelled the ways a request may legitimately spell it.
+#: ``uuid.UUID`` accepts all three and the ``UUIDField`` column resolves them to
+#: the same row, so which spelling arrived must not be able to decide where the
+#: bytes live - the directory name is half of the download's isolation check.
+NON_CANONICAL_TENANT_HEADERS = [
+    pytest.param(str(TENANT_A).upper(), id="uppercase"),
+    pytest.param(TENANT_A.hex, id="unhyphenated"),
+    pytest.param("F11e0000-0000-4000-8000-000000000001", id="mixed-case"),
+]
+
+
+class TestTenantPathRepresentation:
+    """The tenant directory is named by the id, not by how the request spelled it.
+
+    The upload builds the stored path's first component from the tenant id the
+    request carries, and the download compares that component against
+    ``str(row.tenant_id)`` - the canonical lowercase hyphenated form the
+    ``UUIDField`` reads back. If the two are built from different
+    representations of the same id, the upload answers 201 and the owner's own
+    download answers 404: a document that was accepted, stored and listed, and
+    which nobody can ever fetch.
+
+    Unreachable through the production auth path, where
+    ``TenantBoundJWTAuthentication`` rebinds ``request.tenant_id`` from a signed
+    claim minted as ``str(membership.tenant_id)``. Reachable here because
+    ``force_authenticate`` skips that class entirely and lets the header win,
+    which is the only reason this can be pinned at all - and a pin that cannot
+    be written is a coupling nobody notices until it breaks.
+    """
+
+    @pytest.mark.parametrize("tenant_header", NON_CANONICAL_TENANT_HEADERS)
+    def test_a_non_canonical_tenant_header_uploads_and_downloads(
+        self, client_a, tenant_header
+    ):
+        client, _ = client_a
+        client.credentials(HTTP_X_TENANT_ID=tenant_header)
+        content = b"%PDF-1.4 non-canonical-header payload"
+
+        response = _upload(client, "canon.pdf", content)
+
+        assert response.status_code == 201, response.content
+        row = PlatformFile.objects.get()
+        # The row resolves to the one tenant, whichever spelling was sent.
+        assert row.tenant_id == TENANT_A
+
+        download = _download(client, row.id)
+
+        # Asserted before the path's shape, because this is the failure a user
+        # meets: an accepted, stored, listed document that cannot be fetched.
+        assert download.status_code == 200, download.content
+        assert download.getvalue() == content
+        assert download["Content-Disposition"] == 'attachment; filename="canon.pdf"'
+
+        # ...and the bytes are stored under that tenant's canonical id, which is
+        # what makes the download's partition check compare like with like.
+        assert row.file_url.split("/")[0] == str(TENANT_A)
+        assert (Path(settings.MEDIA_ROOT) / row.file_url).read_bytes() == content
+
+
 class TestListing:
     def test_the_list_holds_only_the_requesting_tenants_rows(self, client_a, client_b):
         client_a, _ = client_a
@@ -708,8 +767,11 @@ class TestRowLevelSecurityWiring:
         script = import_module("scripts.add_rls_migrations")
 
         assert "platform" in script.STANDALONE
-        entry = script.STANDALONE["platform"]
-        assert entry.tables == ("platform.file",)
+        # Keyed by module with one entry per migration, so the app's own entry is
+        # found by the table it protects rather than by position.
+        entry = next(
+            e for e in script.STANDALONE["platform"] if e.tables == ("platform.file",)
+        )
         assert entry.filename == "0006_enable_row_level_security.py"
         # The registry and the file on disk must agree, or one of them is a lie.
         migration = import_module(
@@ -737,7 +799,10 @@ class TestRowLevelSecurityWiring:
         script = import_module("scripts.add_rls_migrations")
 
         assert "abdm.consent_event" not in script.PLAN["abdm_gateway"][0]
-        assert script.STANDALONE["abdm_gateway"].tables == ("abdm.consent_event",)
+        # Looked up by table, which is the question the registry exists to answer.
+        assert script.standalone_tables()["abdm.consent_event"][1].tables == (
+            "abdm.consent_event",
+        )
         assert script.verify_plan() == ()
 
 
