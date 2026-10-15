@@ -2,7 +2,8 @@ name: CI
 
 # Architecture doc section 15 describes the pipeline this implements: Python
 # linting, Django checks, unit and integration tests, RLS isolation tests,
-# Channels/WebSocket authorization tests, and dependency scanning.
+# Channels/WebSocket authorization tests, OpenAPI schema generation, and
+# dependency scanning.
 #
 # The RLS gate is a separate job because it needs a real PostgreSQL: SQLite has
 # no row level security, so the default test job cannot verify isolation. It is
@@ -65,6 +66,16 @@ jobs:
         # is how the previous revision of this project shipped 63 models and
         # zero migrations.
         run: python manage.py makemigrations --check --dry-run --settings=config.settings.test
+
+      - name: OpenAPI schema generates cleanly
+        # INT-001's deliverable is a specification a client can trust, and
+        # drf-spectacular does not make that a matter of the exit status: an
+        # endpoint it cannot resolve exits 0, validates, and is silently missing
+        # from the document. --fail-on-warn is the flag that turns the stderr
+        # line into a build failure; --validate checks the result against the
+        # OpenAPI 3 JSON Schema. Written outside the working tree so the job
+        # cannot leave a generated artefact behind.
+        run: python manage.py spectacular --file "${{ runner.temp }}/schema.yml" --validate --fail-on-warn --settings=config.settings.test
 
   backend-tests:
     name: Backend tests (no services)

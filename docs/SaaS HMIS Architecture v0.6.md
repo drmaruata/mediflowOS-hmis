@@ -618,7 +618,7 @@ The frontend UI layer was migrated from **Ant Design 5 + ProComponents** to **Sh
 
 **CI/CD**
 
-- Trunk-based development; pipeline runs Python linting/format checks, Django checks, unit/integration tests, RLS isolation tests, **indicator golden tests** (known inputs produce known BOR/ALOS/LAMA values), Channels/WebSocket authorization tests, SAST and dependency scanning.
+- Trunk-based development; pipeline runs Python linting/format checks, Django checks, unit/integration tests, RLS isolation tests, **indicator golden tests** (known inputs produce known BOR/ALOS/LAMA values), Channels/WebSocket authorization tests, OpenAPI schema generation (must be diagnostic-free), SAST and dependency scanning.
 - Container images signed and scanned; progressive rollout (canary/blue-green).
 - Database migrations are backward-compatible (expand, then contract).
 
