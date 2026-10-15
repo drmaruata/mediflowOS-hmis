@@ -4,6 +4,11 @@ The read side of a feature flag is a decision every code path needs and no code
 path should have to remember how to make safely: is the feature on for *this*
 tenant, on no other tenant's terms, and what happens when the question cannot be
 answered. That is this module's whole surface.
+
+The one thing a caller has to know - the helper binds the tenant itself, and a
+nested call therefore rebinds the enclosing transaction - is in
+:func:`flag_enabled`'s docstring rather than here, next to the reason it has to
+be that way.
 """
 import logging
 
@@ -38,9 +43,36 @@ def flag_enabled(tenant_id, key) -> bool:
     worker, a Celery task or any non-request caller gets the right answer without
     knowing any of this.
 
-    A nested block (a view under ``ATOMIC_REQUESTS``, a caller that already opened
-    one) becomes a savepoint and the setting is scoped to it, so the read inside
-    the block still sees it.
+    **A nested call rebinds the caller's transaction, and that is the contract.**
+    ``set_config(..., is_local=true)`` is ``SET LOCAL``, which PostgreSQL scopes
+    to the **transaction**, not to the savepoint a nested ``atomic()`` opens: the
+    effects survive releasing that savepoint and last until the enclosing
+    transaction ends. (The PostgreSQL command reference records the change on
+    this directly - "the effects of a SET LOCAL would be canceled by releasing
+    an earlier savepoint" was the 8.0-8.2 behaviour, "changed because it was
+    deemed unintuitive" - so the older intuition that a savepoint scopes a
+    setting is not one to rely on.) So ``flag_enabled(other_tenant, ...)``
+    called inside a transaction already bound to ``tenant_a`` leaves that
+    transaction bound to ``other_tenant`` for everything that follows, and the
+    caller's own subsequent statements run under the wrong policy.
+
+    Documented rather than refused, deliberately. The caller contract is: **a
+    caller that needs the answer for a tenant other than the one it is bound to
+    must ask outside the transaction it still needs bound to its own** - or not
+    nest. What that costs if the contract is broken is bounded and fail-closed:
+    reads under the wrong policy return nothing and writes are refused by the
+    policy's ``WITH CHECK``, so the caller's own rows neither leak nor silently
+    land under another tenant - the write raises instead. Refusing was the
+    alternative and was rejected for three reasons. Detecting the existing
+    binding means reading ``current_setting`` on every call, which is
+    PostgreSQL-only and so untestable on the SQLite the fast suite runs. A
+    refusal also makes the answer depend on the caller's context, so "is the
+    flag on for that other hospital?" would answer "off" for a reason that has
+    nothing to do with the flag. And a guard in front of the bind adds exactly
+    the branch the ``atomic()`` above exists to remove: the refused caller goes
+    on reading under whatever binding the session had - on a worker, none - and
+    sees every feature reported off. Nothing in the codebase asks about a second
+    tenant today, so the hazard is a contract rather than a live defect.
 
     This is a database read per call and deliberately uncached: a cached answer
     would need invalidation across processes, and the safe default is already

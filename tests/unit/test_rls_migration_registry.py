@@ -266,8 +266,66 @@ class TestCoverage:
 
         assert problems == (
             "platform/0001_initial.py: re-applies platform.feature_flag, which "
-            "PLAN protects in 0004_enable_row_level_security.py - that "
+            "PLAN protects in platform/0004_enable_row_level_security.py - that "
             "migration does not run first",
+        )
+
+    def test_a_cross_app_reapplication_is_checked_against_the_writing_app(
+        self, monkeypatch
+    ):
+        """Claim 3 reads the PLAN entry's app, not the re-applying entry's module.
+
+        The two are the same app for every legitimate entry - a ``DeleteModel``
+        only drops a table in the app that owns the model - which is exactly what
+        hid the defect. With the app taken from the entry itself, a re-application
+        registered against *another* app's table was compared against that other
+        app's own ``0004``, a migration it does run after, and reported clean:
+        a check that passes for the wrong reason.
+
+        Built from two real migrations so the difference is the real graph rather
+        than a stub. ``abdm_gateway/0005_abhacallbacklog_link_token_enc_consentevent``
+        really does depend on ``abdm_gateway/0004_enable_row_level_security``, so
+        the entry's-own-app reading is satisfied; ``platform``'s graph does not
+        contain that filename at all, so the app that really wrote the policy -
+        ``platform``, whose PLAN entry names ``platform.feature_flag`` - has no
+        edge to it. The shape cannot be legitimate: the drop and the re-add of a
+        table cannot be in different apps, and nothing in the suite can establish
+        an ordering across two migration graphs.
+        """
+        script = _script()
+        entry = next(e for e in script.STANDALONE["platform"] if e.reapplies)
+        # The real platform entry is swapped out, because ``standalone_tables``
+        # refuses to register one table twice - which is itself the guarantee
+        # that keeps the re-application single.
+        monkeypatch.setattr(
+            script,
+            "STANDALONE",
+            {
+                **script.STANDALONE,
+                "platform": tuple(
+                    e for e in script.STANDALONE["platform"] if e is not entry
+                ),
+                "abdm_gateway": (
+                    *script.STANDALONE["abdm_gateway"],
+                    script.StandaloneEntry(
+                        filename=(
+                            "0005_abhacallbacklog_link_token_enc_consentevent.py"
+                        ),
+                        previous=script.FILENAME,
+                        tables=entry.tables,
+                        reapplies=entry.reapplies,
+                    ),
+                ),
+            },
+        )
+
+        problems = script.verify_reapplied()
+
+        assert problems == (
+            "abdm_gateway/0005_abhacallbacklog_link_token_enc_consentevent.py: "
+            "re-applies platform.feature_flag, which PLAN protects in "
+            "platform/0004_enable_row_level_security.py - that migration does "
+            "not run first",
         )
 
     def test_a_table_with_no_policy_is_recorded_as_deliberate(self):

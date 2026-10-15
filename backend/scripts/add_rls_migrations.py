@@ -8,6 +8,17 @@ option - Django has no first-class way to declare a policy.
 The table list is written into each migration explicitly rather than discovered
 from the live models, for the same reason makemigrations freezes its state: a
 migration must apply the same DDL it applied when it was written.
+
+**A clean run is not a coverage statement.** The three checks below compare this
+registry against the migrations it names; none of them asks whether some
+migration on disk enables a policy that *no* entry mentions. Delete this task's
+STANDALONE entry and every check here still returns empty and the run still exits
+0 - the table would keep a policy and lose its only record of where it lives,
+which reads exactly like coverage. That direction is held by
+``tests/unit/test_rls_migration_registry.py::test_every_migration_that_enables_rls_is_registered``,
+which enumerates the migration files and subtracts the registry. Keep the two in
+step: an entry added here without a test noticing is the same drift as a
+migration added without an entry, and the test is what catches it.
 """
 import importlib
 import pathlib
@@ -595,7 +606,12 @@ def verify_reapplied() -> tuple[str, ...]:
     nothing in its place, and "a table is claimed by at most one entry" is not
     available either: this table breaks it by design.
 
-    What replaces it is three claims, each of which can fail:
+    What replaces it is **two claims, not three** - one about the *sets* and one
+    about *ordering*. The set claim is stated as 1 and 2 below because it fails in
+    two directions: the tables PLAN and STANDALONE both name must be exactly the
+    tables recorded as re-applied, which is a single comparison read both ways
+    (``overlap - recorded`` and ``recorded - overlap``) rather than two
+    independent rules.
 
     1. **Every overlap is a recorded re-application.** A standalone migration
        naming a table a PLAN ``0004`` also names, without saying so, is the
@@ -605,17 +621,33 @@ def verify_reapplied() -> tuple[str, ...]:
     2. **Every re-application names a table a PLAN entry wrote.** Otherwise it
        re-applies a policy that never existed, which is a claim about a table the
        registry cannot answer for.
+
+    And then the ordering claim, which is not about the sets at all:
+
     3. **The re-application runs after the migration it re-applies.** A policy
        attached before the one it restores, or before the table exists, is a
        migration that fails on PostgreSQL and silently does nothing on the SQLite
        the fast suite runs on.
+
+    Claim 3 is checked against **the app whose PLAN entry wrote the policy**,
+    read from :func:`plan_tables` rather than taken from the re-applying entry's
+    own module. Those are the same app for every legitimate entry - a
+    ``DeleteModel`` only ever drops a table in the app that owns the model, so
+    the drop and the re-add cannot be in different apps - which is exactly why
+    taking the entry's own module passed for the wrong reason: a cross-app
+    re-application was compared against that app's own ``0004``, which it does
+    run after, and reported clean. Reading the app from the mapping means such an
+    entry is checked against the file that really wrote the policy, and since no
+    dependency edge exists between two apps' migration graphs it is reported -
+    which is right, because the shape cannot be legitimate.
 
     A fourth property, that the table has a policy at all, is
     ``tests/integration/test_rls_isolation.py``'s job: it needs a real PostgreSQL,
     and a registry entry is metadata that cannot supply one.
     """
     problems = []
-    overlap = set(plan_tables()) & set(standalone_tables())
+    plan_apps = plan_tables()
+    overlap = set(plan_apps) & set(standalone_tables())
     recorded = set(reapplied_tables())
 
     for table in sorted(overlap - recorded):
@@ -629,10 +661,17 @@ def verify_reapplied() -> tuple[str, ...]:
         )
 
     for table, (module, entry) in sorted(reapplied_tables().items()):
-        if not _runs_after(module, entry.filename, FILENAME):
+        # The app that wrote the policy, not the app holding the re-application:
+        # see the docstring. A table no PLAN entry wrote has already been
+        # reported above and has no ordering to be checked against.
+        plan_app = plan_apps.get(table)
+        if plan_app is None:
+            continue
+        if not _runs_after(plan_app, entry.filename, FILENAME):
             problems.append(
                 f"{module}/{entry.filename}: re-applies {table}, which PLAN "
-                f"protects in {FILENAME} - that migration does not run first"
+                f"protects in {plan_app}/{FILENAME} - that migration does not "
+                "run first"
             )
     return tuple(problems)
 
@@ -685,8 +724,16 @@ if __name__ == "__main__":
     # before a single byte was written, so reaching this line means the run
     # regenerated 18 files without changing any of them. The standalone count is
     # of migrations, not of apps: an app can have several.
+    #
+    # What this line is *not* is a coverage claim. It says the registry agrees
+    # with the migrations it names; it cannot say a migration exists that names
+    # no entry, and an unregistered migration leaves this count unchanged.
+    # That direction is the suite's
+    # ``test_every_migration_that_enables_rls_is_registered`` - see the module
+    # docstring - so "clean" and "complete" are two different words and only one
+    # of them is being said here.
     print(
         f"{len(PLAN)} RLS migration(s) written, all byte-identical to the "
         f"versions already applied; {len(standalone_entries())} standalone RLS "
-        f"migration(s) checked"
+        f"migration(s) checked; coverage not assessed here"
     )

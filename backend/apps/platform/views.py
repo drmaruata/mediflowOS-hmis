@@ -36,7 +36,24 @@ logger = logging.getLogger(__name__)
 #: restricted to one case, so the key that arrives in a URL, the key that reaches a
 #: ``flag_enabled(...)`` call and the key in the database are one string rather
 #: than three spellings of it.
-FLAG_KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9_.-]{0,63}")
+#:
+#: ``.`` is deliberately **not** in this character set. The router's detail route
+#: matches its lookup with ``SimpleRouter._default_value_pattern`` - ``[^/.]+`` -
+#: so a key carrying a dot does not match the URL at all: it 404s at the pattern,
+#: never reaches :meth:`FeatureFlagViewSet._validated_key`, and is refused before
+#: any code in this project sees it. Advertising a character the router cannot
+#: deliver is a contract no client can satisfy, so namespacing is spelled with
+#: ``_`` (``abdm_linkage``) and the advertised set is the routable one.
+#:
+#: The alternative - setting ``lookup_value_regex`` on the viewset to this same
+#: pattern, which ``SimpleRouter.get_lookup_regex`` prefers over its default -
+#: was rejected: it makes the router reject a key the application would have
+#: explained, turning a 400 that names the rule ("lowercase letters, digits,
+#: '_' and '-'") into a bare 404, and it leaves ``_validated_key`` with nothing
+#: left to catch on the URL path. Two layers is the arrangement worth keeping:
+#: the router accepts a segment, and this endpoint refuses the ones it will not
+#: store and says which rule they broke.
+FLAG_KEY_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 
 #: Budget for the sanitised filename the platform stores (PLT-005).
 #:
@@ -465,13 +482,17 @@ class FeatureFlagViewSet(
         reaches: the router hands the viewset whatever the path segment spelled,
         and this endpoint stores it. The key becomes part of a feature-gate name
         in code as well as part of a URL, so it is held to a shape both can
-        carry - lowercase, digits, and ``_``, ``-`` or ``.`` between them, within
-        the column's 64 characters.
+        carry - lowercase, digits, ``_`` and ``-`` between them, within the
+        column's 64 characters. See :data:`FLAG_KEY_PATTERN` for why ``.`` is
+        not among them.
 
         Refused with a validation error rather than 404 because the key is
-        present and the *request* is what is wrong with it; a key the URL cannot
-        even express never reaches here, because the router's URL pattern does not
-        match it.
+        present and the *request* is what is wrong with it. The router's own
+        pattern is the wider ``[^/.]+``, so it admits segments this endpoint
+        will not store - an uppercase key, an over-long one, a quote - and
+        those are answered here with the rule they broke. What the URL cannot
+        express at all (``/``, an empty segment, a dotted key) is a 404 that
+        never arrives, and no row is written either way.
         """
         key = self.kwargs.get(self.lookup_url_kwarg or self.lookup_field, "")
         if not isinstance(key, str) or not FLAG_KEY_PATTERN.fullmatch(key):
@@ -479,7 +500,7 @@ class FeatureFlagViewSet(
                 {
                     self.lookup_field: (
                         "A feature flag key may contain only lowercase letters, "
-                        "digits, '_', '-' and '.', must start with a letter or "
+                        "digits, '_' and '-', must start with a letter or "
                         "digit, and may be at most 64 characters."
                     )
                 }

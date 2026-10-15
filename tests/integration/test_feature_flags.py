@@ -39,6 +39,7 @@ from apps.identity_tenancy.models import Role, Tenant, UserMembership
 from apps.platform import services
 from apps.platform.models import FeatureFlag
 from apps.platform.services import flag_enabled
+from apps.platform.views import FLAG_KEY_PATTERN
 
 #: The gateway the isolation suite uses. Imported from that module rather than
 #: reimplemented, so a change to how tables are discovered cannot leave this
@@ -228,14 +229,59 @@ class TestTenantBinding:
     def test_the_helper_is_safe_inside_an_existing_transaction(self):
         """A caller that already opened one - a view, under ``ATOMIC_REQUESTS``.
 
-        The nested ``atomic()`` becomes a savepoint and the session setting is
-        scoped to it, so the read has to happen inside the block for the bind to
-        mean anything. This is the shape every in-request caller has.
+        The nested ``atomic()`` is a savepoint, and the read has to happen inside
+        it: the setting it binds is transaction-scoped, so a read issued before
+        the block would be evaluated against whatever the caller's transaction
+        already had. This is the shape every in-request caller has. It asks about
+        the *caller's own* tenant - the rebind a different tenant's question
+        would cause is the next test's subject.
         """
         FeatureFlag.objects.create(tenant_id=TENANT_A, key="nested", enabled=True)
 
         with transaction.atomic():
             assert flag_enabled(TENANT_A, "nested") is True
+
+    def test_a_nested_call_rebinds_the_enclosing_transaction_to_its_own_tenant(
+        self, monkeypatch
+    ):
+        """Pinned as a *decision*, because SQLite cannot show the effect.
+
+        ``flag_enabled``'s docstring tells a caller that asking about another
+        tenant from inside its own transaction leaves that transaction bound to
+        the other tenant for the rest of its life, and that this is a contract
+        rather than a guard. Neither half is observable on in-memory SQLite:
+        ``bind_tenant_session`` is a no-op there, so there is no setting and
+        nothing to rebind, and the PostgreSQL effect is what
+        ``tests/integration/test_rls_isolation.py`` proves against a real
+        server.
+
+        What *is* observable - and what a later change to the helper would
+        break - is the decision behind the contract: it binds the tenant it was
+        given, unconditionally, including when the enclosing transaction has
+        already bound a different one. Refusing instead ("already bound to
+        someone else, so answer ``False``") would drop the second call and fail
+        here; so would skipping the bind to avoid the rebind, which is the exact
+        branch the ``atomic()`` exists to remove.
+        """
+        FeatureFlag.objects.create(tenant_id=TENANT_B, key="partner", enabled=True)
+        calls = []
+        real_bind = services.bind_tenant_session
+
+        def spy(tenant_id, facility_id=None):
+            calls.append(str(tenant_id))
+            return real_bind(tenant_id, facility_id)
+
+        monkeypatch.setattr(services, "bind_tenant_session", spy)
+
+        # The shape the contract is about: one transaction, already bound to
+        # this caller's tenant, asking about somebody else's.
+        with transaction.atomic():
+            services.bind_tenant_session(str(TENANT_A))
+            # The question is answered honestly - a flag that is genuinely on for
+            # TENANT_B reads on. The cost is the rebind above, not a wrong answer.
+            assert flag_enabled(TENANT_B, "partner") is True
+
+        assert calls == [str(TENANT_A), str(TENANT_B)]
 
 
 class TestToggling:
@@ -330,6 +376,51 @@ class TestToggling:
         response = client.put(f"{FLAGS_URL}{key}/", {"enabled": True})
 
         assert response.status_code in (400, 404), response.content
+        assert not FeatureFlag.objects.exists()
+
+    @pytest.mark.parametrize(
+        "key",
+        ["a", "0", "abdm-linkage", "lab_automation", "v2_x-0", "a" * 64],
+        ids=["one", "digit", "hyphen", "underscore", "mixed", "max-length"],
+    )
+    def test_every_advertised_key_shape_is_routable(self, admin_a, key):
+        """The charset the module documents is the charset the router delivers.
+
+        ``FLAG_KEY_PATTERN`` used to advertise ``.``, which
+        ``SimpleRouter._default_value_pattern`` (``[^/.]+``) cannot match - so a
+        dotted key 404ed at the URL pattern and never reached the validation
+        that claimed to accept it. The two sets are now pinned against each
+        other in the running system rather than against the router's constant,
+        because the constant is the thing that could change: every character the
+        pattern claims is put through a real URL and has to reach the row.
+
+        The upper bound is included deliberately - a 64-character key is the
+        column's own limit, so a pattern that were tightened below it would be
+        advertised as accepted and then refused.
+        """
+        client, _ = admin_a
+
+        response = client.put(f"{FLAGS_URL}{key}/", {"enabled": True})
+
+        assert response.status_code == 200, response.content
+        assert FeatureFlag.objects.get().key == key
+
+    def test_a_dotted_key_is_neither_routable_nor_advertised(self, admin_a):
+        """The other direction: what the router drops is not in the charset.
+
+        Pinned as a pair with the case above. ``.`` is the one character whose
+        absence from the pattern is a decision rather than an accident - a dotted
+        key is a reasonable thing to want (``abdm.linkage``) and it is refused
+        because the router cannot route it, so the refusal has to be visible in
+        both places at once: a 404 at the URL pattern, and no claim anywhere
+        that it would have been accepted.
+        """
+        client, _ = admin_a
+
+        response = client.put(f"{FLAGS_URL}abdm.linkage/", {"enabled": True})
+
+        assert response.status_code == 404, response.content
+        assert FLAG_KEY_PATTERN.fullmatch("abdm.linkage") is None
         assert not FeatureFlag.objects.exists()
 
     def test_a_patch_changes_only_what_it_names(self, admin_a):
@@ -610,19 +701,59 @@ class TestRowLevelSecurityWiring:
             assert "platform.feature_flag" in marks[0].args[1], case
 
     def test_the_migration_creates_the_table_and_re_enables_the_policy(self):
+        """The table and the policy are attached in one migration, in that order.
+
+        Two structural claims and not one textual one. Deleting
+        ``migrations.RunPython(forwards, backwards)`` from ``0007``'s
+        ``operations`` leaves ``rls.enable``, ``rls.disable`` and
+        ``is_postgres`` all still reading in the file - ``forwards`` and
+        ``backwards`` are still defined, just referenced by nothing - so a check
+        that only greps the source passes on a migration that attaches no policy
+        at all, and says nothing about order, which is the half that actually
+        matters: the policy has to land on a table that exists, or the
+        ``RunPython`` raises on PostgreSQL and no-ops on the SQLite the fast
+        suite runs on.
+
+        So the operations are compared as *operations*: exactly one
+        ``CreateModel`` for ``FeatureFlag``, exactly one ``RunPython``, the
+        ``RunPython``'s code and reverse-code the module's own ``forwards`` and
+        ``backwards`` (so the operation that runs is provably the one holding
+        ``rls.enable``, not an unrelated one), and the ``RunPython`` *after* the
+        ``CreateModel``. The substring assertions are kept as a floor on the
+        bodies of those two functions - they are what a future refactor of
+        ``forwards`` has to keep.
+        """
         migration = import_module(MIGRATION_MODULE)
+        operations = migration.Migration.operations
         source = Path(migration.__file__).read_text(encoding="utf-8")
 
         assert migration.TABLES == ("platform.feature_flag",)
         # The table is created *by this migration* - not by a re-run of 0001,
         # which would be a rewrite of applied history.
-        assert any(
-            isinstance(operation, migrations.CreateModel)
+        created = [
+            index
+            for index, operation in enumerate(operations)
+            if isinstance(operation, migrations.CreateModel)
             and operation.name == "FeatureFlag"
-            for operation in migration.Migration.operations
-        )
-        # ...and the policy is attached in the same migration, after the table
-        # exists, because the one 0004 applied no longer exists.
+        ]
+        assert len(created) == 1, operations
+        attached = [
+            index
+            for index, operation in enumerate(operations)
+            if isinstance(operation, migrations.RunPython)
+        ]
+        assert len(attached) == 1, operations
+        # ...and the policy is attached in the same migration, *after* the table
+        # exists, because the one 0004 applied no longer exists. The comparison is
+        # on indices rather than on membership, so an inversion is a failure
+        # rather than a silently reordered file.
+        assert attached[0] > created[0], operations
+        run_python = operations[attached[0]]
+        assert run_python.code is migration.forwards
+        assert run_python.reverse_code is migration.backwards
+        # The bodies those two names point at are what the indices above cannot
+        # see, so they are still pinned - as the floor they are, not as the
+        # evidence.
         assert "rls.enable(TABLES" in source
         assert "rls.disable(TABLES" in source
         assert "is_postgres" in source
