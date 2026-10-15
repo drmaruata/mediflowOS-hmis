@@ -10,7 +10,7 @@ from .models import Triage
 from .serializers import TriageSerializer
 
 #: Refusal for a request that names two different triage categories through the
-#: two spellings below. Named so a client - and the test suite - can match the
+#: two spellings below. Named so a client — and the test suite — can match the
 #: contract rather than the prose, and so the two names can never drift apart.
 FILTER_CONFLICT_MESSAGE = (
     "category and status name different triage categories. 'status' "
@@ -52,14 +52,14 @@ class TriageViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
     )
     @action(detail=False, methods=["get"])
     def tracking_board(self, request):
-        """ER tracking board - REST polling, not Channels (PLT-003, INT-013).
+        """ER tracking board — REST polling, not Channels (PLT-003, INT-013).
 
         Filtered on ``Triage.category``, the column that exists. The board used
         to filter on ``status``, which ``Triage`` does not have: its fields are
         ``tenant_id, patient_id, category, arrival_time,
         first_assessment_time, mlc_flag``. Filtering on a column that is not
         there raises ``FieldError`` out of the view, so every ``?status=``
-        request answered 500 - a waiting-room board that broke the moment an ER
+        request answered 500 — a waiting-room board that broke the moment an ER
         nurse filtered it. ``apps/ipd/views.py``'s bed board docstring records
         the same mistake on ``facility_id``; this is that bug, second time.
 
@@ -67,7 +67,7 @@ class TriageViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         rather than dropped: ``/api/v1/tokens/queue/`` filters on a real
         ``status`` column, and a client carrying that convention to a second
         board should get the rows it asked for, not a 500. Send both names
-        with different values and the request contradicts itself - answered 400
+        with different values and the request contradicts itself — answered 400
         with a message naming the conflict, rather than silently preferring one
         and reporting a board the caller did not ask for.
 

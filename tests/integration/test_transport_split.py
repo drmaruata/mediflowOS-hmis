@@ -1,7 +1,7 @@
 """REST boards vs. Channels sockets: the split is pinned, not assumed (PLT-003, PLT-008, INT-013).
 
-Architecture doc section 13 approves **two** WebSocket consumers - notification
-delivery and live vitals - and requires every other operational screen to poll
+Architecture doc section 13 approves **two** WebSocket consumers — notification
+delivery and live vitals — and requires every other operational screen to poll
 over REST. That split is a security and architecture boundary, not a
 preference: a socket's tenant is bound once, at handshake time, from a signed
 claim, while a REST board is scoped per request from the same claim; a board
@@ -13,7 +13,7 @@ Each pin below names the failure it would catch:
 ``TestOperationalBoardsAreRest``
     A board that reaches for the channel layer, reaches a consumer, or routes
     somewhere other than a DRF action. The channel layer is replaced with a
-    guard that raises, so a 200 proves the request never touched Channels -
+    guard that raises, so a 200 proves the request never touched Channels —
     and the guard is asserted to be *armed* first, because a 200 under a patch
     that missed its call site is the vacuous pass this test exists to rule out.
 
@@ -27,8 +27,8 @@ Each pin below names the failure it would catch:
 
 ``TestBoardTenantScoping``
     Horizontal isolation of all three boards. A viewset whose queryset was
-    dropped from ``TenantScopedQuerysetMixin`` still answers 200 - with another
-    hospital's rows - so the assertion is on the returned identifiers, not on
+    dropped from ``TenantScopedQuerysetMixin`` still answers 200 — with another
+    hospital's rows — so the assertion is on the returned identifiers, not on
     the status code, and the foreign row's id is checked absent from the raw
     body as well.
 
@@ -40,7 +40,7 @@ Each pin below names the failure it would catch:
 What is **not** claimed: none of this exercises PostgreSQL. Row level security
 is what actually enforces isolation in production, and its cross-tenant proof
 stays behind the ``MEDIFLOW_TEST_PG*`` gate in ``test_rls_isolation.py``. What
-is pinned here is the application-side half - the transport split, and the
+is pinned here is the application-side half — the transport split, and the
 queryset scoping that a missing RLS policy would otherwise expose.
 """
 import ast
@@ -77,7 +77,7 @@ TENANT_A = uuid.UUID("c7a30000-0000-4000-8000-00000000000a")
 TENANT_B = uuid.UUID("d8b40000-0000-4000-8000-00000000000b")
 
 QUEUE_URL = "/api/v1/tokens/queue/"
-#: The bed board is registered twice - once as an explicit top-level path and
+#: The bed board is registered twice — once as an explicit top-level path and
 #: once as the router's detail=False action. Both are pinned, because both are
 #: live and a client holding either must get the same tenant-scoped board.
 BED_BOARD_URLS = ("/api/v1/bed-status/board/", "/api/v1/board/")
@@ -147,11 +147,11 @@ def no_channels(monkeypatch):
     Three seams are closed, because a board could reach Channels through any of
     them and closing one is not evidence about the others:
 
-    * ``channels.layers.get_channel_layer`` - what view code that wants to push
+    * ``channels.layers.get_channel_layer`` — what view code that wants to push
       an event calls, and what ``apps.platform.views`` holds a module-level
       reference to (hence that module is patched by name too, since rebinding
       ``channels.layers`` would not reach an already-bound name);
-    * ``channels.consumer.get_channel_layer`` - the *same function object*, but
+    * ``channels.consumer.get_channel_layer`` — the *same function object*, but
       re-imported into ``channels.consumer``'s namespace, which is the one every
       consumer calls from ``AsyncConsumer.__call__``;
     * both consumers' ``connect`` entry points, so a socket opened during a
@@ -184,7 +184,7 @@ def _tenant_client(slug, username, tenant_id):
     :class:`common.authentication.TenantBoundJWTAuthentication` reads inside the
     view, so these clients travel the production path. ``force_authenticate``
     plus an ``X-Tenant-Id`` header would have been shorter, but it would leave
-    the scoping under test resting on a header a caller can edit - which is the
+    the scoping under test resting on a header a caller can edit — which is the
     one mechanism this codebase removed.
 
     The tenant id is passed in rather than minted here so the seeded board rows
@@ -280,7 +280,7 @@ def _asgi_websocket_router():
     is one closure cell deep inside the middleware rather than an attribute
     anybody can read. Walking the closure is what makes this pin about the
     *served* routing table rather than about the module someone expects to be
-    the one in use - a second list declared inline in ``asgi.py`` would satisfy
+    the one in use — a second list declared inline in ``asgi.py`` would satisfy
     every other assertion in this file and route somewhere else entirely.
     """
     assert isinstance(asgi_application, ProtocolTypeRouter), type(asgi_application)
@@ -354,7 +354,7 @@ class TestOperationalBoardsAreRest:
 
         The HTTP URLconf has no ``ws/`` prefix and the websocket router has no
         ``api/v1`` prefix, so "it answers 200" and "it is routed over HTTP" are
-        separate claims and this is the second one - asserted by naming the
+        separate claims and this is the second one — asserted by naming the
         viewset and the action the router bound.
         """
         viewset, action, urls = BOARDS[board]
@@ -363,7 +363,19 @@ class TestOperationalBoardsAreRest:
             match = resolve(url)
 
             assert match.func.cls is viewset, url
-            assert getattr(viewset, action, None) is not None, (viewset, action)
+            # Which action the router bound to *this* URL, read from DRF's own
+            # ``as_view`` mapping rather than from ``BOARDS``. The previous
+            # ``getattr(viewset, action, None)`` could not fail — ``action`` is
+            # read out of ``BOARDS`` and the attribute is on the class by
+            # construction — so it would have stayed green if a board path were
+            # silently re-pointed at ``list`` or ``retrieve``.
+            assert match.func.actions.get("get") == action, (url, match.url_name)
+            # The route *name* the same URL is registered under, which is what
+            # ``reverse()`` resolves. The explicit top-level aliases are
+            # registered without the router's basename, so the name ends with
+            # the action's hyphenated name rather than being equal to it —
+            # ``tracking-board`` beside ``triage-tracking-board``.
+            assert match.url_name.endswith(action.replace("_", "-")), (url, match.url_name)
 
     @pytest.mark.parametrize("board", sorted(BOARDS))
     def test_no_board_path_is_routed_by_the_websocket_router(self, board):
@@ -387,7 +399,7 @@ class TestOperationalBoardsAreRest:
         """Structural pin: a board view may not import Channels at all.
 
         Parsed rather than grepped. A substring check would be defeated by an
-        ``import channels_redis``-style prefix in a comment, and - worse - it
+        ``import channels_redis``-style prefix in a comment, and — worse — it
         would not distinguish an import from a mention, so the cheapest way to
         silence this pin would be to reword the docstring. What is asserted is
         the set of modules the three board view modules actually import, which
@@ -414,7 +426,7 @@ class TestOperationalBoardsAreRest:
         """Deny-by-default holds on the boards too.
 
         All three carry tenant-owned rows, so none may be reachable without a
-        credential - 401 specifically, because ``IsAuthenticated`` runs before
+        credential — 401 specifically, because ``IsAuthenticated`` runs before
         anything tenant-specific and an anonymous caller has claimed no tenant
         to be told it lacks.
         """
@@ -444,7 +456,7 @@ class TestWebSocketRouteSet:
         assert served == EXPECTED_CONSUMER_FOR
 
     def test_the_asgi_application_dispatches_only_http_and_websocket(self):
-        """No third protocol branch, and HTTP is Django - not the socket router.
+        """No third protocol branch, and HTTP is Django — not the socket router.
 
         A ``ProtocolTypeRouter`` entry is the only way a non-HTTP transport
         enters this application, so the *keys* are part of the boundary: an
@@ -461,8 +473,8 @@ class TestWebSocketRouteSet:
 
         Identity, not equality. ``config.asgi.py`` passes the imported list
         straight to ``URLRouter``, so an inline second list declared in
-        ``asgi.py`` - the way someone adds a third consumer while "just trying
-        something" - leaves every other assertion in this file green while
+        ``asgi.py`` — the way someone adds a third consumer while "just trying
+        something" — leaves every other assertion in this file green while
         routing somewhere the app never declared.
         """
         router = _asgi_websocket_router()
@@ -482,7 +494,7 @@ class TestWebSocketRouteSet:
 
     @pytest.mark.parametrize("path", sorted(APPROVED_WEBSOCKET_ROUTES))
     def test_each_approved_route_is_live_in_the_running_application(self, path, context_a):
-        """The set is not just declared - a real handshake reaches the consumer.
+        """The set is not just declared — a real handshake reaches the consumer.
 
         Driven through ``config.asgi.application`` exactly as Task 22's suite
         drives it, so this agrees with that pin instead of restating it: the
@@ -498,10 +510,10 @@ class TestWebSocketRouteSet:
 
         Carrying a *valid* token is what makes this meaningful: with a bogus
         one the Task 22 middleware closes the handshake at 4401 first, and the
-        router is never consulted at all - so a pass here would prove only that
+        router is never consulted at all — so a pass here would prove only that
         auth works, not that no route exists for the path. Channels' outermost
         ``URLRouter`` raises ``ValueError("No route found for path ...")` when
-        nothing matches, and that refusal is what is asserted here - pinned as a
+        nothing matches, and that refusal is what is asserted here — pinned as a
         claim about the served application, driven through the real handshake
         machinery.
         """
@@ -562,9 +574,9 @@ class TestBoardTenantScoping:
     ):
         """Fail closed, not fail open.
 
-        A caller who is authenticated but whose request resolves no tenant - the
+        A caller who is authenticated but whose request resolves no tenant — the
         header absent and the credential dropped, so
-        ``TenantBoundJWTAuthentication`` has no signed claim to bind - must get
+        ``TenantBoundJWTAuthentication`` has no signed claim to bind — must get
         an empty board, never an unfiltered one. This is the
         ``TenantScopedQuerysetMixin`` contract the three boards inherit, pinned
         here because an empty 200 is indistinguishable from a working one until
@@ -600,8 +612,8 @@ class TestEmergencyTrackingBoardFilters:
         filter on ``status``, a column ``Triage`` does not have, so every
         ``?status=`` request raised ``FieldError: Cannot resolve keyword
         'status' into field`` out of the view and answered 500. The IPD board
-        docstring records the identical bug - ``facility_id`` on a model with no
-        such column - and the same reasoning is applied here.
+        docstring records the identical bug — ``facility_id`` on a model with no
+        such column — and the same reasoning is applied here.
         """
         response = client_a.get(f"{url}?category=I")
 
@@ -656,7 +668,7 @@ class TestEmergencyTrackingBoardFilters:
         two halves ask for different things, and the caller would have no way
         to know which board they were looking at. The message is asserted as a
         literal rather than against the view's own constant, so rewording the
-        refusal - a client matching on it - fails here.
+        refusal — a client matching on it — fails here.
         """
         response = client_a.get(f"{url}?category=I&status=V")
 
@@ -675,7 +687,7 @@ class TestEmergencyTrackingBoardFilters:
         """Ordering is preserved by the repair.
 
         The filter was rewritten; ``order_by("-arrival_time")`` is part of the
-        board's contract - the ER screen shows the newest arrival at the top -
+        board's contract — the ER screen shows the newest arrival at the top —
         so it is asserted rather than assumed.
         """
         response = client_a.get(url)
