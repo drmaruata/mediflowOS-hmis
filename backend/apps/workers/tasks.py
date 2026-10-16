@@ -3,33 +3,24 @@
 Two families of task live here, and the split is the whole design:
 
 * **per-tenant tasks** — ``dispatch_notification``, ``purge_expired_audit_events``,
-  ``run_scheduled_job`` and ``scan_abdm_callback_failures``. Each takes its
-  tenant context explicitly (an argument, or a row whose own tenant is bound
-  from it), opens its own ``transaction.atomic()`` and calls
-  ``bind_tenant_session`` *inside* it. AGENTS.md §4 is explicit that a task
-  must never run without tenant context, and ``common/tenant.py`` is explicit
-  that ``set_config(..., is_local=true)`` is transaction-scoped — binding
-  outside the block would be silently discarded and the queries would run
-  unscoped.
+  ``run_scheduled_job`` and ``scan_abdm_callback_failures``. Each takes its tenant
+  context explicitly, opens its own ``transaction.atomic()`` and calls
+  ``bind_tenant_session`` *inside* it. ``set_config(..., is_local=true)`` is
+  transaction-scoped, so binding outside the block would be silently discarded and
+  the queries would run unscoped.
 
-* **dispatchers** — the ``dispatch_*`` tasks the beat schedule points at. A
-  static ``CELERY_BEAT_SCHEDULE`` is frozen when the settings module is
-  imported, while tenants are created at runtime, so the schedule cannot carry
-  a tenant id. Each dispatcher is therefore zero-argument: it enumerates the
-  tenants and enqueues the per-tenant task over them. The tenant ids reach the
-  work through the message, not through the schedule.
+* **dispatchers** — the ``dispatch_*`` tasks the beat schedule points at. A static
+  ``CELERY_BEAT_SCHEDULE`` is frozen at settings import while tenants are created
+  at runtime, so the schedule cannot carry a tenant id. Each dispatcher is
+  therefore zero-argument: it enumerates the tenants and enqueues the per-tenant
+  task over them.
 
 Every task carries the same retry policy below and an idempotency guard, because
 a task that may be retried must not double-write: the notification sweep leaves
-``delivered`` to the consumer, the job claim is a conditional UPDATE, the purge
-is a delete, and the ABDM alert matches a constant title inside its window. The
-permanent no-op paths (a notification row that is gone, a job already claimed)
-return instead of raising, so ``autoretry_for`` never spins on a condition
-retrying cannot fix.
-
-Task 18's ABD-014 alert is here under the name the R1 plan pins:
-``task_scan_callback_failures`` became ``scan_abdm_callback_failures`` so every
-task in this module reads the same way. Its behaviour is unchanged.
+``delivered`` to the consumer, the job claim is a conditional UPDATE, the purge is
+a delete, and the ABDM alert matches a constant title inside its window. The
+permanent no-op paths return instead of raising, so ``autoretry_for`` never spins
+on a condition retrying cannot fix.
 """
 import logging
 from datetime import timedelta
@@ -43,69 +34,62 @@ from common.tenant import bind_tenant_session
 logger = logging.getLogger(__name__)
 
 
-#: Retry policy shared by every task (PLT-004: "retry, back-off and
-#: visibility"). Applied as one dict so a task added later cannot quietly land
-#: with a different policy than the ones already live — the test suite asserts
-#: these attributes on every registered task, which is the backstop for a task
-#: written without it.
+#: Retry policy shared by every task (PLT-004). One dict so a task added later
+#: cannot quietly land with a different policy; the test suite asserts these
+#: attributes on every registered task, which is the backstop for a task written
+#: without it.
 RETRY_POLICY = {
     "autoretry_for": (Exception,),
     "max_retries": 5,
-    # Exponential: Celery waits ``2 ** retries`` seconds, so 2s, 4s, 8s, 16s and
-    # 32s across the five attempts.
+    # Exponential: Celery waits ``2 ** retries`` seconds — 2s, 4s, 8s, 16s, 32s.
     "retry_backoff": True,
-    # Caps the wait at 600s — Celery's own default, pinned here rather than
-    # inherited, so an upstream default change cannot silently stretch a retry
-    # storm. ``retry_jitter`` is deliberately left unset: Celery enables it by
-    # default, and jitter is what stops every worker for one tenant retrying in
-    # lockstep.
+    # Pinned rather than inherited so an upstream default change cannot silently
+    # stretch a retry storm. ``retry_jitter`` is deliberately left unset: Celery
+    # enables it by default, and jitter is what stops every worker for one tenant
+    # retrying in lockstep.
     "retry_backoff_max": 600,
 }
 
 #: How many tenants one dispatcher run will fan out over. A dispatcher is a
-#: single Celery message, so a deployment large enough to exceed this has to
-#: notice — the result carries ``truncated`` — rather than silently sweep a
-#: fixed prefix forever.
+#: single Celery message, so a deployment large enough to exceed this has to notice
+#: — the result carries ``truncated`` — rather than silently sweep a fixed prefix.
 TENANT_ENUMERATION_LIMIT = 500
 
-#: How many due ``platform.scheduled_job`` rows one dispatcher run will claim
-#: per tenant. One hospital's backlog must not crowd every other hospital's
-#: jobs out of a single message; the remainder is picked up on the next pass.
+#: How many due ``platform.scheduled_job`` rows one dispatcher run claims per
+#: tenant. One hospital's backlog must not crowd every other hospital's jobs out
+#: of a single message; the remainder is picked up on the next pass.
 DUE_JOB_LIMIT = 100
 
-#: How many undelivered notifications one dispatcher run will push per tenant,
-#: for the same reason. A row past the bound is swept again, which is safe
-#: because the only thing that clears a row is a consumer receiving it.
+#: How many undelivered notifications one dispatcher run pushes per tenant, for
+#: the same reason. A row past the bound is swept again, which is safe because the
+#: only thing that clears a row is a consumer receiving it.
 PENDING_NOTIFICATION_LIMIT = 100
 
-#: ABD-014: how far back the scan looks. One hour is long enough that a burst
-#: of rejections is a signal rather than a spike, and short enough that the
-#: same burst does not suppress a fresh alert after the fact — the window is
-#: both what is counted and what makes the alert idempotent.
+#: ABD-014: how far back the scan looks. Long enough that a burst of rejections is
+#: a signal rather than a spike, short enough that the same burst does not
+#: suppress a fresh alert after the fact — the window is both what is counted and
+#: what makes the alert idempotent.
 FAILURE_WINDOW = timedelta(hours=1)
 
 #: ABD-014: how many rejections inside the window constitute "abnormal". The
-#: gateway refuses a bad call cheaply (an HMAC mismatch costs one hash), so a
-#: real misconfiguration or an abusive sender shows up as a burst within
-#: minutes, and single bad calls from a misbehaving source app are not an
-#: incident. The ``scan-abdm-callback-failures`` beat entry runs this hourly, so
-#: every hour is covered exactly once.
+#: gateway refuses a bad call cheaply (an HMAC mismatch costs one hash), so a real
+#: misconfiguration shows up as a burst within minutes and single bad calls are
+#: not an incident. The beat entry runs this hourly, so every hour is covered once.
 FAILURE_THRESHOLD = 5
 
 #: ABD-014: the alert title. Deliberately a constant rather than a message
-#: carrying the count: it is the key the idempotency guard matches on, so a
-#: second run in the same window can recognise "this burst was already
-#: reported" instead of counting on the text to be identical.
+#: carrying the count: it is the key the idempotency guard matches on, so a second
+#: run in the same window can recognise "this burst was already reported" instead
+#: of counting on the text to be identical.
 CALLBACK_FAILURE_ALERT_TITLE = "ABDM callback failure burst"
 
-#: ABD-014: what counts as a failure when counting. ``ABHACallbackLog.status``
-#: already carries ``rejected``, but no writer emits it today — the callback
-#: view refuses an unauthenticated, malformed, stale or unknown-facility call
-#: before any ledger row exists, and the "no OPD department" refusal returns
-#: from inside the atomic block before the row is written. So this scan is
-#: deliberately forward-looking: it counts what the ledger records, and the
-#: count stays empty until a writer records rejections. That is a statement
-#: about what is instrumented, not a defect to paper over.
+#: ABD-014: what counts as a failure. ``ABHACallbackLog.status`` already carries
+#: ``rejected``, but **no writer emits it today** — the callback view refuses an
+#: unauthenticated, malformed, stale or unknown-facility call before any ledger
+#: row exists, and the "no OPD department" refusal returns from inside the atomic
+#: block before the row is written. So this scan counts what the ledger records
+#: and stays empty until a writer records rejections. That is a statement about
+#: what is instrumented, not a defect to paper over.
 FAILURE_STATUS = "rejected"
 
 
@@ -113,35 +97,27 @@ FAILURE_STATUS = "rejected"
 def dispatch_notification(notification_id, tenant_id):
     """Push one persisted notification to its tenant's sockets (PLT-001, INT-012).
 
-    The tenant is an explicit argument rather than being read off the row, and
-    the reason is the RLS policy on ``platform.notification``: the table carries
-    a ``tenant_isolation`` policy whose predicate is
-    ``tenant_id = current_setting('app.tenant_id')``, and it fails closed when
+    The tenant is an explicit argument rather than being read off the row, because
+    ``platform.notification`` carries a ``tenant_isolation`` policy whose predicate
+    is ``tenant_id = current_setting('app.tenant_id')`` and which fails closed when
     the setting is unset. Reading the row *first* to discover its tenant would
     therefore return nothing on PostgreSQL and the task would treat every real
-    notification as missing — it would work in the SQLite suite and nowhere
-    else. It is also the pk-only read AGENTS.md §4 forbids. So the dispatcher,
-    which already knows the tenant, passes it in, and the lookup names both
-    ids: a fabricated id belonging to another hospital matches nothing.
+    notification as missing — working in the SQLite suite and nowhere else. The
+    lookup naming both ids also means a fabricated id belonging to another
+    hospital matches nothing.
 
     ``delivered`` is *not* flipped here. The flip belongs to the consumer that
-    actually sends the frame (T22): a task that marked the row delivered would
-    claim success for a push that may have reached no socket at all, and the
-    row would then be excluded from every later sweep. With no socket connected
-    the row stays ``delivered=False``, which is the honest state and the one
-    that gets it swept again.
-
-    A row that is gone or already delivered is a no-op that returns a reason
-    instead of raising: a retried dispatch must not spin on a condition
-    retrying cannot fix.
+    actually sends the frame: a task that marked the row delivered would claim
+    success for a push that may have reached no socket, and the row would then be
+    excluded from every later sweep. With no socket connected the row stays
+    ``delivered=False``, which is both the honest state and the one that gets it
+    swept again.
     """
     with transaction.atomic():
         bind_tenant_session(str(tenant_id))
 
-        # Imported inside the task rather than at module scope: this module is
-        # imported by Celery's autodiscovery while the app registry is still
-        # being populated, and apps.platform.views pulls in DRF and the channel
-        # layer. Task 18's models were imported the same way.
+        # Imported inside the task: this module is imported by Celery's autodiscovery
+        # while the app registry is still being populated.
         from apps.platform.models import Notification
         from apps.platform.serializers import NotificationSerializer
         from apps.platform.views import _push_notification
@@ -171,14 +147,11 @@ def dispatch_notification(notification_id, tenant_id):
                 reason="already delivered",
             )
 
-        # Reused rather than reimplemented so this and the view's push path
-        # cannot drift apart. It logs and swallows a channel-layer failure by
-        # design (T22): the row is already committed, so raising would turn a
-        # succeeded write into a 500 and the client would retry it into a
-        # duplicate. A push that failed leaves ``delivered`` False, so the next
-        # sweep picks the row up again — that is the recovery path, and it is
-        # why the retry policy on this task exists for database errors rather
-        # than for the transport.
+        # Reused rather than reimplemented so this and the view's push path cannot
+        # drift apart. It logs and swallows a channel-layer failure by design:
+        # the row is already committed, so raising would turn a succeeded write
+        # into a 500 and the client would retry it into a duplicate. A failed push
+        # leaves ``delivered`` False, so the next sweep picks the row up again.
         _push_notification(str(tenant_id), NotificationSerializer(notification).data)
 
     return _dispatch_result(notification_id, tenant_id, pushed=True)
@@ -188,24 +161,19 @@ def dispatch_notification(notification_id, tenant_id):
 def purge_expired_audit_events(tenant_id):
     """Delete this tenant's audit events past the retention window (AUD-004).
 
-    Scheduled nightly at 02:00 by the ``purge-expired-audit-events`` beat entry,
-    off-peak. The retention window is resolved inside :func:`purge_expired` from
-    ``settings.AUDIT_RETENTION_DAYS``, so a scheduled job cannot run with a
-    different window than the operator configured just because the caller
-    forgot to pass one.
+    Scheduled nightly off-peak. The window is resolved inside
+    :func:`purge_expired` from ``settings.AUDIT_RETENTION_DAYS``, so a scheduled
+    job cannot run with a different window than the operator configured.
 
-    Idempotent by nature: the second run finds nothing left inside the window
-    and deletes zero. ``audit.event`` is RLS-protected, so the binding below is
-    what makes the delete land on this tenant's rows and only those — the
-    purge of one hospital's retention policy must never touch another's
-    evidence.
+    Idempotent by nature: the second run finds nothing inside the window and
+    deletes zero. ``audit.event`` is RLS-protected, so the binding below is what
+    makes the delete land on this tenant's rows and only those.
     """
     from apps.audit.services import purge_expired
 
-    # The session binding has to live inside the transaction (see
-    # common/tenant.py): ``set_config(..., is_local=true)`` is
-    # transaction-scoped, so binding outside the block would be discarded and
-    # the queries would run with no tenant context at all.
+    # The binding must live inside the transaction: ``set_config(...,
+    # is_local=true)`` is transaction-scoped, so binding outside the block would
+    # be discarded and the queries would run with no tenant context at all.
     with transaction.atomic():
         bind_tenant_session(str(tenant_id))
         deleted = purge_expired(tenant_id=tenant_id)
@@ -217,27 +185,21 @@ def purge_expired_audit_events(tenant_id):
 def run_scheduled_job(job_id):
     """Claim one due ``platform.scheduled_job`` row and run it (PLT-004).
 
-    ``platform.scheduled_job`` carries no RLS policy — migration
-    ``apps/platform/migrations/0004_enable_row_level_security.py`` freezes only
-    ``platform.notification`` and ``platform.feature_flag`` — so the row is
-    resolved first and its own tenant becomes the session context. Application
-    scoping is therefore the only control on this table, and every write below
-    is filtered by ``row.tenant_id`` so the row's tenant bounds the whole run
-    even though the database does not enforce it.
+    ``platform.scheduled_job`` carries no RLS policy, so the row is resolved first
+    and its own tenant becomes the session context. Application scoping is
+    therefore the only control on this table, and every write below is filtered by
+    ``row.tenant_id`` so the row's tenant bounds the whole run.
 
-    Re-entrancy is the claim: a single
-    ``UPDATE ... WHERE id = %s AND tenant_id = %s AND status = 'pending'``.
-    A row already claimed updates zero rows and the task returns, so a
-    scheduler that fires twice, or a worker that replays the message, executes
-    the job once and leaves exactly one ``started_at`` and one result. This is
-    the guarantee ``ScheduledJobViewSet`` can show a user, and it is why the
-    claim must stay a conditional UPDATE rather than a read-then-write: two
-    workers reading ``pending`` would both proceed.
+    Re-entrancy is the claim: a single conditional ``UPDATE``. A row already
+    claimed updates zero rows and the task returns, so a scheduler that fires
+    twice, or a worker that replays the message, executes the job once. The claim
+    must stay a conditional UPDATE rather than a read-then-write — two workers
+    reading ``pending`` would both proceed.
 
     In R1 no ``job_type`` has an implementation (see ``_JOB_HANDLERS``), so a
-    claimed job is parked as ``failed`` with a reason. A parked job must not
-    sit ``running`` forever with no result to show: that would hide a real
-    starvation from the very visibility surface PLT-004 asks for.
+    claimed job is parked as ``failed`` with a reason: a parked job must not sit
+    ``running`` forever with no result, which would hide a real starvation from
+    the very visibility surface PLT-004 asks for.
     """
     from apps.platform.models import ScheduledJob
 
@@ -269,12 +231,10 @@ def run_scheduled_job(job_id):
                 reason="already claimed",
             )
 
-        # R1 ships no engine for any job_type — the indicator engine
-        # (``indicator_computation``), the report generator
-        # (``report_generation``) and the async callback re-processor (``sync``)
-        # are all post-R1. The claim above is still real work: it is what a
-        # future handler will be invoked under, and it is what stops a
-        # scheduler from double-running a job in the meantime.
+        # R1 ships no engine for any job_type — the indicator engine, the
+        # report generator and the async callback re-processor are all post-R1.
+        # The claim above is still real work: it is what a future handler will be
+        # invoked under, and it stops a scheduler double-running a job meanwhile.
         reason = f"{row['job_type']} has no R1 implementation — engine deferred"
         ScheduledJob.objects.filter(id=row["id"], tenant_id=row["tenant_id"]).update(
             status="failed",
@@ -301,31 +261,27 @@ def run_scheduled_job(job_id):
 def scan_abdm_callback_failures(tenant_id):
     """Alert a tenant's administrators on a burst of ABDM callback failures (ABD-014).
 
-    The tenant id is an explicit argument (AGENTS.md async rule: a task never
-    runs without tenant context) and every query, count and write below is
+    The tenant id is an explicit argument and every query, count and write below is
     scoped by it, so one tenant's burst can neither raise an alert in another
     tenant nor read its rows.
 
-    The alert is a ``platform.notification`` per active membership whose role
-    is privileged — ``Role.require_mfa`` is the documented privileged-role
-    marker (TEN-006) and is the predicate the TEN-007 break-glass alert already
-    fans out over, so ABD-014 uses one predicate instead of a second one. The
-    body carries the count and the window only: a burst is an operational
-    event, not a clinical one, so no patient, ABHA number, request id or
-    demographic value is written into a row that a notification screen reads.
+    The alert is a ``platform.notification`` per active membership whose role is
+    privileged — ``Role.require_mfa`` is the documented privileged-role marker
+    (TEN-006) and the predicate the TEN-007 break-glass alert already fans out
+    over, so ABD-014 uses one predicate instead of a second one. The body carries
+    the count and the window only: a burst is an operational event, not a clinical
+    one, so no patient, ABHA number or request id reaches a row a notification
+    screen reads.
 
-    Idempotent by design (a retried task must not double-write): within one
-    window the guard is "a critical alert with this title already exists", so
-    a scheduler that runs twice, or a worker that replays the task, raises one
-    alert rather than one per run. A burst in a later hour is outside the
-    earlier window and does alert again.
+    Idempotent by design: within one window the guard is "a critical alert with
+    this title already exists", so a scheduler that runs twice raises one alert
+    rather than one per run. A burst in a later hour does alert again.
     """
     window_start = timezone.now() - FAILURE_WINDOW
 
-    # The session binding has to live inside the transaction (see
-    # common/tenant.py): ``set_config(..., is_local=true)`` is
-    # transaction-scoped, so binding outside the block would be discarded and
-    # the queries would run with no tenant context at all.
+    # The binding must live inside the transaction: ``set_config(...,
+    # is_local=true)`` is transaction-scoped, so binding outside the block would
+    # be discarded and the queries would run with no tenant context at all.
     with transaction.atomic():
         bind_tenant_session(tenant_id)
 
@@ -351,8 +307,7 @@ def scan_abdm_callback_failures(tenant_id):
             created_at__gte=window_start,
         ).exists():
             # Already reported inside this window: nothing to add. This is the
-            # whole of the idempotency guard, and it is why the title is a
-            # constant.
+            # whole of the idempotency guard, and why the title is a constant.
             return _scan_result(tenant_id, failures, alerted=False)
 
         recipients = list(
@@ -361,11 +316,10 @@ def scan_abdm_callback_failures(tenant_id):
             )
         )
         if not recipients:
-            # Zero administrators is a configuration gap, not a reason to
-            # stay quiet: log the tenant and the count so the burst is still
-            # visible in the logs, and crash nothing — an exception here would
-            # retry a scan whose result will not change until someone fixes
-            # the roles.
+            # Zero administrators is a configuration gap, not a reason to stay
+            # quiet: log the tenant and the count so the burst is still visible,
+            # and crash nothing — an exception here would retry a scan whose
+            # result will not change until someone fixes the roles.
             logger.warning(
                 "ABDM callback failure burst: tenant %s had %d rejected "
                 "callbacks in the last hour but no administrator to alert",
@@ -387,9 +341,8 @@ def scan_abdm_callback_failures(tenant_id):
                 title=CALLBACK_FAILURE_ALERT_TITLE,
                 body=body,
                 type="critical",
-                # Persisted before delivery: the delivery consumer flips
-                # ``delivered`` when it actually pushes, exactly as the
-                # TEN-007 break-glass alert does.
+                # Persisted before delivery: the consumer flips ``delivered``
+                # when it actually pushes, as the TEN-007 alert does.
                 persisted=True,
                 delivered=False,
             )
@@ -407,12 +360,11 @@ def scan_abdm_callback_failures(tenant_id):
 def dispatch_audit_retention_purge():
     """Beat entry ``purge-expired-audit-events``: nightly retention sweep.
 
-    A static ``CELERY_BEAT_SCHEDULE`` cannot carry tenant ids, so it points
-    here and this task enumerates the tenants and fans the real work out. That
-    is also why the sweep is a pass over tenants and not a single query:
-    ``audit.event`` is RLS-protected, so each tenant's purge has to run inside
-    its own bound session, and a job that did not bind would delete nothing
-    while looking like it worked.
+    A static ``CELERY_BEAT_SCHEDULE`` cannot carry tenant ids, so it points here
+    and this task enumerates them. That is also why the sweep is a pass over
+    tenants and not a single query: ``audit.event`` is RLS-protected, so each
+    purge must run inside its own bound session — a job that did not bind would
+    delete nothing while looking like it worked.
     """
     tenants, bound = _tenant_plan()
     for tenant_id in tenants:
@@ -440,20 +392,18 @@ def dispatch_abdm_callback_failure_scan():
 def dispatch_due_scheduled_jobs():
     """Beat entry ``run-due-scheduled-jobs``: enqueue every job whose time came.
 
-    Every five minutes, because a job row carries its own ``scheduled_at`` and
-    the sweep only has to be frequent enough that a due job is picked up
-    promptly. A finer interval would hammer the broker for jobs that cannot run
-    yet; a coarser one would leave a job scheduled for 09:00 waiting until
-    09:10. Five minutes bounds the delay at a value nobody notices.
+    Every five minutes: a job row carries its own ``scheduled_at``, so the sweep
+    only has to be frequent enough that a due job is picked up promptly. Finer
+    would hammer the broker for jobs that cannot run yet; coarser would leave a
+    job scheduled for 09:00 waiting until 09:10.
     """
     now = timezone.now()
     tenants, bound = _tenant_plan()
     enqueued = 0
     for tenant_id in tenants:
         # Collected and committed *before* the enqueue: a ``.delay()`` issued
-        # inside this transaction would, under ``CELERY_TASK_ALWAYS_EAGER``,
-        # run the job inside the dispatcher's own transaction and nest it as a
-        # savepoint.
+        # inside this transaction would, under ``CELERY_TASK_ALWAYS_EAGER``, run
+        # the job inside the dispatcher's own transaction as a nested savepoint.
         for job_id in _due_job_ids(tenant_id, now):
             run_scheduled_job.delay(str(job_id))
             enqueued += 1
@@ -464,13 +414,10 @@ def dispatch_due_scheduled_jobs():
 def dispatch_pending_notifications():
     """Beat entry ``dispatch-pending-notifications``: push every undelivered row.
 
-    Every minute, because the notifications this carries are clinical alerts a
-    provider is waiting on (PLT-001) — a minute's latency on an alert is the
-    whole cost, and the sweep is one filtered, bounded read per tenant.
-
-    This is also the recovery path for a push that failed: the consumer is what
-    flips ``delivered``, so a row no socket ever received stays
-    ``delivered=False`` and is swept again on the next pass.
+    Every minute, because these are clinical alerts a provider is waiting on
+    (PLT-001) and the sweep is one filtered, bounded read per tenant. This is also
+    the recovery path for a failed push: the consumer is what flips ``delivered``,
+    so a row no socket ever received is swept again on the next pass.
     """
     tenants, bound = _tenant_plan()
     enqueued = 0
@@ -486,17 +433,16 @@ def dispatch_pending_notifications():
 def _tenant_plan(bound=TENANT_ENUMERATION_LIMIT):
     """The tenants one dispatcher run will fan out over, and the bound applied.
 
-    ``identity.tenant`` is the one table in the schema with no ``tenant_id``
-    column and no RLS policy — it is the tenancy root, and the platform
-    administrator has to list every tenant to onboard one (TEN-010) — so this
-    read needs no bound session. Everything the dispatchers read afterwards is
-    either RLS-protected or tenant-owned, so each per-tenant step rebinds
-    before it queries.
+    ``identity.tenant`` is the one table with no ``tenant_id`` column and no RLS
+    policy — it is the tenancy root, and the platform administrator has to list
+    every tenant to onboard one (TEN-010) — so this read needs no bound session.
+    Everything the dispatchers read afterwards is RLS-protected or tenant-owned,
+    so each per-tenant step rebinds before it queries.
 
-    Ordered by ``(created_at, id)`` so the bounded prefix is stable between
-    runs: a tenant created early is not skipped on one pass and swept on the
-    next. The bound itself is what makes an over-large deployment visible
-    instead of silently under-swept — see ``_dispatch_report``.
+    Ordered by ``(created_at, id)`` so the bounded prefix is stable between runs:
+    a tenant created early is not skipped on one pass and swept on the next. The
+    bound is what makes an over-large deployment visible instead of silently
+    under-swept — see ``_dispatch_report``.
     """
     from apps.identity_tenancy.models import Tenant
 
@@ -513,9 +459,8 @@ def _due_job_ids(tenant_id, now, limit=DUE_JOB_LIMIT):
     """Ids of this tenant's pending jobs whose ``scheduled_at`` has passed.
 
     Scoped by tenant at the application level, because ``platform.scheduled_job``
-    has no RLS policy and a filter is the only thing keeping one hospital's
-    queue out of another's sweep. Ordered by ``scheduled_at`` so the oldest
-    waiting job is claimed first.
+    has no RLS policy and a filter is the only thing keeping one hospital's queue
+    out of another's sweep. Oldest waiting job claimed first.
     """
     from apps.platform.models import ScheduledJob
 
@@ -555,9 +500,9 @@ def _dispatch_report(schedule, tenants, enqueued, bound):
     """What a dispatcher run did — PLT-004's visibility half.
 
     ``truncated`` is the operator's signal that the bound was hit and another
-    pass is needed. Counts and ids only: a task result lives in a backend that
-    may sit outside the hospital's boundary, so it carries no notification body
-    and no audit content (the :func:`_scan_result` convention).
+    pass is needed. Counts and ids only: a task result lives in a backend that may
+    sit outside the hospital's boundary, so it carries no notification body and no
+    audit content (the :func:`_scan_result` convention).
     """
     return {
         "schedule": schedule,
@@ -583,8 +528,8 @@ def _job_result(job_id, *, ran, status, tenant_id=None, job_type=None, reason=No
     """The job task's return value: the terminal state, and nothing else.
 
     Counts and ids only (the :func:`_scan_result` convention): a task result is
-    stored in a backend that may sit outside the hospital's boundary, so it
-    carries no job payload, no patient reference and no report content.
+    stored in a backend that may sit outside the hospital's boundary, so it carries
+    no job payload, no patient reference and no report content.
     """
     result = {"job_id": str(job_id), "ran": ran, "status": status}
     if tenant_id is not None:
@@ -600,8 +545,8 @@ def _scan_result(tenant_id, failures, *, alerted):
     """The task's return value: what it saw and whether it raised an alert.
 
     Counts and ids only — the ledger rows themselves are never read into the
-    result, so a task result stored in a backend outside the hospital's
-    boundary cannot carry callback payloads.
+    result, so a result stored outside the hospital's boundary cannot carry
+    callback payloads.
     """
     return {
         "tenant_id": str(tenant_id),

@@ -3,13 +3,12 @@
 ``ABHACallbackLog`` is the idempotency ledger for profile-share callbacks;
 ``ConsentEvent`` is the DPDP consent record those callbacks create (ABD-011).
 
-Data minimisation (architecture doc section 8.4): the shared profile is written
-once, to ``ABHACallbackLog.profile`` — a legacy column that predates the rule —
-and is deliberately *not* copied into ``ConsentEvent``. That table holds the fact
-and provenance of the consent (which patient, when, from which source app, for
-what purpose, at which facility) plus ``raw_profile_hash``, a one-way digest
-tying the record to the payload it came from. It has no name, ABHA, address or
-demographic column, so a dump of it cannot become a patient register.
+Data minimisation (architecture doc §8.4): the shared profile is written once, to
+``ABHACallbackLog.profile`` — a legacy column that predates the rule — and is
+deliberately *not* copied into ``ConsentEvent``. That table holds the fact and
+provenance of the consent plus ``raw_profile_hash``, a one-way digest tying the
+record to the payload it came from. It has no name, ABHA, address or demographic
+column, so a dump of it cannot become a patient register.
 """
 import uuid
 
@@ -29,21 +28,17 @@ class ABHACallbackLog(models.Model):
     matched_patient_id = models.UUIDField(null=True, blank=True)
     token_issued = models.CharField(max_length=64, null=True, blank=True)
     status = models.CharField(max_length=32)  # ok | rejected | duplicate | ambiguous
-    # ABD-012: the link token, sealed. The column holds a ``v1:<iv>:<ciphertext>``
-    # AES-256-GCM envelope under the same key stream that encrypts patient
-    # identifiers (common.crypto + ``PATIENT_FIELDS_KEY``); the plaintext is
-    # minted, stored here and never returned or logged. Width holds a v1 token
-    # for the 43-character ``token_urlsafe(32)`` value with room to spare.
-    # Nullable because existing rows were written before the token was stored,
-    # and because a log row is created before the seal is written (expand-only).
+    # ABD-012: the link token, sealed — a ``v1:<iv>:<ciphertext>`` AES-256-GCM
+    # envelope under the same key stream that encrypts patient identifiers. The
+    # plaintext is minted, stored here and never returned or logged. Nullable
+    # because existing rows predate the token, and because a log row is created
+    # before the seal is written (expand-only).
     link_token_enc = models.CharField(max_length=255, null=True, blank=True)
     # ABD-009: when a scan matches several patients the callback links none of
     # them and queues for verification instead, and this column names the
-    # candidates for the clerk who resolves it — a list of
-    # ``{"patient_id": <uuid>, "reason": "demographic"}``. Data minimisation
-    # (section 8.4): ids and a reason only, never a name, ABHA number or
-    # demographic value, so this column cannot grow into a patient register.
-    # Null on every other branch, exactly like ``link_token_enc`` above.
+    # candidates for the clerk who resolves it. Data minimisation (§8.4): ids
+    # and a reason only, never a name, ABHA number or demographic value, so this
+    # column cannot grow into a patient register. Null on every other branch.
     match_candidates = models.JSONField(null=True)
 
     class Meta:
@@ -54,17 +49,11 @@ class ABHACallbackLog(models.Model):
 class ConsentEvent(models.Model):
     """Record of a profile share granted through the gateway (ABD-011).
 
-    The requirement names timestamp, source, purpose and facility; ``patient_id``
-    and ``request_id`` say *whose* consent and *which* callback it came from, and
-    ``raw_profile_hash`` binds the record to the exact payload without storing
-    any of it (see the module docstring).
-
     ``(tenant_id, request_id)`` is unique on purpose. Idempotency is enforced by
-    the view's early return on a replayed request ID, which happens before any
-    write; this constraint is the second line of defence for a future code path
-    that reaches the consent write twice. Two consent rows for one gateway
-    request are two records of the same grant, and a DPDP audit cannot reconcile
-    those.
+    the view's early return on a replayed request ID, before any write; this
+    constraint is the second line of defence for a future code path that reaches
+    the consent write twice. Two consent rows for one gateway request are two
+    records of the same grant, and a DPDP audit cannot reconcile those.
     """
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

@@ -2,16 +2,10 @@
 
 Only the application lives here. Task definitions belong in
 ``apps/workers/tasks.py`` as ``@shared_task``, which ``autodiscover_tasks``
-picks up because ``apps.workers`` is in ``INSTALLED_APPS``.
-
-This module used to define ``compute_indicators`` and ``sync_abdm_callback`` as
-``@app.task`` as well, while ``apps/workers/tasks.py`` defined the same names.
-Both registered, under two different module paths, so a caller got whichever
-implementation the import path happened to reach: ``workers/urls.py`` pulled in
-the ``workers.celery`` copies while everything else imported the
-``apps.workers.tasks`` ones. Four task names existed for two tasks, and the
-beat schedule could not say which it meant. Keeping one registration point is
-the fix, so this module holds the app and nothing else.
+picks up because ``apps.workers`` is in ``INSTALLED_APPS``. This module used to
+define the same task names as ``@app.task`` as well, so both registered under
+two module paths and a caller got whichever the import path reached: four task
+names for two tasks, and a beat schedule that could not say which it meant.
 
 ``DJANGO_SETTINGS_MODULE`` is defaulted here rather than in ``manage.py``
 because a Celery worker imports this module directly, without going through

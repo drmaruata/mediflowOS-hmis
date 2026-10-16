@@ -1,53 +1,40 @@
 """The published OpenAPI document generates cleanly, and says what it claims (INT-001, INT-011).
 
-INT-001 asks for a published OpenAPI specification. INT-011 asks for that
-specification to be generated and checked rather than maintained by hand. A
-green "the command ran" is not either of those, and the reason is specific:
-**drf-spectacular exits 0 while emitting diagnostics, and an endpoint it
-cannot resolve is silently dropped from the document.** A viewset with no
-``serializer_class`` produces a schema that validates against the OpenAPI 3
-JSON Schema, passes ``--validate``, returns an exit status of 0, and is simply
-missing from ``paths``. Nothing downstream notices, because the only evidence
-was a line on stderr that nobody reads.
+INT-001 asks for a published OpenAPI specification; INT-011 asks for it to be
+generated and checked rather than maintained by hand. A green "the command ran" is
+neither, and the reason is specific: **drf-spectacular exits 0 while emitting
+diagnostics, and an endpoint it cannot resolve is silently dropped from the
+document.** A viewset with no ``serializer_class`` produces a schema that
+validates, passes ``--validate``, returns 0, and is simply missing from
+``paths``.
 
 So this module asserts the diagnostics, not the exit status. Every run captures
 stderr and asserts it is empty of severity-prefixed lines, and
-:class:`TestTheGateIsNotVacuous` proves that detector is armed by generating a
+:class:`TestTheGateIsNotVacuous` proves the detector is armed by generating a
 deliberately broken viewset and requiring the same capture to report it. That
-positive control is the whole reason to trust the passing cases: without it,
-"zero warnings" and "the assertion never looks" are indistinguishable.
+positive control is the whole reason to trust the passing cases: without it, "zero
+warnings" and "the assertion never looks" are indistinguishable.
 
 Two things are asserted that are not about drf-spectacular at all, because
-INT-001's deliverable is a document a client is expected to trust:
+INT-001's deliverable is a document a client is expected to trust: the three
+routes the brief names are present, and **the document shows the deny-by-default
+posture** — asserting that data operations carry a security requirement while the
+health probes and the ABDM callback do not means a permission change that
+widened the API by accident fails here rather than in a security review.
 
-* The three routes the brief names are present, so the published specification
-  is not a document that silently dropped authentication or the registry.
-* The document **shows the deny-by-default posture**. ``IsAuthenticated`` is
-  ``DEFAULT_PERMISSION_CLASSES``, and that is invisible in a schema which
-  documents every operation as anonymous. Asserting that data operations carry a
-  security requirement while the health probe and the ABDM callback do not means
-  a future change to a permission class that widened the API by accident fails
-  here rather than in a security review.
+**No suppression, anywhere.** No ``EXCLUDE``, no ``DISABLE_ERRORS_AND_WARNINGS``,
+no ``warnings.filterwarnings``, no filtering of the captured text, and no endpoint
+removed to make a count come out right. INT-001 is met only when generation is
+clean without any of them, which is why the CI step runs ``--fail-on-warn``.
 
-**No suppression, anywhere.** There is no ``EXCLUDE``, no
-``DISABLE_ERRORS_AND_WARNINGS``, no ``warnings.filterwarnings``, no filtering of
-the captured text, and no endpoint removed from the document to make a count
-come out right. INT-001 is met only when generation is clean without any of
-them, which is why the CI step in ``.github/workflows/ci.yml`` runs
-``--fail-on-warn``.
+**JSON, not YAML.** The document is parsed with the stdlib ``json`` module.
+``PyYAML`` is installed but not declared in ``backend/requirements*.txt``, so a
+test importing it would rely on a transitive dependency. The YAML path is still
+exercised end to end by running the exact documented command and asserting the
+file it writes is non-empty.
 
-**JSON, not YAML.** The document is parsed with the stdlib ``json`` module from
-``--format openapi-json``. ``PyYAML`` is installed — ``drf-spectacular`` requires
-it directly — but it is not declared in ``backend/requirements*.txt``, so a test
-that imported it would be relying on a transitive dependency, and declaring it
-would trigger AGENTS.md section 3's documentation-sync obligation for a change
-this task does not need. The YAML path is still exercised end to end, by running
-the exact command AGENTS.md section 8 documents and asserting the file it writes
-is non-empty — the format is the manager's, and its correctness is not what these
-assertions are about.
-
-**The repository stays clean.** Generation writes only into pytest's
-``tmp_path``; :class:`TestTheCommandWritesItsFile` pins that.
+**The repository stays clean.** Generation writes only into pytest's ``tmp_path``;
+:class:`TestTheCommandWritesItsFile` pins that.
 """
 import io
 import json
@@ -72,58 +59,50 @@ pytestmark = [pytest.mark.integration]
 #: Repository root, used only to prove the suite never writes inside it.
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
-#: The routes the brief names, and the reason each is named. Not an exhaustive
-#: path inventory — that is the transport-split suite's job. These three are the
-#: ones whose absence from the document would mean the published specification
-#: cannot describe how to authenticate, how to register a patient, or how the
-#: gateway reaches us.
+#: The routes the brief names. Not an exhaustive path inventory — that is the
+#: transport-split suite's job. These three are the ones whose absence would mean
+#: the published specification cannot describe how to authenticate, how to
+#: register a patient, or how the gateway reaches us.
 TOKEN_PATH = "/api/v1/auth/token/"
 PATIENTS_PATH = "/api/v1/patients/"
 ABDM_CALLBACK_PATH = "/api/v1/abdm-callbacks/"
 
-#: The health probes, and with :data:`ABDM_CALLBACK_PATH` below, the whole of
-#: the anonymous surface. Enumerated rather than described, because the previous
+#: The health probes, and with :data:`ABDM_CALLBACK_PATH` the whole of the
+#: anonymous surface. Enumerated rather than described, because the previous
 #: revision listed only the two probes the container uses and therefore read as
 #: exhaustive while three of the seven anonymous operations went unasserted —
 #: which is how ``/api/v1/abdm-callbacks/health/`` came to be published
-#: anonymously with nothing in this module noticing. Seven of the 331 documented
-#: operations carry no security requirement, and all seven are here:
+#: anonymously with nothing here noticing.
 #:
-#: * ``/api/v1/health/`` and ``/api/v1/health/ready/`` — the container probes.
-#:   There is no tenant to bind and no caller to authenticate, and the CI smoke
-#:   test polls them with no credential; AGENTS.md section 4 names the probe as
-#:   one of only two endpoints permitted to opt out of ``IsAuthenticated``.
-#: * ``/api/v1/abdm-callbacks/health/`` — the gateway adapter's own probe, on
-#:   the same reasoning. It lives on an ``AllowAny`` viewset, so it is anonymous
-#:   in fact as well as in the document.
-#: * ``/api/v1/abdm-callbacks/`` POST, asserted alongside these via
-#:   :data:`ABDM_CALLBACK_PATH` — the gateway presents an HMAC over the raw body
-#:   rather than a user JWT, so ``IsAuthenticated`` is not what guards it.
-#: * ``/api/v1/auth/token/``, ``/token/refresh/`` and ``/token/blacklist/`` —
-#:   the credential-issuing endpoints themselves. A client cannot present a
-#:   credential to obtain one.
+#: * the two container health probes — no tenant to bind and no caller to
+#:   authenticate; AGENTS.md §4 names the probe as one of only two endpoints
+#:   permitted to opt out of ``IsAuthenticated``;
+#: * ``/api/v1/abdm-callbacks/health/`` — the gateway adapter's own probe, on the
+#:   same reasoning. It lives on an ``AllowAny`` viewset, so it is anonymous in
+#:   fact as well as in the document;
+#: * ``/api/v1/abdm-callbacks/`` POST — the gateway presents an HMAC over the raw
+#:   body rather than a user JWT, so ``IsAuthenticated`` is not what guards it;
+#: * ``/api/v1/auth/token/``, ``/token/refresh/`` and ``/token/blacklist/`` — a
+#:   client cannot present a credential to obtain one. ``refresh`` and
+#:   ``blacklist`` are published anonymous by SimpleJWT's own views and have no
+#:   dedicated assertion.
 #:
-#: ``TOKEN_PATH`` is asserted anonymously by its own test rather than through
-#: this tuple; ``refresh`` and ``blacklist`` are published anonymous by
-#: SimpleJWT's own views and have no dedicated assertion. The document is where
-#: this posture is stated rather than merely implied.
+#: The document is where this posture is stated rather than merely implied.
 HEALTH_PATHS = (
     "/api/v1/health/",
     "/api/v1/health/ready/",
     "/api/v1/abdm-callbacks/health/",
 )
 
-#: The documentation surface itself, which is served without a credential on
-#: purpose: an integrator has to be able to read the API contract before they
-#: have one. Named here because the paths are asserted anonymously below.
+#: The documentation surface, served without a credential on purpose: an
+#: integrator has to be able to read the API contract before they have one.
 SCHEMA_PATH = "/api/schema/"
 DOCS_PATH = "/api/docs/"
 
-#: A drf-spectacular diagnostic. ``GeneratorStats.emit`` prints
-#: ``"<source>: <Severity> [<breadcrumbs>]: <message>"`` and ``emit_summary``
-#: prints a ``Schema generation summary:`` block, both to ``sys.stderr``. The
-#: severity is capitalised, which is what the pattern keys on — matching the
-#: bare word "error" would fire on a message that merely mentions one.
+#: A drf-spectacular diagnostic: ``"<source>: <Severity> [<breadcrumbs>]: <msg>"``
+#: plus a ``Schema generation summary:`` block, both on ``sys.stderr``. The severity
+#: is capitalised, which is what the pattern keys on — matching the bare word
+#: "error" would fire on a message that merely mentions one.
 DIAGNOSTIC_LINE = re.compile(r"^\S.*?:\s*(?:Warning|Error)\s*(?:\[|:)", re.MULTILINE)
 SUMMARY_MARKER = "Schema generation summary"
 
@@ -142,8 +121,7 @@ def _diagnostics(text):
 
     De-duplicated because ``GeneratorStats.emit`` prints an identical string for
     every repeat of a warning, and an endpoint imported under several names can
-    therefore produce the same line many times over. The count is reported
-    separately where it matters.
+    produce the same line many times over.
     """
     found = [match.group(0).strip() for match in DIAGNOSTIC_LINE.finditer(text)]
     return sorted(set(found))
@@ -152,15 +130,11 @@ def _diagnostics(text):
 def _run_spectacular(*flags, stdout=None):
     """Run ``manage.py spectacular`` in-process and capture what it says.
 
-    ``redirect_stderr`` is not incidental. ``GeneratorStats.emit`` and
-    ``emit_summary`` write with ``print(..., file=sys.stderr)`` — they bypass the
-    management framework's own ``self.stderr`` wrapper entirely — so a buffer
-    passed as ``call_command(stderr=...)`` would come back empty and the gate
-    would pass for the wrong reason. The redirect is what actually captures a
-    diagnostic, which is why the positive control below is the evidence that it
-    works.
-
-    Returns the captured stdout and stderr as text.
+    ``redirect_stderr`` is not incidental: ``GeneratorStats.emit`` and
+    ``emit_summary`` write with ``print(..., file=sys.stderr)``, bypassing the
+    management framework's own ``self.stderr`` wrapper entirely, so a buffer passed
+    as ``call_command(stderr=...)`` would come back empty and the gate would pass
+    for the wrong reason. The positive control is the evidence that it works.
     """
     err = io.StringIO()
     out = stdout if stdout is not None else io.StringIO()
@@ -172,10 +146,9 @@ def _run_spectacular(*flags, stdout=None):
 def _require_clean(stderr, what):
     """Fail with the diagnostics attached, or return.
 
-    The captured text is put in the assertion message because the whole value of
-    this gate is the line somebody has to read: a bare "expected no warnings"
-    sends the next person to re-run the command by hand to find out which
-    endpoint is unresolved.
+    The captured text is in the assertion message because the whole value of this
+    gate is the line somebody has to read: a bare "expected no warnings" sends the
+    next person to re-run the command by hand.
     """
     diagnostics = _diagnostics(stderr)
     assert SUMMARY_MARKER not in stderr, (
@@ -201,13 +174,12 @@ def _operations(document, path_name):
 def _requires_authentication(operation):
     """Whether an operation demands a credential.
 
-    OpenAPI spells anonymity two different ways, and both must count as
-    anonymous: an operation may omit ``security`` altogether (and there is no
-    document-level ``security`` to inherit — asserted separately), or it may
-    carry an explicit empty requirement, ``security: [{}]``, which is how
-    drf-spectacular renders ``AllowAny``. Treating only one of the two as
-    anonymous would either fail on a correctly anonymous endpoint or pass on a
-    data endpoint that had been made anonymous by accident.
+    OpenAPI spells anonymity two ways and both must count: an operation may omit
+    ``security`` altogether (there is no document-level ``security`` to inherit —
+    asserted separately), or carry an explicit empty requirement, ``security:
+    [{}]``, which is how drf-spectacular renders ``AllowAny``. Treating only one
+    as anonymous would either fail on a correctly anonymous endpoint or pass on a
+    data endpoint made anonymous by accident.
     """
     security = operation.get("security")
     if security is None:
@@ -219,19 +191,16 @@ def _requires_authentication(operation):
 def generated_document():
     """The project's real schema, generated once, with its stderr captured.
 
-    Module-scoped because generation walks all 159 paths and instantiates a view
-    per operation; running it per test would make this the slowest file in the
-    suite for no added coverage. The stderr is captured once and asserted on
-    repeatedly, which is legitimate — the claim is a property of the generation,
-    not of each assertion.
+    Module-scoped because generation walks every path and instantiates a view per
+    operation; per test this would be the slowest file in the suite for no added
+    coverage. The stderr is captured once and asserted on repeatedly, which is
+    legitimate — the claim is a property of the generation, not of each assertion.
     """
     out, err = _run_spectacular("--format", "openapi-json")
 
     # Asserted here, at the point the capture is made, rather than in a test:
-    # GENERATOR_STATS is process-global and the positive control below
-    # deliberately makes it truthy, so a test that read it later would be
-    # order-dependent. This is also the exact condition
-    # ``manage.py spectacular --fail-on-warn`` tests.
+    # GENERATOR_STATS is process-global and the positive control deliberately
+    # makes it truthy, so a test reading it later would be order-dependent.
     assert not GENERATOR_STATS, (
         "generation left drf-spectacular diagnostics behind, which is what "
         f"--fail-on-warn would fail the CI step on:\n{err}"
@@ -260,16 +229,14 @@ def written_schema_file(tmp_path_factory):
         "manage.py spectacular --file reported success without writing a file"
     )
     assert target.stat().st_size > 0, "the written schema is empty"
-    # YAML is what `--file` writes, so the document must open with the version
-    # key rather than being some other payload under the right filename.
+    # YAML is what `--file` writes, so the document must open with the version key
+    # rather than being some other payload under the right filename.
     assert target.read_text(encoding="utf-8").startswith("openapi:"), (
         "the file written by --file is not a YAML OpenAPI document"
     )
-    # --validate ran inside the command and did not raise, which is the check
-    # that the document satisfies the OpenAPI 3 JSON Schema.
-    #
-    # Silence on success is the contract: the file went to `--file`, so stdout
-    # carrying the document would mean the flag was ignored.
+    # --validate ran inside the command and did not raise. Silence on success is
+    # the contract: the file went to `--file`, so stdout carrying the document
+    # would mean the flag was ignored.
     assert out == "", f"--file wrote to stdout as well: {out[:200]!r}"
     return target
 
@@ -278,28 +245,22 @@ class TestTheDocumentIsPublished:
     def test_generation_is_clean(self, generated_document):
         """The zero-diagnostics claim, restated so a failure names itself.
 
-        ``generated_document`` already asserted it while capturing; the value of
-        repeating it here is that the requirement INT-001 turns on is stated as a
-        named test rather than living in a fixture body. It cannot go vacuous —
-        the fixture raises before returning if the capture was dirty.
+        It cannot go vacuous: the fixture raises before returning if the capture
+        was dirty.
         """
         assert generated_document
 
     def test_the_document_is_an_openapi_mapping(self, generated_document):
         """It parses, and carries the four roots a client actually reads.
 
-        The assertion is on the *shape* of ``info``. The *values* are asserted by
-        :meth:`test_the_document_is_identified_as_this_api` directly below, which
-        is the assertion that makes the declared title and version enforced
+        The assertion is on the *shape* of ``info``; the *values* are asserted by
+        the next test, which is what makes the declared title and version enforced
         rather than coincidental.
         """
         assert isinstance(generated_document, dict)
         assert set(generated_document) >= {"openapi", "info", "paths", "components"}
         assert generated_document["openapi"].startswith("3.")
-        # ``info`` is what a client, a docs site and a code generator read first;
-        # an OpenAPI 3 document without it does not validate, so its absence
-        # would already fail ``--validate``, but --validate is asserted by the
-        # command that writes the file, not by this fixture.
+        # ``info`` is what a client, a docs site and a code generator read first.
         info = generated_document["info"]
         assert set(info) >= {"title", "version"}, info
         assert isinstance(info["title"], str)
@@ -312,28 +273,20 @@ class TestTheDocumentIsPublished:
         """``info.title`` and ``info.version`` are the ones the settings declare.
 
         The expected values are read from ``settings.SPECTACULAR_SETTINGS`` rather
-        than repeated here as literals, so that renaming a version is a one-line
-        change in ``config/settings/base.py`` rather than a coordinated edit
-        between a setting and its echo. The setting is the single source of truth
-        for what the document should say; this assertion's job is to prove the
-        value *reached* the document.
+        than repeated as literals, so renaming a version is a one-line change in
+        ``config/settings/base.py`` rather than a coordinated edit between a
+        setting and its echo.
 
-        It is the assertion that was previously impossible to write. drf-spectacular
-        reads its configuration from ``SPECTACULAR_SETTINGS``, while the dict was
-        declared as ``SPECTACULAR``, so nothing was read at all: ``TITLE`` and
-        ``VERSION`` never reached the document, and it published as
-        ``title: ""`` / ``version: "0.0.0"`` — a specification that names
-        nothing. Comparing against the setting under the wrong key degenerated to
-        ``"" == ""``, which passes while proving nothing, so the earlier revision
-        of this file asserted only the shape and recorded the gap.
+        This assertion was previously impossible to write. drf-spectacular reads
+        its configuration from ``SPECTACULAR_SETTINGS`` while the dict was declared
+        as ``SPECTACULAR``, so nothing was read and the document published as
+        ``title: ""`` / ``version: "0.0.0"`` — a specification that names nothing.
+        Comparing against the setting under the wrong key degenerated to
+        ``"" == ""``, which passes while proving nothing.
 
-        The two degeneracy guards are what stop that from recurring quietly.
-        ``TITLE`` and ``VERSION`` have defaults (``""`` and ``"0.0.0"``) that are
-        individually valid strings and would sail through both the ``isinstance``
-        check above and a "the document has a title" reading of this test. An
-        unset or empty declared value would therefore still publish a nameless
-        specification with a green suite, which is the exact failure this
-        assertion exists to catch.
+        The degeneracy guards stop that recurring quietly: the library's defaults
+        are individually valid strings, so an unset or empty declared value would
+        still publish a nameless specification with a green suite.
         """
         declared = settings.SPECTACULAR_SETTINGS
         info = generated_document["info"]
@@ -349,9 +302,8 @@ class TestTheDocumentIsPublished:
             "the dict, so it fell back to its own default of '0.0.0'"
         )
 
-        # The declared values must themselves be real, or the two assertions
-        # above would compare the library's defaults against empty strings and
-        # agree with each other.
+        # The declared values must themselves be real, or the two assertions above
+        # would compare the library's defaults against empty strings and agree.
         assert declared["TITLE"].strip(), (
             "TITLE is declared empty; the published specification would name "
             "nothing even with the setting correctly wired"
@@ -373,11 +325,10 @@ class TestTheDocumentIsPublished:
     def test_the_named_route_is_in_the_document(self, generated_document, path_name):
         """Each route is present *and* has at least one documented operation.
 
-        The operation check is the part that matters. A path item can survive in
-        ``paths`` while every method under it was dropped by a resolver that
-        gave up — drf-spectacular's own message for that is "Ignoring the view
-        for now" — and a client reading the document would find a URL with
-        nothing to call.
+        The operation check is the part that matters: a path item can survive in
+        ``paths`` while every method under it was dropped by a resolver that gave
+        up ("Ignoring the view for now"), leaving a client a URL with nothing to
+        call.
         """
         assert path_name in generated_document["paths"]
         assert _operations(generated_document, path_name), (
@@ -388,19 +339,16 @@ class TestTheDocumentIsPublished:
         """``components.securitySchemes`` exists, is non-empty, and is usable.
 
         Checked against the rendered scheme, not merely the key's presence: a
-        ``securitySchemes`` block holding an empty object satisfies "exists" and
-        leaves a client with no way to send the credential the API demands.
-        ``cookieAuth`` is asserted alongside because DRF's session authentication
-        is registered globally, so its absence means the settings the
-        ``IsAuthenticated`` default relies on are not reaching the document.
+        block holding an empty object satisfies "exists" and leaves a client with no
+        way to send the credential the API demands. ``cookieAuth`` is asserted
+        alongside because DRF's session authentication is registered globally, so
+        its absence means the settings ``IsAuthenticated`` relies on are not
+        reaching the document.
         """
         schemes = generated_document["components"].get("securitySchemes")
 
         assert schemes, "components.securitySchemes is missing or empty"
         assert schemes["jwtAuth"] == EXPECTED_BEARER_SCHEME["jwtAuth"], schemes
-        # SimpleJWT's authentication class; named because it is the second of the
-        # two, and a client using a session cookie is equally entitled to the
-        # schema saying so.
         assert schemes["cookieAuth"]["in"] == "cookie", schemes
         assert schemes["cookieAuth"]["name"] == "sessionid", schemes
 
@@ -409,27 +357,22 @@ class TestTheDocumentationIsPubliclyReadable:
     """The schema and the Swagger UI must answer an anonymous request.
 
     ``config/settings/base.py`` declares ``SERVE_PERMISSIONS: [AllowAny]`` and
-    ``SERVE_AUTHENTICATION: None`` under a comment explaining why: every data
-    endpoint stays authenticated, but requiring a credential to *read the
-    contract* would make the documentation unreachable to the integrator it
-    exists for. That intent is what these tests enforce.
+    ``SERVE_AUTHENTICATION: None``: every data endpoint stays authenticated, but
+    requiring a credential to *read the contract* would make the documentation
+    unreachable to the integrator it exists for.
 
-    They are here because the intent was, for a time, enforced by coincidence
-    rather than by configuration. Those two values happen to be exactly
-    drf-spectacular's own defaults, so while the dict was declared under a name
-    the library never reads, ``/api/schema/`` and ``/api/docs/`` still answered
-    200 — the behaviour was right and the declaration behind it was dead. Had
-    the library's defaults ever tightened, the Swagger UI would have started
-    requiring a JWT with nothing in the diff to explain it. Asserting the
-    observable behaviour is what makes the two cases
-    indistinguishable: whether the setting is read or the default happens to
-    match, a reader can see that the surface is public and why.
+    These tests are here because that intent was, for a time, enforced by
+    coincidence rather than by configuration. Those two values happen to be
+    exactly drf-spectacular's own defaults, so while the dict was declared under a
+    name the library never reads, both routes still answered 200 — the behaviour
+    was right and the declaration behind it was dead. Had the library's defaults
+    ever tightened, the Swagger UI would have started requiring a JWT with nothing
+    in the diff to explain it.
 
-    The converse is asserted too. ``SERVE_PERMISSIONS`` must not widen anything
-    else: the health probes and the data endpoints keep their existing
-    behaviour, because a permission class that leaked from the docs views into
-    ``DEFAULT_PERMISSION_CLASSES`` would be the worst outcome of this setting
-    being read at all.
+    The converse is asserted too: ``SERVE_PERMISSIONS`` must not widen anything
+    else, because a permission class that leaked from the docs views into
+    ``DEFAULT_PERMISSION_CLASSES`` would be the worst outcome of this setting being
+    read at all.
     """
 
     @pytest.mark.parametrize(
@@ -440,10 +383,8 @@ class TestTheDocumentationIsPubliclyReadable:
 
         Asserted through the test client rather than by inspecting the view's
         ``permission_classes``, because the claim is about what a client
-        experiences. A permission class can be configured correctly and still be
-        unreachable if something else in the stack rejects the request first —
-        a throttle, a middleware, a URLconf that no longer resolves — and only
-        the request itself exercises the whole path.
+        experiences: a permission class can be configured correctly and still be
+        unreachable if a throttle, middleware or URLconf rejects the request first.
         """
         response = APIClient().get(path_name)
 
@@ -457,16 +398,12 @@ class TestTheDocumentationIsPubliclyReadable:
     def test_the_token_endpoint_is_still_documented_as_anonymous(self, generated_document):
         """Issuing a token cannot require a token — the document must say so.
 
-        The obvious way to check this is to look at ``info`` or at the schema
-        view's own operation in the published document. It is asserted on
-        ``TOKEN_PATH`` instead, for the reason the rest of this module cares
-        about: the token endpoint is the one operation whose anonymity is a
-        genuine round trip. An integrator reads the document, sees
-        ``security: [{}]``, and knows to POST credentials rather than to
-        expect a 401. If a future change documented it as secured, the client
-        generated from that document would send a bearer header to the endpoint
-        whose job is to issue one, and the failure would surface as a confusing
-        auth error rather than as a schema regression.
+        Asserted on ``TOKEN_PATH`` because it is the one operation whose anonymity
+        is a genuine round trip: an integrator sees ``security: [{}]`` and knows to
+        POST credentials rather than expect a 401. If a future change documented it
+        as secured, a generated client would send a bearer header to the endpoint
+        whose job is to issue one, surfacing as a confusing auth error rather than
+        a schema regression.
         """
         operations = _operations(generated_document, TOKEN_PATH)
 
@@ -486,13 +423,12 @@ class TestDenyByDefaultIsVisible:
     ):
         """Every operation on the registry requires a credential.
 
-        This is the assertion that keeps INT-001 honest. ``IsAuthenticated`` is
-        the default permission class, so a viewset that forgot to be secured is
-        still secured — but a schema that documents it as anonymous would tell a
-        client, a scanner and a future reviewer that it is open. The requirement
-        is checked on *every* method under the path, so adding a `DELETE` to a
-        secured collection cannot slip past by inheriting the collection's
-        description.
+        This is the assertion that keeps INT-001 honest. ``IsAuthenticated`` is the
+        default permission class, so a viewset that forgot to be secured is still
+        secured — but a schema documenting it as anonymous would tell a client, a
+        scanner and a future reviewer that it is open. Checked on *every* method
+        under the path, so adding a `DELETE` cannot slip past by inheriting the
+        collection's description.
         """
         operations = _operations(generated_document, PATIENTS_PATH)
 
@@ -509,12 +445,11 @@ class TestDenyByDefaultIsVisible:
     ):
         """The health probes and the ABDM callback carry no credential.
 
-        The other half of the same claim. A gate that only asserted "everything
-        requires auth" would pass on a document in which the health probe had
-        been locked down — breaking the container health check in
-        ``ci.yml``'s smoke test — and one that only asserted "the probes are
-        open" would pass on a document in which everything was. Both directions
-        are asserted because the posture is the pair, not either half.
+        The other half of the same claim. A gate asserting only "everything requires
+        auth" would pass on a document in which the health probe had been locked
+        down, breaking ``ci.yml``'s smoke test; one asserting only "the probes are
+        open" would pass on a document in which everything was. The posture is the
+        pair, not either half.
         """
         operations = _operations(generated_document, path_name)
 
@@ -530,12 +465,10 @@ class TestDenyByDefaultIsVisible:
     ):
         """There is no global ``security``, so no operation inherits one.
 
-        A document-level requirement is the subtler version of the same risk: it
-        would leave every operation that omits ``security`` inheriting a
-        requirement — meaning the anonymous probes above could be documented as
-        secured, or the reverse — with no per-operation line to read. Asserting
-        its absence is what makes the per-operation assertions above sufficient
-        on their own.
+        A document-level requirement is the subtler version of the same risk: every
+        operation omitting ``security`` would inherit one, with no per-operation
+        line to read. Asserting its absence is what makes the per-operation
+        assertions above sufficient on their own.
         """
         assert "security" not in generated_document, (
             "the document declares a global security requirement, so an "
@@ -549,12 +482,11 @@ class TestTheCommandWritesItsFile:
     ):
         """The documented command works, and what it wrote is a real schema.
 
-        The command in AGENTS.md section 8 is what a developer and a release run
-        by hand; asserting it end to end is what keeps that instruction from
-        quietly rotting into a command that writes an empty file or a stack trace
-        and still exits 0. The YAML is not parsed here — ``PyYAML`` is not a
-        declared dependency of this project, and the document's *content* is
-        asserted from the JSON rendering above.
+        The command in AGENTS.md §8 is what a developer and a release run by hand;
+        asserting it end to end is what keeps that instruction from quietly rotting
+        into a command that writes an empty file or a stack trace and still exits 0.
+        The YAML is not parsed here — ``PyYAML`` is not a declared dependency, and
+        the document's *content* is asserted from the JSON rendering above.
         """
         assert written_schema_file.is_file()
         body = written_schema_file.read_text(encoding="utf-8")
@@ -567,13 +499,10 @@ class TestTheCommandWritesItsFile:
     def test_the_repository_tree_is_never_written_to(self, written_schema_file):
         """Generation output stays outside the working tree.
 
-        An earlier revision of this project established that pin for uploaded
-        documents (``test_platform_files.py::TestTheRepositoryStaysClean``): a
-        suite that writes into the repository leaves files that get committed,
+        A suite that writes into the repository leaves files that get committed,
         and generated artefacts are the ones nobody remembers to delete. The
         assertion is the path's own location, not a ``git status``, so it holds
-        without a git binary and cannot be satisfied by a file that was already
-        there.
+        without a git binary and cannot be satisfied by a pre-existing file.
         """
         assert written_schema_file.resolve().is_relative_to(REPO_ROOT) is False
         assert not (REPO_ROOT / "schema.yml").exists()
@@ -583,27 +512,25 @@ class TestTheCommandWritesItsFile:
 class TestTheGateIsNotVacuous:
     """Proof that the diagnostic assertions above can actually fail.
 
-    Everything in this module so far asserts the *absence* of something. An
-    absence assertion that cannot detect presence is indistinguishable from a
-    passing test suite, and this one is load-bearing for INT-001: a future
-    endpoint with an unresolvable serializer, or a custom action whose
-    ``@extend_schema`` was dropped, must be caught by the gate above and not
-    discovered by an integrator a quarter later.
+    Everything so far asserts the *absence* of something, and an absence assertion
+    that cannot detect presence is indistinguishable from a passing suite. This is
+    load-bearing for INT-001: an endpoint with an unresolvable serializer, or a
+    custom action whose ``@extend_schema`` was dropped, must be caught by the gate
+    above and not discovered by an integrator a quarter later.
 
     The broken viewset below is never routed into ``config/urls.py``. It exists
-    only as a URL pattern handed straight to a generator, so the project's own
-    URL surface is untouched and the operation count is unaffected.
+    only as a URL pattern handed straight to a generator, so the project's own URL
+    surface is untouched and the operation count is unaffected.
     """
 
     @staticmethod
     def _unresolvable_viewset():
         """A viewset drf-spectacular cannot resolve, by construction.
 
-        A ``ModelViewSet`` with no ``serializer_class`` — the case the library
-        documents as "unable to resolve serializer class". It is not a mock and
-        not a stub: it is a genuine DRF viewset that genuinely fails to describe
-        itself, which is exactly what a real endpoint does when someone forgets
-        a serializer or points one at a class that no longer imports.
+        A ``ModelViewSet`` with no ``serializer_class``. Not a mock: a genuine DRF
+        viewset that genuinely fails to describe itself, which is what a real
+        endpoint does when someone forgets a serializer or points one at a class
+        that no longer imports.
         """
 
         class UnresolvableViewSet(viewsets.ModelViewSet):
@@ -617,17 +544,13 @@ class TestTheGateIsNotVacuous:
     def test_a_warning_shaped_failure_is_detected_and_reported(self):
         """The capture, the pattern and the stats check all fire on a real fault.
 
-        Three assertions rather than one, because each could in principle be the
-        thing that is broken:
-
-        * ``_diagnostics`` finds a severity-prefixed line in captured stderr;
-        * ``GENERATOR_STATS`` is truthy, which is the condition
-          ``manage.py spectacular --fail-on-warn`` tests — so the CI gate added
-          for this task is pinned by the same evidence, not by inspection of the
-          library's source;
-        * generation still *succeeds*. This is the finding worth stating
-          plainly: the exit status is 0 and the schema is valid OpenAPI while the
-          operation is missing. Any gate built on the exit code alone would pass.
+        Three assertions because each could in principle be the thing that is
+        broken: ``_diagnostics`` finds a severity-prefixed line in captured
+        stderr; ``GENERATOR_STATS`` is truthy, the condition
+        ``manage.py spectacular --fail-on-warn`` tests; and generation still
+        *succeeds*. That last one is the finding worth stating plainly — the exit
+        status is 0 and the schema is valid OpenAPI while the operation is
+        missing, so any gate built on the exit code alone would pass.
         """
         viewset = self._unresolvable_viewset()
 
@@ -657,14 +580,13 @@ class TestTheGateIsNotVacuous:
     def test_fail_on_warn_turns_that_diagnostic_into_a_failed_command(self):
         """``--fail-on-warn``, the flag the CI step passes, fails on the same fault.
 
-        Driven through ``call_command`` rather than through ``GENERATOR_STATS``
-        a second time, because the flag is what the pipeline depends on and a
-        test of the underlying predicate does not prove the flag reads it. The
-        broken URLconf is registered in ``sys.modules`` instead of being written
-        to a module file: ``--urlconf`` takes a dotted path, ``tests/`` is not a
-        package so the test module is not importable by one, and registering the
-        module keeps the repository tree untouched while still going through
-        ``import_module`` exactly as a real URLconf would be reached.
+        Driven through ``call_command`` rather than ``GENERATOR_STATS`` a second
+        time, because the flag is what the pipeline depends on and a test of the
+        underlying predicate does not prove the flag reads it. The broken URLconf is
+        registered in ``sys.modules`` rather than written to a module file:
+        ``--urlconf`` takes a dotted path, ``tests/`` is not a package so the test
+        module is not importable by one, and this keeps the repository tree
+        untouched while still going through ``import_module``.
         """
         module = types.ModuleType("throwaway_openapi_urlconf")
         module.urlpatterns = self._patterns_for(self._unresolvable_viewset())
@@ -684,12 +606,10 @@ class TestTheDocumentIsNotARegression:
     def test_the_published_surface_has_not_shrunk_under_the_gate(self, generated_document):
         """A floor on the documented operation count.
 
-        Not an inventory — an exact count would break on every endpoint anyone
-        adds, which trains the next person to update a number rather than to ask
-        what changed. A floor fails on the failure mode that actually hides: an
-        endpoint silently dropped from the document by a resolver that gave up.
-        The current published surface is 331 operations; the bound is set well
-        below it so ordinary growth does not trip it.
+        Not an inventory — an exact count would break on every endpoint anyone adds,
+        which trains the next person to update a number rather than ask what
+        changed. A floor fails on the failure mode that actually hides: an endpoint
+        silently dropped by a resolver that gave up.
         """
         operations = sum(len(_operations(generated_document, p))
                          for p in generated_document["paths"])

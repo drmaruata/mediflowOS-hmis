@@ -28,16 +28,17 @@ they are exactly the ones a new builder would break:
   passed in, and the tests inject ``link_token`` to prove it.
 
 **The resolution contract, which is the opposite of "fail closed" on labels.**
-A version *label* is never refused. The official ABDM spec is unresolved (REG-009),
-so no string a gateway can send can be proven unsupported, and refusing one puts a
-tenant's whole scan-and-share channel down over a wording difference. So
-:func:`resolve_api_version` resolves an exact label to itself, a documented alias
-(``"v1.0"`` — the label this repository's own architecture doc and sandbox
-replay use) to its target, and *anything else* to ``DEFAULT_API_VERSION`` with a
-warning naming the label and the tenant. Only a **malformed** declaration — a
-list, an object or a number where a version label belongs — is refused, because
-that is a broken payload rather than a different vocabulary. INT-002 asks for two
-versions to be *served*; it does not ask for unknown ones to be rejected.
+A version *label* is never refused: the official ABDM spec is unresolved
+(REG-009), so no string a gateway can send can be proven unsupported, and
+refusing one puts a tenant's whole scan-and-share channel down over a wording
+difference. So :func:`resolve_api_version` resolves an exact label to itself, a
+documented alias (``"v1.0"`` — the label this repository's own architecture doc
+and sandbox replay use) to its target, and *anything else* to
+``DEFAULT_API_VERSION`` with a warning naming the label and the tenant. Only a
+**malformed** declaration — a list, an object or a number where a version label
+belongs — is refused, because that is a broken payload rather than a different
+vocabulary. INT-002 asks for two versions to be *served*, not for unknown ones
+to be rejected.
 
 **v3 is provisional.** The official ABDM sandbox spec is unresolved — see the
 REG-009 entry under Known gaps in ``docs/traceability.md`` — so v3's shape here

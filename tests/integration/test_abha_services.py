@@ -1005,8 +1005,7 @@ class TestVersionedAdapterBinding:
         """The same rule as the row: a string label is served, never refused.
 
         Without this the guard would live in one factory method, and a caller
-        constructing a client directly could get a different contract from the
-        one the gateway-facing path applies.
+        constructing a client directly could get a different contract.
         """
         with caplog.at_level("WARNING", logger="apps.abdm_gateway.client"):
             client = ABDMClient(SANDBOX_BASE, api_version="v9")
@@ -1030,13 +1029,11 @@ class TestCallbackApiVersionDispatch:
     any write, so an unauthenticated caller cannot enumerate supported versions
     and a refused call leaves no row behind.
 
-    **A label is never refused.** The official ABDM spec is unresolved (REG-009),
-    so no version string a gateway can send can be proven unsupported, and a
-    refusal takes a fully-implemented intake channel down over a wording
-    difference. An exact label is served in its own shape, a documented alias in
-    the shape it names, and an unrecognised label in the default shape with a
-    warning. Only a **malformed** declaration — a list, an object or a number —
-    is answered ``422``.
+    **A label is never refused; only a malformed declaration is.** An exact label
+    is served in its own shape, a documented alias in the shape it names, and an
+    unrecognised label in the default shape with a warning. Only a **malformed**
+    declaration — a list, an object or a number — is answered ``422``. The
+    rationale is recorded once, on ``client.resolve_api_version``.
     """
 
     def test_a_v2_ack_is_the_pre_change_acknowledgement_byte_for_byte(self):
@@ -1111,11 +1108,12 @@ class TestCallbackApiVersionDispatch:
         The declared-declaration check runs before the idempotency
         early-return, and the replay branch depends on it. Moving it down into
         the transaction — the natural-looking place for it, next to the rest of
-        the resolution — makes this case answer 200 with a replayed
-        acknowledgement instead of refusing, because the replay branch never
-        reaches a check that lives inside the atomic block. The early check is
-        therefore load-bearing twice over, which is exactly the kind of coupling
-        a test is here to make visible.
+        the resolution — makes this case answer **500**, not 200: the replay
+        branch never reaches a check inside the atomic block, so it hands the
+        list straight to the ack builder and the resolver raises with no handler.
+        Reproduced by the Task 28 re-review (F8); the early check is therefore
+        load-bearing twice over, which is the kind of coupling a test exists to
+        make visible.
         """
         _tenant_with_opd()
         client = APIClient()

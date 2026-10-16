@@ -22,12 +22,10 @@ the supported set), and a refused call must leave no row behind.
 
 **A version label is never refused; only a malformed declaration is.** An
 unrecognised label falls back to ``"v2"`` — the shape this endpoint returned
-before version support existed — with a warning naming the label and the tenant,
-because the ABDM spec is unresolved (REG-009), so no label a gateway can send can
-be proven unsupported and refusing one would take a fully-implemented intake
-channel down over a wording difference. A declaration that is not a string at all
-(a list, an object, a number) has no honest fallback and is answered 422; see
-``apps.abdm_gateway.client`` for the full trade-off.
+before version support existed — with a warning naming the label and the tenant.
+A declaration that is not a string at all (a list, an object, a number) has no
+honest fallback and is answered 422. The rationale for that trade-off is recorded
+once, on ``client.resolve_api_version``.
 """
 import hashlib
 import hmac
@@ -202,20 +200,17 @@ class ABHACallbackViewSet(viewsets.ViewSet):
     def _malformed_version_response(self, error):
         """422 for a declaration that is not a version label at all (INT-002).
 
-        The only refusal the version contract makes. An unrecognised *string*
-        never reaches this method: it is served in the default shape with a
-        warning, because refusing it would be a self-inflicted outage on an
-        endpoint whose specification is still unresolved (REG-009).
+        The only refusal the version contract makes; see
+        ``client.resolve_api_version`` for why an unrecognised *label* is served
+        instead.
 
         422 rather than DRF's default 400 because the request is otherwise *well
         formed* — it authenticated, carried every mandatory key and a fresh
         timestamp — and 400 would say "malformed payload", sitting
         inconsistently beside the 400 this endpoint already returns for a
-        genuinely malformed callback.
-
-        The body names the supported set — it is in ``str(error)`` — because the
-        caller is authenticated by this point (the check runs after ABD-005), so
-        the information is safe to give and useless without it.
+        genuinely malformed callback. The body names the supported set, which is
+        safe because the caller is authenticated by this point (the check runs
+        after ABD-005) and useless without that.
         """
         logger.warning("ABDM callback refused: %s", error)
         return Response(
@@ -230,11 +225,11 @@ class ABHACallbackViewSet(viewsets.ViewSet):
     def _adapter_api_version(self, tenant_id: str):
         """The tenant's active ``abdm`` adapter's version, or ``None`` (INT-002).
 
-        Explicitly filtered by ``tenant_id``, never by RLS alone: the lookup is
-        the thing that decides which vocabulary an acknowledgement uses, so it
-        must not depend on a session binding being right. Ordered newest-first,
-        matching :func:`~apps.abdm_gateway.client.resolve_sandbox_base_url`, so
-        both reads of the same row set agree on which row is in force.
+        Explicitly filtered by ``tenant_id``, never by RLS alone: this lookup is
+        what decides which vocabulary an acknowledgement uses, so it must not
+        depend on a session binding being right. Ordered newest-first, matching
+        ``client.resolve_sandbox_base_url``, so both reads of the same row set
+        agree on which row is in force.
 
         Must be called with the tenant session bound, like every other
         tenant-scoped read in this view.
@@ -254,12 +249,9 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         """The shape a **declared** version resolves to, or the default (INT-002).
 
         Used on the replay path, which deliberately does not consult the tenant's
-        adapter (see the note at the early return in :meth:`create`). Aliases and
-        unrecognised labels resolve here too, so a gateway retry is answered in a
-        shape it can parse rather than raising.
-
-        Cannot raise: the declaration's type was validated before the tenant was
-        resolved, so by this point it is a string or absent.
+        adapter (see the note at the early return in :meth:`create`). Cannot raise:
+        the declaration's type was validated before the tenant was resolved, so by
+        this point it is a string or absent.
         """
         return resolve_api_version(
             declared or DEFAULT_API_VERSION, tenant_id=tenant_id
@@ -270,15 +262,14 @@ class ABHACallbackViewSet(viewsets.ViewSet):
 
         Precedence: what the **request declares**, else the tenant's active
         ``abdm`` adapter's version, else the default — which is the shape this
-        endpoint returned before version support existed, so a gateway that
-        declares nothing is answered exactly as it always was.
+        endpoint returned before version support existed.
 
-        Returns the version string, and lets
-        :class:`~apps.abdm_gateway.client.ABDMUnsupportedVersionError` propagate
-        rather than returning a ``Response``: a resolver that can return two
-        different types makes every caller re-check what it got back, and one
-        forgotten check would feed a ``Response`` into ``build_callback_ack``. The
-        call site turns it into the 422 in one ``except``.
+        Returns the version string and lets
+        ``client.ABDMUnsupportedVersionError`` propagate rather than returning a
+        ``Response``: a resolver that can return two types makes every caller
+        re-check what it got back, and one forgotten check would feed a
+        ``Response`` into ``build_callback_ack``. The call site converts it to the
+        422 in one ``except``.
         """
         candidate = declared or self._adapter_api_version(tenant_id)
         return resolve_api_version(candidate, tenant_id=tenant_id)
@@ -370,18 +361,16 @@ class ABHACallbackViewSet(viewsets.ViewSet):
     def _create_ambiguous_queue_entry(self, profile: dict):
         """Register a multi-candidate scan as one ambiguous queue entry (ABD-009).
 
-        Several registrations fit the scan equally well, and linking any one of
-        them is a coin toss between real patients — so nothing is linked. One
-        row is written with ``verification_status="ambiguous"``: the front desk
-        gets a queue entry to resolve, and the acknowledgement still carries its
-        id so the gateway can tell the scanning patient what happened. The
-        candidates a clerk must choose between live on the log row
-        (``match_candidates``), not here: this patient table must not become a
-        place where one patient's scan points at other patients beyond the ids
-        needed to resolve it.
+        Several registrations fit the scan equally well, and linking any one is a
+        coin toss between real patients — so nothing is linked. One row is written
+        with ``verification_status="ambiguous"``: the front desk gets a queue
+        entry to resolve, and the acknowledgement still carries its id so the
+        gateway can tell the scanning patient what happened. The candidates live
+        on the log row (``match_candidates``), not here: this patient table must
+        not become a place where one patient's scan points at other patients
+        beyond the ids needed to resolve it.
 
-        Same shape as the provisional patient (REG-004) apart from the status —
-        the demographics are unverified gateway data either way.
+        Same shape as the provisional patient (REG-004) apart from the status.
         """
         from apps.patient_registry.models import Patient
 
@@ -502,28 +491,26 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             # A replay is answered in the version *this* request declared, or the
             # default when it declared none (INT-002).
             #
-            # The decision, with its alternative. The stored outcome — request
-            # id, token, patient id, status — is version-*independent*; only its
+            # The decision, with its alternative. The stored outcome — request id,
+            # token, patient id, status — is version-*independent*; only its
             # vocabulary is not. The obvious alternative is to refuse a replay
-            # that declares a different version from the original with a
-            # conflict, on the reasoning that it was already processed under
-            # another contract. That refusal is not implementable here: the
-            # ledger row records no version (adding a column is not this task's
-            # migration, which is the adapter field and nothing else), so a
-            # cross-version replay is indistinguishable from a same-version one
-            # and refusing it would refuse honest gateway retries. Answering it
-            # in the version it declared is the honest outcome: the flow is never
+            # declaring a different version from the original, on the reasoning
+            # that it was already processed under another contract. That is not
+            # implementable here: the ledger row records no version (adding a
+            # column is not this task's migration, which is the adapter field and
+            # nothing else), so a cross-version replay is indistinguishable from a
+            # same-version one and refusing would refuse honest gateway retries.
+            # Answering in the declared version is honest: the flow is never
             # re-run and nothing is written either way (ABD-006), so the worst a
             # confused gateway gets is vocabulary it cannot parse, not a second
             # token or a second patient.
             #
-            # The tenant's adapter is deliberately not consulted here: this early
-            # return precedes the tenant-session binding that every
-            # tenant-scoped read in this view requires, and guessing a version
-            # from a row that cannot be read would answer a v3 gateway in v2
-            # vocabulary. Precedence is therefore the declared version, then the
-            # default, on this path only — deliberately narrower than the
-            # first-request path, and for that reason.
+            # The tenant's adapter is deliberately not consulted: this early
+            # return precedes the tenant-session binding every tenant-scoped read
+            # in this view requires, and guessing a version from a row that
+            # cannot be read would answer a v3 gateway in v2 vocabulary.
+            # Precedence here is therefore the declared version then the default
+            # — deliberately narrower than the first-request path.
             replay_fields = {
                 "status": "duplicate",
                 "detail": "This request was already processed",
@@ -546,10 +533,10 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         with transaction.atomic():
             bind_tenant_session(tenant_id, facility_id)
 
-            # INT-002: resolve the version now that the tenant session is bound —
-            # the adapter lookup is tenant-scoped and must not rely on RLS alone,
-            # and the fallback warning can only name the tenant once it is known.
-            # The ``except`` is unreachable today (``IntegrationAdapter.api_version``
+            # INT-002: resolve the version now the tenant session is bound — the adapter
+            # lookup is tenant-scoped and must not rely on RLS alone, and the
+            # fallback warning can only name the tenant once it is known. The
+            # ``except`` is unreachable today (``IntegrationAdapter.api_version``
             # is a ``CharField``, so a saved row can only hold a string) and is
             # here as the single conversion point, so a row that somehow carried
             # a list or an object would be refused rather than served.
@@ -625,9 +612,9 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 # patient, and until a human picks the right candidate there is
                 # nothing to link it to. ``link_token_enc`` stays NULL.
 
-                # The idempotency ledger row above is what makes the replay
-                # early-return work for this branch too; returning from inside
-                # atomic() commits the queue entry, consent and log together.
+                # The ledger row above is what makes the replay early-return work
+                # for this branch too; returning from inside atomic() commits the
+                # queue entry, consent and log together.
                 ack = build_callback_ack(
                     api_version,
                     ABHACallbackAckSerializer({

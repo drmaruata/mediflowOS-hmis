@@ -1,12 +1,11 @@
 """ABDM gateway services — resolving a shared profile to a patient (ABD-008, ABD-009).
 
-The gateway hands over a profile it never checked against an identity
-document, so "who is this?" has four honest answers: an exact ABHA match (a
-strong identifier the scanning patient restated), a single demographic
-candidate (weak evidence), several candidates (too weak to link anything), or
-none (register provisional). This module answers that question and nothing
-else; what each answer *means* for tokens, consent and the verification queue
-is the callback view's business.
+The gateway hands over a profile it never checked against an identity document,
+so "who is this?" has four honest answers: an exact ABHA match (a strong
+identifier the scanning patient restated), a single demographic candidate (weak
+evidence), several candidates (too weak to link anything), or none (register
+provisional). What each answer *means* for tokens, consent and the verification
+queue is the callback view's business.
 """
 from dataclasses import dataclass
 from typing import Literal
@@ -18,18 +17,16 @@ from apps.patient_registry.models import Patient
 class Resolution:
     """The outcome of resolving one shared profile inside one tenant.
 
-    ``kind``:
-      ``matched``    — exactly one patient; ``patient`` is set and ``matched_by``
-                       records how strong the evidence was.
-      ``candidates`` — several demographic matches; ``candidates`` holds them,
-                       so linking any one of them would be a guess.
-      ``none``       — nothing matched; the caller registers a provisional.
+    ``kind`` is ``matched`` (exactly one patient, with ``matched_by`` recording
+    how strong the evidence was), ``candidates`` (several demographic matches,
+    so linking any one would be a guess) or ``none`` (the caller registers a
+    provisional).
 
     ``matched_by`` exists because the two match strengths carry different
-    standing: an exact ABHA match may link a record as-is, while a demographic
-    match must leave that record in the verification queue. Re-deriving the
-    strength in the view would mean a second ABHA probe there — the matching
-    logic this module exists to hold in one place.
+    standing: an exact ABHA match may link a record as-is, a demographic match
+    must leave it in the verification queue. Re-deriving the strength in the view
+    would mean a second ABHA probe there — the matching logic this module exists
+    to hold in one place.
     """
 
     kind: Literal["matched", "candidates", "none"]
@@ -63,7 +60,8 @@ def resolve_profile(*, profile: dict, tenant_id: str) -> Resolution:
         except Patient.DoesNotExist:
             pass
 
-    # Candidate search by name + year of birth + gender
+    # Candidate search by name + year of birth + gender, tenant-scoped from the
+    # first filter so no result can cross a tenant boundary.
     demographics = profile.get("demographics") or {}
     name = demographics.get("name") or profile.get("name", "")
     year = demographics.get("yearOfBirth") or profile.get("yearOfBirth")

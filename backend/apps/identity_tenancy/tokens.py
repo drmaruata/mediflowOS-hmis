@@ -1,27 +1,22 @@
 """JWT issuance carrying tenant context (TEN-001 to TEN-007).
 
-Architecture doc section 7 describes the request flow as "JWT from Keycloak
-carries tenant_id, facility_id, roles". This module issues that token locally so
-the platform is runnable end to end, and is the single place the tenant context
-on a request originates.
+Architecture doc §7 describes the request flow as "JWT from Keycloak carries
+tenant_id, facility_id, roles". This module issues that token locally so the
+platform is runnable end to end, and is the single place the tenant context on a
+request originates.
 
-Why the tenant lives in the token rather than a header
-------------------------------------------------------
-TenantMiddleware originally took the tenant from ``X-Tenant-Id``, a
-client-supplied header. Any authenticated user could therefore read another
-hospital's data by changing one header, and both the ORM filter and the row level
-security policy were fed from it. Binding the tenant into a signed credential
-means a caller cannot assert a tenant they were not issued.
+**Why the tenant lives in the token rather than a header.** TenantMiddleware
+originally took the tenant from ``X-Tenant-Id``, a client-supplied header: any
+authenticated user could read another hospital's data by changing one header, and
+both the ORM filter and the row level security policy were fed from it. Binding
+the tenant into a signed credential means a caller cannot assert a tenant they
+were not issued.
 
-Two sources of tenant context are accepted, in priority order:
-
-1. the authenticated principal's claims, when present;
-2. the ``X-Tenant-Id`` header, which remains supported for the ABDM gateway
-   callback path and for internal service-to-service calls that are
-   authenticated by network position rather than by user.
-
-A mismatch is not silently resolved in the caller's favour: if a header claims a
-different tenant than the token, the token wins and the header is ignored.
+Two sources are accepted, in priority order: the authenticated principal's
+claims, and the ``X-Tenant-Id`` header, which remains supported for the ABDM
+gateway callback path and for internal service-to-service calls authenticated by
+network position rather than by user. A mismatch is not resolved in the caller's
+favour — if a header claims a different tenant than the token, the token wins.
 """
 from django.contrib.auth import get_user_model
 from django.db.models import F, Prefetch
@@ -63,15 +58,15 @@ def active_membership(user):
 def refuse_deactivated_membership(user):
     """Raise ``AuthenticationFailed`` when the user's membership was switched off (TEN-008).
 
-    Deactivation flips ``UserMembership.active``, and both token-issuance
-    paths must bite on it: obtain alone only refuses the *next* login, so
-    without the same check at refresh a live refresh token would keep minting
-    fully-claimed access tokens for ``REFRESH_TOKEN_LIFETIME`` while the
-    offboarded session never ends. ``active_membership()`` ignores inactive
-    rows, so the condition is "no active membership, yet memberships exist" —
-    only a membership that exists and has been switched off refuses. A user
-    with NO membership keeps the fail-closed login semantics (the account may
-    be mid-onboarding; see ``TenantAwareTokenSerializer.get_token``).
+    Both token-issuance paths must bite on deactivation: obtain alone only refuses
+    the *next* login, so without the same check at refresh a live refresh token
+    would keep minting fully-claimed access tokens for
+    ``REFRESH_TOKEN_LIFETIME`` while the offboarded session never ends.
+
+    ``active_membership()`` ignores inactive rows, so the condition is "no active
+    membership, yet memberships exist" — only a membership that exists and has
+    been switched off refuses. A user with NO membership keeps the fail-closed
+    login semantics (the account may be mid-onboarding).
     """
     if active_membership(user) is None and user.memberships.exists():
         raise AuthenticationFailed(DEACTIVATED_MEMBERSHIP_MESSAGE)
@@ -84,22 +79,20 @@ class TenantAwareTokenSerializer(TokenObtainPairSerializer):
     def get_token(cls, user):
         token = super().get_token(user)
 
-        # TEN-006: both MFA claims are written before the membership branch,
-        # because MFARequiredIfConfigured reads them from every authenticated
-        # token — including one from a membership-less account. mfa_verified
-        # mirrors django-otp state: the library attaches the verified device
-        # as user.otp_device, and a password-only login has none, so it reads
-        # False. Fail closed — a token that has not proven a second factor
-        # never claims it has.
+        # TEN-006: written before the membership branch, because
+        # MFARequiredIfConfigured reads them from every authenticated token —
+        # including one from a membership-less account. ``mfa_verified`` mirrors
+        # django-otp state: the library attaches the verified device as
+        # ``user.otp_device``, and a password-only login has none. Fail closed —
+        # a token that has not proven a second factor never claims it has.
         token[MFA_CLAIM] = getattr(user, "otp_device", None) is not None
 
         membership = active_membership(user)
         if membership is None:
             # No membership means no tenant. The token is still issued, but the
-            # tenant claims stay null and every tenant-scoped queryset resolves
-            # to empty. Denying the login outright would be clearer, but the
-            # account may legitimately be mid-onboarding; isolation fails
-            # closed either way.
+            # tenant claims stay null and every tenant-scoped queryset resolves to
+            # empty. Denying the login would be clearer, but the account may
+            # legitimately be mid-onboarding; isolation fails closed either way.
             token[TENANT_CLAIM] = None
             token[FACILITY_CLAIM] = None
             token[ROLE_CLAIM] = None
@@ -122,20 +115,17 @@ class TenantAwareTokenSerializer(TokenObtainPairSerializer):
         user = self.user
         membership = active_membership(user)
 
-        # TEN-008: this is the point where deactivation must bite at login.
-        # Without it a deactivated account would still be issued the
-        # null-claim token below — logged in, just unscoped; see
-        # refuse_deactivated_membership for the condition. Running after
-        # super().validate means the password has already been verified, so
-        # this cannot be used to probe which accounts are deactivated.
+        # TEN-008: where deactivation must bite at login. Without it a
+        # deactivated account would still be issued the null-claim token below —
+        # logged in, just unscoped. Running after ``super().validate`` means the
+        # password has already been verified, so this cannot probe which accounts
+        # are deactivated.
         refuse_deactivated_membership(user)
 
-        # The claim is an enforcement input, not just display data: the
-        # MFARequiredIfConfigured default permission reads requires_mfa and
-        # this mfa_verified claim to gate default-permission endpoints.
-        # django-otp's state (user.otp_device) is what feeds the claim at
-        # issuance; publishing it in the response body too lets the frontend
-        # prompt for a second factor without a second round trip.
+        # An enforcement input, not just display data: MFARequiredIfConfigured
+        # reads requires_mfa and this mfa_verified claim to gate default-permission
+        # endpoints. Publishing it in the body too lets the frontend prompt for a
+        # second factor without a second round trip.
         device = getattr(user, "otp_device", None)
         data[MFA_CLAIM] = device is not None
 
@@ -160,30 +150,25 @@ class TenantAwareTokenSerializer(TokenObtainPairSerializer):
 class TenantAwareTokenRefreshSerializer(TokenRefreshSerializer):
     """Refuse rotation once the membership behind the token is off (TEN-008).
 
-    Wired through ``TOKEN_REFRESH_SERIALIZER`` in ``config/settings/base.py``.
-    The obtain-path refusal only fires at the *next* login, so without this
-    class an offboarded user holding a live refresh token would keep minting
-    fully-claimed access tokens for ``REFRESH_TOKEN_LIFETIME`` (a day) —
-    tenant and permission claims survive rotation (see the refresh route's
-    comment in ``identity_tenancy/urls.py``), and deactivation would never
-    take effect for a session already in progress.
+    Wired through ``TOKEN_REFRESH_SERIALIZER``. Tenant and permission claims
+    survive rotation, so without this class an offboarded user holding a live
+    refresh token would keep minting fully-claimed access tokens for
+    ``REFRESH_TOKEN_LIFETIME`` and deactivation would never take effect for a
+    session already in progress.
     """
 
     def validate(self, attrs):
         """Validate the rotation, then re-check the membership (TEN-008).
 
-        The membership check runs after ``super()`` as ruled: by then the old
-        token has been blacklisted and a replacement outstanding, but nothing
-        is returned when this raises, so a refused refresh still answers 401
-        with no token — and the burned refresh token is the safe direction
-        for a retry to land.
+        The check runs after ``super()``: by then the old token has been
+        blacklisted and a replacement outstanding, but nothing is returned when
+        this raises, so a refused refresh still answers 401 with no token — and
+        the burned refresh token is the safe direction for a retry to land.
 
-        The user claim is read off the presented refresh token with
-        SimpleJWT's own ``self.token_class`` rather than by hand. ``verify``
-        is False because ``super()`` already signature-verified,
-        expiry-checked, token-type-checked and blacklist-checked this exact
-        string milliseconds ago; re-verifying would trip over the blacklist
-        entry ``super()`` itself just wrote under ``ROTATE_REFRESH_TOKENS``.
+        ``verify=False`` because ``super()`` already signature-verified,
+        expiry-checked, type-checked and blacklist-checked this exact string
+        milliseconds ago; re-verifying would trip over the blacklist entry
+        ``super()`` itself just wrote.
         """
         data = super().validate(attrs)
 
