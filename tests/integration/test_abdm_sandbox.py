@@ -115,14 +115,19 @@ def _profile_share_payload(api_version: str, hip_id: str) -> dict:
     set so the consent row's provenance is the payload's own rather than the
     ``"ABDM"`` fallback (ABD-011).
 
-    The gateway request id embeds the API version only. The callback contract
-    is version-agnostic by design (section 8.2's adapter serves both flows), so
-    the version has to be visible somewhere else — and embedding it here is also
-    what makes each parametrised case a *fresh* scan rather than a replay of the
-    previous one, which idempotency would answer with the first
-    acknowledgement (ABD-006). A version-matched request id that a sandbox
-    operator sees in the callback ledger therefore identifies the flow the
-    gateway used.
+    The gateway request id embeds the API version only. This replay declares no
+    ``apiVersion``, so since INT-002 it is answered in the default ``v2`` shape
+    — the shape this endpoint returned before version support existed — whatever
+    label the request id carries. (That is also what makes each parametrised
+    case a *fresh* scan rather than a replay of the previous one, which
+    idempotency would answer with the first acknowledgement, ABD-006.) A
+    version-matched request id that a sandbox operator sees in the callback
+    ledger therefore identifies the flow the gateway used.
+
+    Note that ``v1.0`` and ``v3`` here are *replay labels*, not the adapter's
+    vocabulary: the versions the adapter serves are ``v2`` and ``v3`` (see
+    ``SUPPORTED_API_VERSIONS`` in ``apps.abdm_gateway.client``), and a callback
+    declaring any other version is refused 422.
     """
     return _payload(
         requestId=f"sbx-profile-share-{api_version}",

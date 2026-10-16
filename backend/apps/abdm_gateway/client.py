@@ -23,12 +23,81 @@ Fail-closed contract: a caller with no configured base URL is refused with a
 adapter could not make), a non-2xx sandbox response raises
 :class:`ABDMRequestError` with the status and body, and a network failure
 before any response propagates as ``httpx.TransportError``.
+
+INT-002 — one adapter, older and newer API versions. SRS INT-002 requires the
+integration to serve both, and architecture doc section 8.2 records why: v1.0 and
+v3 paths coexisted on the ABDM gateway while the ABHA app still called the older
+flow. This module owns the whole version contract:
+
+* :data:`SUPPORTED_API_VERSIONS` is the single source of truth. Validation, the
+  error message, the outbound dispatch and the callback's acknowledgement all
+  read it, so the client, the callback and the tests cannot disagree about what
+  "supported" means.
+* :func:`build_profile_share_request` and :func:`build_callback_ack` are **pure
+  functions, payload in and payload out** — no I/O, no database, no ``settings``,
+  no clock — which is what makes the version contract testable without a network
+  or a sandbox credential.
+* ``ABDMClient.for_adapter`` binds a client to an ``IntegrationAdapter`` row's
+  version, refusing an inactive row, an unsupported version and an unconfigured
+  base URL before any HTTP is attempted.
+
+**``v2`` is the pre-INT-002 behaviour, byte for byte.** Before version support
+there was exactly one shape, so that shape *is* ``v2`` and it is the field
+default — which is also what makes the model migration behaviour-preserving for
+every existing tenant. ``tests/integration/test_abha_services.py`` pins the
+pre-change acknowledgement bytes against ``v2``.
+
+**``v3`` is provisional and must be re-verified.** The official sandbox spec is
+still unresolved (the REG-009 entry under Known gaps in
+``docs/traceability.md``), so v3's shape here is derived only from the vocabulary
+this repository already exchanges with the gateway (camelCase keys such as
+``requestId``, ``sourceApp``, ``abhaNumber``). It is a documented placeholder,
+not a claim about the real ABDM API.
 """
 import urllib.parse
 
 import httpx
 from django.conf import settings
 from django.core.exceptions import ImproperlyConfigured
+
+#: The ABDM profile-share API versions this deployment speaks (INT-002). An
+#: older and a newer one; see the module docstring for what "older" means here.
+SUPPORTED_API_VERSIONS = ("v2", "v3")
+
+#: The version used when nothing declares one. ``v2`` because it reproduces the
+#: single unversioned shape exactly, so a gateway that declares nothing and a
+#: tenant with no adapter row keep today's contract.
+DEFAULT_API_VERSION = "v2"
+
+#: The key a callback declares its API version with. Inside the signed body and
+#: not a header, deliberately: only the body is covered by the ABDM-005 HMAC,
+#: so a version carried in a header could be added or stripped in transit and
+#: would change the shape of the acknowledgement with nothing able to detect it.
+API_VERSION_PAYLOAD_KEY = "apiVersion"
+
+#: The acknowledgement keys either version may carry. Both builders select from
+#: this list rather than passing their input through, so nothing a caller hands
+#: them can put a field on the wire by accident — which is how ``link_token``
+#: stays off it (ABD-012).
+_ACK_FIELDS = ("status", "token", "request_id", "patient_id", "consent_event", "detail")
+
+#: ``v3``'s wire names for those keys. The order is the response's field order.
+_V3_ACK_FIELD_NAMES = {
+    "status": "status",
+    "token": "token",
+    "request_id": "requestId",
+    "patient_id": "patientId",
+    "consent_event": "consentEvent",
+    "detail": "detail",
+}
+
+#: The consent event's own ``v3`` names, for the same reason.
+_V3_CONSENT_FIELD_NAMES = {
+    "timestamp": "timestamp",
+    "source_app": "sourceApp",
+    "purpose": "purpose",
+    "facility_id": "facilityId",
+}
 
 
 class ABDMRequestError(RuntimeError):
@@ -40,6 +109,124 @@ class ABDMRequestError(RuntimeError):
         super().__init__(
             f"ABDM sandbox request failed with HTTP {status_code}: {body!r}"
         )
+
+
+class ABDMAdapterError(RuntimeError):
+    """Base for the failures ``for_adapter`` refuses on, all before any HTTP."""
+
+
+class ABDMUnsupportedVersionError(ABDMAdapterError):
+    """An ``api_version`` outside :data:`SUPPORTED_API_VERSIONS`.
+
+    Carries both sides of the answer so a caller can report them without
+    re-deriving the supported set: the version asked for, and the ones this
+    deployment serves.
+    """
+
+    def __init__(self, requested, supported=SUPPORTED_API_VERSIONS) -> None:
+        self.requested = requested
+        self.supported = tuple(supported)
+        super().__init__(
+            "Unsupported ABDM API version: {requested!r}. Supported versions: "
+            "{supported}.".format(
+                requested=requested, supported=", ".join(self.supported)
+            )
+        )
+
+
+class ABDMAdapterInactiveError(ABDMAdapterError):
+    """The adapter row is ``active=False`` — the operator's deliberate off-switch."""
+
+
+class ABDMSandboxUnconfiguredError(ABDMAdapterError):
+    """No sandbox base URL is resolvable, so there is nowhere to send a request."""
+
+
+def require_supported_api_version(value) -> str:
+    """Return ``value`` as a supported version string, or refuse.
+
+    Surrounding whitespace is stripped (a transport artefact); case is **not**
+    folded, because deciding that ``"V3"`` means ``"v3"`` would decide the
+    acknowledgement's shape by guessing at what the sender meant, and the whole
+    point of this registry is that the shape is never guessed.
+    """
+    candidate = value.strip() if isinstance(value, str) else value
+    if candidate not in SUPPORTED_API_VERSIONS:
+        raise ABDMUnsupportedVersionError(value)
+    return candidate
+
+
+def declared_api_version(payload: dict) -> str | None:
+    """The API version this callback declares, or ``None`` when it declares none.
+
+    A blank or non-string value is *absent*, not invalid: a sender that left the
+    field empty has said nothing about which contract it is speaking, and
+    refusing it with a 422 would turn an unambiguous request into an error.
+    Nothing is validated here — validation is
+    :func:`require_supported_api_version`'s job, and the caller decides when to
+    run it.
+    """
+    if not isinstance(payload, dict):
+        return None
+    declared = payload.get(API_VERSION_PAYLOAD_KEY)
+    return declared if isinstance(declared, str) and declared.strip() else None
+
+
+def build_profile_share_request(api_version: str, payload: dict) -> dict:
+    """The outbound profile-share body, shaped for ``api_version``. Pure.
+
+    ``v2`` is the identity — the payload exactly as the client would have sent it
+    before version support existed. ``v3`` adds the version declaration and
+    changes nothing else: with the sandbox spec unresolved (REG-009) the only
+    newer-flow difference this repository can justify is the declaration itself,
+    and inventing a nested envelope or renamed fields would be a claim about
+    ABDM's API that nothing verifies.
+    """
+    require_supported_api_version(api_version)
+    if api_version == "v3":
+        return {API_VERSION_PAYLOAD_KEY: "v3", **payload}
+    return dict(payload)
+
+
+def build_callback_ack(api_version: str, fields: dict) -> dict:
+    """The acknowledgement body for ``api_version``, from canonical fields. Pure.
+
+    ``fields`` is the view's canonical, serializer-produced set (``status``,
+    ``token``, ``request_id``, ``patient_id``, ``consent_event``, plus a branch's
+    own ``detail``); this is where the version's wire vocabulary is applied.
+
+    ``v2`` passes those fields through unchanged, preserving their order, which
+    is what makes its bytes identical to the pre-INT-002 acknowledgement.
+    ``v3`` renames them into the camelCase vocabulary the gateway itself uses on
+    the way in and stamps the version it is answering in — also provisional, for
+    the reason in the module docstring.
+    """
+    require_supported_api_version(api_version)
+    if api_version != "v3":
+        return {key: value for key, value in fields.items() if key in _ACK_FIELDS}
+    body = {API_VERSION_PAYLOAD_KEY: "v3"}
+    for key, name in _V3_ACK_FIELD_NAMES.items():
+        if key not in fields:
+            continue
+        value = fields[key]
+        body[name] = _v3_consent_event(value) if key == "consent_event" else value
+    return body
+
+
+def _v3_consent_event(consent_event):
+    """Rename the consent event's fields for ``v3``; a null event stays null.
+
+    Only the four attributes the architecture doc names (timestamp, source,
+    purpose, facility) are carried in any version — never ``raw_profile_hash``
+    and never a patient attribute (data minimisation, section 8.4).
+    """
+    if not isinstance(consent_event, dict):
+        return consent_event
+    return {
+        name: consent_event[key]
+        for key, name in _V3_CONSENT_FIELD_NAMES.items()
+        if key in consent_event
+    }
 
 
 def require_sandbox_base_url(value: str) -> str:
@@ -93,14 +280,84 @@ class ABDMClient:
 
     ``transport`` is injectable (``httpx.MockTransport`` in tests) so the
     request the client builds is pinned without touching the network.
+
+    The client is bound to one API version (INT-002). ``api_version`` is
+    validated in the constructor rather than at dispatch, so a client can never
+    hold a version no builder handles; it defaults to :data:`DEFAULT_API_VERSION`,
+    which is the pre-versioning behaviour.
     """
 
-    def __init__(self, base_url: str, *, transport=None, timeout: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        transport=None,
+        timeout: float = 10.0,
+        api_version: str = DEFAULT_API_VERSION,
+    ) -> None:
+        self.api_version = require_supported_api_version(api_version)
         self._base = base_url.rstrip("/")
         if transport is not None:
             self._client = httpx.Client(transport=transport, timeout=timeout)
         else:
             self._client = httpx.Client(timeout=timeout)
+
+    @classmethod
+    def for_adapter(cls, adapter, *, transport=None, timeout: float = 10.0):
+        """A client bound to an ``IntegrationAdapter`` row's version and URL.
+
+        Everything that can be refused is refused **before any HTTP**:
+
+        * an inactive row (:class:`ABDMAdapterInactiveError`) — ``active=False``
+          is the operator's off-switch, and the base-URL resolver already filters
+          on ``active=True``, so binding straight from a row must not become a
+          way around that filter;
+        * an ``api_version`` outside the registry
+          (:class:`ABDMUnsupportedVersionError`);
+        * a base URL that is not a sandbox (:class:`ImproperlyConfigured`, from
+          the same :func:`require_sandbox_base_url` gate settings import runs) or
+          no base URL at all (:class:`ABDMSandboxUnconfiguredError`).
+
+        The base URL comes from :func:`resolve_sandbox_base_url`, so the
+        precedence stays the one the module already owns — environment first,
+        then this adapter's own ``config["base_url"]`` — rather than a second,
+        competing rule introduced alongside it.
+
+        Caught by: the caller. Nothing in the repository constructs a client
+        through this method yet (the counter actions still build one from the
+        resolved base URL directly), so today the failures surface to the test
+        suite and to the first production call site that adopts it.
+        """
+        if not getattr(adapter, "active", False):
+            raise ABDMAdapterInactiveError(
+                "ABDM adapter {!r} is inactive; the row is the tenant's "
+                "deliberate off-switch for this integration.".format(
+                    getattr(adapter, "name", "abdm")
+                )
+            )
+        api_version = require_supported_api_version(
+            getattr(adapter, "api_version", DEFAULT_API_VERSION)
+        )
+        base_url = resolve_sandbox_base_url(getattr(adapter, "tenant_id", None))
+        if not base_url:
+            raise ABDMSandboxUnconfiguredError(
+                "No ABDM sandbox base URL is configured for this adapter; set "
+                "ABDM_SANDBX_BASE_URL or the adapter's config['base_url']."
+            )
+        return cls(
+            base_url, transport=transport, timeout=timeout, api_version=api_version
+        )
+
+    def profile_share_body(self, payload: dict) -> dict:
+        """The profile-share body this client would post, shaped for its version.
+
+        Separate from :meth:`_post` because the profile-share *endpoint path* is
+        not in the documented sandbox spec (REG-009): inventing a path here would
+        be a claim nothing verifies. What the version adapter owns is the body,
+        so that is what this exposes — which is also why it is safe to unit-test
+        with no transport at all.
+        """
+        return build_profile_share_request(self.api_version, payload)
 
     def _post(self, path: str, payload: dict) -> dict:
         """POST ``path`` under the base URL, returning the parsed JSON body.

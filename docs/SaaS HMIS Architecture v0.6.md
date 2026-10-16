@@ -220,6 +220,20 @@ The ABDM developer forum shows the technical shape: the facility QR carries the 
 
 > **Version caution.** The forum shows v1.0 and v3 API paths coexisting (the ABHA app was still calling the older flow while v3 existed). The `abdm-gateway` module must therefore sit behind an **adapter that supports both**, and the exact current spec must be confirmed against ABDM's sandbox documentation at build time.
 
+**How that maps in the code (INT-002).** The adapter is
+`IntegrationAdapter.api_version`, and the versions this repository serves are
+`v2` and `v3` — our labels for the older and the newer contract, held in one
+registry (`apps/abdm_gateway/client.py`: `SUPPORTED_API_VERSIONS`) that validates
+them, shapes the outbound profile-share body and shapes the callback's
+acknowledgement. `v2` is the single unversioned shape the callback already
+returned, which is why it is the field default and why adding it changes no
+existing tenant's bytes. **The labels, and `v3`'s payload and acknowledgement
+shapes, are provisional** until the spec above is confirmed — nothing here is a
+statement about the real ABDM API, and the enrollment API the ABHA client speaks
+is separately unresolved (REG-009). A callback declaring a version this
+deployment does not serve is refused `422` with the supported set named, after
+authentication and the payload checks and before any write.
+
 ### 8.3 Sequence
 
 ```mermaid
@@ -547,7 +561,7 @@ The 406-indicator baseline makes the source-to-data mapping a first-class archit
 
 | Integration | Protocol | Notes |
 | --- | --- | --- |
-| ABDM gateway | REST / FHIR | ABHA, **profile share callbacks (v1.0 and v3 adapters)**, consent, record sharing |
+| ABDM gateway | REST / FHIR | ABHA, **profile share callbacks (older and newer API versions behind one adapter — see 8.2)**, consent, record sharing |
 | Lab analyzers | HL7 v2 (via MLLP bridge) | Bridge agent on hospital LAN; results flow to `lis` |
 | Imaging modalities / PACS | DICOM | Orthanc per region; metadata in `ris` |
 | Payers / TPAs / PM-JAY | REST / vendor APIs | Adapter per payer behind a common interface |

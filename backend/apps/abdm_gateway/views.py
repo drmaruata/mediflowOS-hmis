@@ -11,6 +11,14 @@ Architecture doc section 8.4 requires:
 7. Record consent event; store link token encrypted
 
 This endpoint is intentionally anonymous (gateway carries no user JWT).
+
+INT-002 adds a versioned adapter on top of that flow. The acknowledgement is
+shaped by the API version the gateway speaks, resolved in this order: the version
+the **request declares**, else the tenant's **active ``abdm`` adapter's**
+version, else ``"v2"``. Resolution runs after authentication, the
+mandatory-key check and the timestamp check, and before any write — an
+unauthenticated caller must not learn which versions exist (the 422 body names
+the supported set), and a refused call must leave no row behind.
 """
 import hashlib
 import hmac
@@ -31,6 +39,14 @@ from rest_framework.response import Response
 
 from common.tenant import bind_tenant_session
 from common.throttling import AbdmHipThrottle
+from .client import (
+    ABDMUnsupportedVersionError,
+    DEFAULT_API_VERSION,
+    SUPPORTED_API_VERSIONS,
+    build_callback_ack,
+    declared_api_version,
+    require_supported_api_version,
+)
 from .consent import hash_profile, record_consent_event, store_link_token
 from .models import ABHACallbackLog
 from .serializers import ABHACallbackAckSerializer, ABHACallbackSerializer
@@ -173,6 +189,81 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             return ABHACallbackLog.objects.get(request_id=request_id, tenant_id=tenant_id)
         except ABHACallbackLog.DoesNotExist:
             return None
+
+    def _unsupported_version_response(self, requested):
+        """422 for an API version this deployment does not serve (INT-002).
+
+        422 rather than DRF's default 400 because the request is *well formed* —
+        it authenticated, carried every mandatory key and a fresh timestamp — and
+        what makes it unprocessable is the contract revision it asks for. A 400
+        would tell the gateway its payload is malformed, which is a different
+        fault with a different fix on its side, and would sit inconsistently
+        beside the 400 this endpoint already returns for a genuinely malformed
+        callback.
+
+        The body names the supported set on purpose: the caller is authenticated
+        by this point (the check runs after ABD-005), so the information is safe
+        to give and useless without it — this is an adapter that tells a peer
+        which revisions it can speak.
+        """
+        supported = ", ".join(SUPPORTED_API_VERSIONS)
+        logger.warning(
+            "ABDM callback refused: unsupported API version %r (supported: %s)",
+            requested,
+            supported,
+        )
+        return Response(
+            {
+                "status": "rejected",
+                "detail": (
+                    f"Unsupported ABDM API version: {requested!r}. "
+                    f"Supported versions: {supported}."
+                ),
+                "supported_versions": list(SUPPORTED_API_VERSIONS),
+            },
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
+
+    def _adapter_api_version(self, tenant_id: str):
+        """The tenant's active ``abdm`` adapter's version, or ``None`` (INT-002).
+
+        Explicitly filtered by ``tenant_id``, never by RLS alone: the lookup is
+        the thing that decides which vocabulary an acknowledgement uses, so it
+        must not depend on a session binding being right. Ordered newest-first,
+        matching :func:`~apps.abdm_gateway.client.resolve_sandbox_base_url`, so
+        both reads of the same row set agree on which row is in force.
+
+        Must be called with the tenant session bound, like every other
+        tenant-scoped read in this view.
+        """
+        from apps.integration.models import IntegrationAdapter
+
+        adapter = (
+            IntegrationAdapter.objects.filter(
+                tenant_id=tenant_id, name="abdm", active=True
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        return adapter.api_version if adapter is not None else None
+
+    def _resolve_api_version(self, declared, tenant_id: str):
+        """The version this callback is answered in, or an HTTP 422 response.
+
+        Precedence: what the **request declares**, else the tenant's active
+        ``abdm`` adapter's version, else the default — which is the shape this
+        endpoint returned before version support existed, so a gateway that
+        declares nothing is answered exactly as it always was.
+
+        A ``Response`` is returned rather than raised so the caller can answer
+        the 422 without an exception handler, matching how this view reports its
+        other refusals.
+        """
+        candidate = declared or self._adapter_api_version(tenant_id) or DEFAULT_API_VERSION
+        try:
+            return require_supported_api_version(candidate)
+        except ABDMUnsupportedVersionError:
+            return self._unsupported_version_response(candidate)
 
     def _resolve_department(self, raw_department_id):
         """Resolve a department the gateway supplied to a real, local department.
@@ -356,6 +447,23 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        # INT-002: the version the gateway declares, if it declares one. Checked
+        # here, after authentication and both payload checks and before any write,
+        # so an unauthenticated caller cannot use this endpoint to enumerate the
+        # supported versions (the 422 body names them) and a refused version
+        # leaves no row behind. It also runs *before* the idempotency
+        # early-return: a callback carrying an unsupported declaration must be
+        # told so rather than answered 200 with a replayed acknowledgement, or a
+        # bad version could ride a stored outcome. The full resolution —
+        # declared, else the tenant's adapter, else the default — needs the
+        # tenant session bound, so it happens inside the atomic block below.
+        declared_version = declared_api_version(payload)
+        if declared_version is not None:
+            try:
+                require_supported_api_version(declared_version)
+            except ABDMUnsupportedVersionError:
+                return self._unsupported_version_response(declared_version)
+
         # Extract key fields. The schema check above guarantees requestId and
         # profile exist; neither is defaulted any further.
         request_id = payload["requestId"]
@@ -377,14 +485,42 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         # ABD-006: idempotency check
         existing = self._idempotent_check(request_id, tenant_id)
         if existing:
+            # A replay is answered in the version *this* request declared, or the
+            # default when it declared none (INT-002).
+            #
+            # The decision, with its alternative. The stored outcome — request
+            # id, token, patient id, status — is version-*independent*; only its
+            # vocabulary is not. The obvious alternative is to refuse a replay
+            # that declares a different version from the original with a
+            # conflict, on the reasoning that it was already processed under
+            # another contract. That refusal is not implementable here: the
+            # ledger row records no version (adding a column is not this task's
+            # migration, which is the adapter field and nothing else), so a
+            # cross-version replay is indistinguishable from a same-version one
+            # and refusing it would refuse honest gateway retries. Answering it
+            # in the version it declared is the honest outcome: the flow is never
+            # re-run and nothing is written either way (ABD-006), so the worst a
+            # confused gateway gets is vocabulary it cannot parse, not a second
+            # token or a second patient.
+            #
+            # The tenant's adapter is deliberately not consulted here: this early
+            # return precedes the tenant-session binding that every
+            # tenant-scoped read in this view requires, and guessing a version
+            # from a row that cannot be read would answer a v3 gateway in v2
+            # vocabulary. Precedence is therefore the declared version, then the
+            # default, on this path only — deliberately narrower than the
+            # first-request path, and for that reason.
+            replay_fields = {
+                "status": "duplicate",
+                "detail": "This request was already processed",
+                "request_id": request_id,
+                "token": existing.token_issued,
+                "patient_id": str(existing.matched_patient_id) if existing.matched_patient_id else None,
+            }
             return Response(
-                {
-                    "status": "duplicate",
-                    "detail": "This request was already processed",
-                    "request_id": request_id,
-                    "token": existing.token_issued,
-                    "patient_id": str(existing.matched_patient_id) if existing.matched_patient_id else None,
-                },
+                build_callback_ack(
+                    declared_version or DEFAULT_API_VERSION, replay_fields
+                ),
                 status=status.HTTP_200_OK,
             )
 
@@ -394,6 +530,14 @@ class ABHACallbackViewSet(viewsets.ViewSet):
 
         with transaction.atomic():
             bind_tenant_session(tenant_id, facility_id)
+
+            # INT-002: resolve the version now that the tenant session is bound —
+            # the adapter lookup is tenant-scoped and must not rely on RLS alone.
+            # It runs before any write, so a version this deployment does not
+            # serve is refused with no patient, no token and no ledger row.
+            api_version = self._resolve_api_version(declared_version, tenant_id)
+            if isinstance(api_version, Response):
+                return api_version
 
             # ABD-010: resolve the department the gateway named *before* the
             # patient is matched or registered. A refusal from here returns a
@@ -465,14 +609,17 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 # The idempotency ledger row above is what makes the replay
                 # early-return work for this branch too; returning from inside
                 # atomic() commits the queue entry, consent and log together.
-                ack = ABHACallbackAckSerializer({
-                    "status": "ambiguous",
-                    "token": None,
-                    "request_id": request_id,
-                    "patient_id": str(patient.id),
-                    "consent_event": consent_event,
-                })
-                return Response(ack.data, status=status.HTTP_200_OK)
+                ack = build_callback_ack(
+                    api_version,
+                    ABHACallbackAckSerializer({
+                        "status": "ambiguous",
+                        "token": None,
+                        "request_id": request_id,
+                        "patient_id": str(patient.id),
+                        "consent_event": consent_event,
+                    }).data,
+                )
+                return Response(ack, status=status.HTTP_200_OK)
 
             if resolution.kind == "matched":
                 patient = resolution.patient
@@ -543,14 +690,17 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             )
             store_link_token(log_id=log.id, token=link_token)
 
-        ack = ABHACallbackAckSerializer({
-            "status": "ok",
-            "token": token,
-            "request_id": request_id,
-            "patient_id": str(patient.id),
-            "consent_event": consent_event,
-        })
-        return Response(ack.data, status=status.HTTP_200_OK)
+        ack = build_callback_ack(
+            api_version,
+            ABHACallbackAckSerializer({
+                "status": "ok",
+                "token": token,
+                "request_id": request_id,
+                "patient_id": str(patient.id),
+                "consent_event": consent_event,
+            }).data,
+        )
+        return Response(ack, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"])
     def health(self, request):

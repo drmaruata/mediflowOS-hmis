@@ -50,11 +50,19 @@ callback exactly as the gateway does. It asserts three things:
 The cases are parametrised per **API version**: `v1.0` and `v3`. Those are the
 two the repository's documented contract covers — architecture doc §8.2 records
 v1.0 and v3 paths coexisting and requires the `abdm-gateway` module to sit
-behind an adapter that supports both. The callback contract itself is
-version-agnostic, so the version is carried in the gateway request id, which
-also makes each parametrised case a fresh scan rather than a replay (idempotency
-would answer the second identical request id with the first acknowledgement,
-ABD-006).
+behind an adapter that supports both. The version is carried in the gateway
+request id, which also makes each parametrised case a fresh scan rather than a
+replay (idempotency would answer the second identical request id with the first
+acknowledgement, ABD-006).
+
+Since INT-002 the callback is **no longer version-agnostic**: a callback that
+declares its version (`apiVersion` in the signed body) is acknowledged in that
+version's shape, and these replays declare none, so they are answered in the
+default `v2` shape — the one this endpoint returned before version support
+existed. Note that `v1.0` is a *label for this replay only*; the versions the
+adapter serves are `v2` and `v3` (architecture doc §8.2), and the two sets are
+not the same vocabulary. A replay declaring an unsupported version would be
+refused `422` and would prove nothing about the sandbox.
 
 **Coverage caveat.** The sandbox's *authoritative* list of profile-share API
 versions could not be resolved offline, and is deliberately not invented here.
