@@ -428,8 +428,8 @@ daphne -b 0.0.0.0 -p 8000 config.asgi:application
 The API should be available at:
 
 - http://localhost:8000/admin/
-- http://localhost:8000/api/schema/
-- http://localhost:8000/api/docs/
+- http://localhost:8000/api/schema/ — the published OpenAPI document, anonymous
+- http://localhost:8000/api/docs/ — Swagger UI, anonymous
 - http://localhost:8000/api/v1/health/ — liveness, anonymous, no database needed
 - http://localhost:8000/api/v1/health/ready/ — readiness, `503` if the database
   is unreachable

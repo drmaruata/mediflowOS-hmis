@@ -1,10 +1,12 @@
 """OpenAPI schema generation.
 
 drf-spectacular registers an authentication extension when the class is
-*defined*, so this module only takes effect once something imports it. Its own
-``preprocess_register_extensions`` hook is referenced from
-``SPECTACULAR["POSTPROCESSING_HOOKS"]`` in config/settings/base.py, which is the
-documented way to get a non-installed-app module loaded before generation starts.
+*defined*, so this module only takes effect once something imports it. Nothing
+else in the project does, so :meth:`apps.common.apps.CommonConfig.ready` imports
+it during app loading — deliberately not from a ``SPECTACULAR_SETTINGS`` hook,
+because importing at settings-module level configures DRF's schema class
+prematurely and breaks the SpectacularAPIView's own schema. See that AppConfig
+for the reasoning.
 
 Why an extension is needed at all: drf-spectacular matches an authentication
 class by exact identity, so its bundled ``SimpleJWTScheme`` does not cover
@@ -39,5 +41,5 @@ class TenantBoundJWTScheme(OpenApiAuthenticationExtension):
 
 
 def preprocess_register_extensions(endpoints, **kwargs):
-    """Kept for callers that prefer to import this module via SPECTACULAR hooks."""
+    """Kept for callers that prefer to import this module via SPECTACULAR_SETTINGS hooks."""
     return endpoints

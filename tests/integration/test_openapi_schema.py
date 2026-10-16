@@ -58,12 +58,14 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 import pytest
+from django.conf import settings
 from django.core.management import call_command
 from django.core.management.base import CommandError
 from django.urls import path
 from drf_spectacular.drainage import GENERATOR_STATS
 from drf_spectacular.generators import SchemaGenerator
 from rest_framework import viewsets
+from rest_framework.test import APIClient
 
 pytestmark = [pytest.mark.integration]
 
@@ -84,6 +86,12 @@ ABDM_CALLBACK_PATH = "/api/v1/abdm-callbacks/"
 #: JWT, so ``IsAuthenticated`` is not what guards it. Both are deliberate, and
 #: the document is where that is stated rather than merely implied.
 HEALTH_PATHS = ("/api/v1/health/", "/api/v1/health/ready/")
+
+#: The documentation surface itself, which is served without a credential on
+#: purpose: an integrator has to be able to read the API contract before they
+#: have one. Named here because the paths are asserted anonymously below.
+SCHEMA_PATH = "/api/schema/"
+DOCS_PATH = "/api/docs/"
 
 #: A drf-spectacular diagnostic. ``GeneratorStats.emit`` prints
 #: ``"<source>: <Severity> [<breadcrumbs>]: <message>"`` and ``emit_summary``
@@ -254,17 +262,10 @@ class TestTheDocumentIsPublished:
     def test_the_document_is_an_openapi_mapping(self, generated_document):
         """It parses, and carries the four roots a client actually reads.
 
-        The assertion stops at the *shape* of ``info``. It would be natural to
-        compare ``info.title`` against ``settings.SPECTACULAR["TITLE"]``, and
-        that comparison fails: drf-spectacular reads its configuration from the
-        ``SPECTACULAR_SETTINGS`` setting, while ``config/settings/base.py``
-        declares the dict as ``SPECTACULAR``, so ``TITLE`` and ``VERSION`` never
-        reach the document and it is published as ``title: ""`` /
-        ``version: "0.0.0"``. Fixing that is a one-line settings rename with
-        operator-visible consequences, so it is reported rather than made here —
-        see the task report. Asserting ``"" == "Mediflow OS HMIS"`` would either
-        force a settings change this task does not own, or weaken into
-        ``"" == ""``, which proves nothing.
+        The assertion is on the *shape* of ``info``. The *values* are asserted by
+        :meth:`test_the_document_is_identified_as_this_api` directly below, which
+        is the assertion that makes the declared title and version enforced
+        rather than coincidental.
         """
         assert isinstance(generated_document, dict)
         assert set(generated_document) >= {"openapi", "info", "paths", "components"}
@@ -280,6 +281,63 @@ class TestTheDocumentIsPublished:
         # A document with no paths is a valid OpenAPI document describing
         # nothing, which is the shape a generation failure degrades into.
         assert generated_document["paths"], "the document describes no paths"
+
+    def test_the_document_is_identified_as_this_api(self, generated_document):
+        """``info.title`` and ``info.version`` are the ones the settings declare.
+
+        The expected values are read from ``settings.SPECTACULAR_SETTINGS`` rather
+        than repeated here as literals, so that renaming a version is a one-line
+        change in ``config/settings/base.py`` rather than a coordinated edit
+        between a setting and its echo. The setting is the single source of truth
+        for what the document should say; this assertion's job is to prove the
+        value *reached* the document.
+
+        It is the assertion that was previously impossible to write. drf-spectacular
+        reads its configuration from ``SPECTACULAR_SETTINGS``, while the dict was
+        declared as ``SPECTACULAR``, so nothing was read at all: ``TITLE`` and
+        ``VERSION`` never reached the document, and it published as
+        ``title: ""`` / ``version: "0.0.0"`` — a specification that names
+        nothing. Comparing against the setting under the wrong key degenerated to
+        ``"" == ""``, which passes while proving nothing, so the earlier revision
+        of this file asserted only the shape and recorded the gap.
+
+        The two degeneracy guards are what stop that from recurring quietly.
+        ``TITLE`` and ``VERSION`` have defaults (``""`` and ``"0.0.0"``) that are
+        individually valid strings and would sail through both the ``isinstance``
+        check above and a "the document has a title" reading of this test. An
+        unset or empty declared value would therefore still publish a nameless
+        specification with a green suite, which is the exact failure this
+        assertion exists to catch.
+        """
+        declared = settings.SPECTACULAR_SETTINGS
+        info = generated_document["info"]
+
+        assert info["title"] == declared["TITLE"], (
+            f"the document publishes as {info['title']!r} while the settings "
+            f"declare {declared['TITLE']!r}; drf-spectacular is not reading "
+            "the dict, so it fell back to its own default of ''"
+        )
+        assert info["version"] == declared["VERSION"], (
+            f"the document publishes as {info['version']!r} while the settings "
+            f"declare {declared['VERSION']!r}; drf-spectacular is not reading "
+            "the dict, so it fell back to its own default of '0.0.0'"
+        )
+
+        # The declared values must themselves be real, or the two assertions
+        # above would compare the library's defaults against empty strings and
+        # agree with each other.
+        assert declared["TITLE"].strip(), (
+            "TITLE is declared empty; the published specification would name "
+            "nothing even with the setting correctly wired"
+        )
+        assert declared["VERSION"].strip(), (
+            "VERSION is declared empty; a client cannot tell which revision of "
+            "the API it is reading"
+        )
+        assert info["version"] != "0.0.0", (
+            "the document carries drf-spectacular's default version, which is "
+            "the signature of the SPECTACULAR_SETTINGS dict not being read"
+        )
 
     @pytest.mark.parametrize(
         "path_name",
@@ -319,6 +377,79 @@ class TestTheDocumentIsPublished:
         # schema saying so.
         assert schemes["cookieAuth"]["in"] == "cookie", schemes
         assert schemes["cookieAuth"]["name"] == "sessionid", schemes
+
+
+class TestTheDocumentationIsPubliclyReadable:
+    """The schema and the Swagger UI must answer an anonymous request.
+
+    ``config/settings/base.py`` declares ``SERVE_PERMISSIONS: [AllowAny]`` and
+    ``SERVE_AUTHENTICATION: None`` under a comment explaining why: every data
+    endpoint stays authenticated, but requiring a credential to *read the
+    contract* would make the documentation unreachable to the integrator it
+    exists for. That intent is what these tests enforce.
+
+    They are here because the intent was, for a time, enforced by coincidence
+    rather than by configuration. Those two values happen to be exactly
+    drf-spectacular's own defaults, so while the dict was declared under a name
+    the library never reads, ``/api/schema/`` and ``/api/docs/`` still answered
+    200 — the behaviour was right and the declaration behind it was dead. Had
+    the library's defaults ever tightened, the Swagger UI would have started
+    requiring a JWT with nothing in the diff to explain it. Asserting the
+    observable behaviour is what makes the two cases
+    indistinguishable: whether the setting is read or the default happens to
+    match, a reader can see that the surface is public and why.
+
+    The converse is asserted too. ``SERVE_PERMISSIONS`` must not widen anything
+    else: the health probes and the data endpoints keep their existing
+    behaviour, because a permission class that leaked from the docs views into
+    ``DEFAULT_PERMISSION_CLASSES`` would be the worst outcome of this setting
+    being read at all.
+    """
+
+    @pytest.mark.parametrize(
+        "path_name", [SCHEMA_PATH, DOCS_PATH], ids=["schema", "docs"]
+    )
+    def test_it_answers_200_without_credentials(self, path_name):
+        """Both documentation routes answer an anonymous GET with 200.
+
+        Asserted through the test client rather than by inspecting the view's
+        ``permission_classes``, because the claim is about what a client
+        experiences. A permission class can be configured correctly and still be
+        unreachable if something else in the stack rejects the request first —
+        a throttle, a middleware, a URLconf that no longer resolves — and only
+        the request itself exercises the whole path.
+        """
+        response = APIClient().get(path_name)
+
+        assert response.status_code == 200, (
+            f"{path_name} answered {response.status_code} to an anonymous GET; "
+            "the schema and Swagger UI are declared public in "
+            "config/settings/base.py and must stay reachable without a "
+            f"credential.\n{response.content[:400]!r}"
+        )
+
+    def test_the_token_endpoint_is_still_documented_as_anonymous(self, generated_document):
+        """Issuing a token cannot require a token — the document must say so.
+
+        The obvious way to check this is to look at ``info`` or at the schema
+        view's own operation in the published document. It is asserted on
+        ``TOKEN_PATH`` instead, for the reason the rest of this module cares
+        about: the token endpoint is the one operation whose anonymity is a
+        genuine round trip. An integrator reads the document, sees
+        ``security: [{}]``, and knows to POST credentials rather than to
+        expect a 401. If a future change documented it as secured, the client
+        generated from that document would send a bearer header to the endpoint
+        whose job is to issue one, and the failure would surface as a confusing
+        auth error rather than as a schema regression.
+        """
+        operations = _operations(generated_document, TOKEN_PATH)
+
+        assert operations, f"{TOKEN_PATH} is missing or documents no operation"
+        for method, operation in operations:
+            assert not _requires_authentication(operation), (
+                f"{method.upper()} {TOKEN_PATH} is documented as requiring a "
+                "credential, but a client cannot present one to obtain it"
+            )
 
 
 class TestDenyByDefaultIsVisible:

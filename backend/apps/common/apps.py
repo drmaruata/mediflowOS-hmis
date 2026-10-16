@@ -17,10 +17,11 @@ class CommonConfig(AppConfig):
         viewset warns that its authenticator could not be resolved - leaving the
         published schema with no security scheme at all.
 
-        ``ready()`` is the right hook rather than a SPECTACULAR setting: it runs
-        after Django has configured DRF, whereas importing at settings-module
-        level configures DRF's schema class prematurely and breaks the
-        SpectacularAPIView's own schema. See common/schema.py.
+        ``ready()`` is the right hook rather than a ``SPECTACULAR_SETTINGS``
+        preprocessing hook: it runs after Django has configured DRF, whereas
+        importing at settings-module level configures DRF's schema class
+        prematurely and breaks the SpectacularAPIView's own schema. See
+        common/schema.py.
         """
         from common import schema  # noqa: F401
 

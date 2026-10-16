@@ -277,12 +277,24 @@ REST_FRAMEWORK = {
     },
 }
 
-SPECTACULAR = {
+# drf-spectacular reads this dict from the ``SPECTACULAR_SETTINGS`` setting and
+# from no other name, so the key is load-bearing rather than cosmetic: declared
+# under a different name, every value here is silently ignored and the library's
+# own defaults apply. That is not visible at boot, at import, or in a request
+# log - the published schema just comes out as ``title: ""`` / ``version:
+# "0.0.0"``, which still validates as valid OpenAPI. See
+# tests/integration/test_openapi_schema.py, which asserts the values reach the
+# document rather than trusting the declaration.
+SPECTACULAR_SETTINGS = {
     "TITLE": "Mediflow OS HMIS",
     "VERSION": "0.1.0",
     # Keep the schema and Swagger UI readable while every data endpoint
     # stays authenticated. Without this, requiring authentication would
-    # make the API documentation itself unreachable.
+    # make the API documentation itself unreachable. Both values below are
+    # currently identical to drf-spectacular's own defaults, so this
+    # declaration is what keeps them that way rather than a no-op that happens
+    # to agree - asserted by
+    # test_the_documentation_is_publicly_readable.test_it_answers_200_without_credentials.
     "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
     "SERVE_AUTHENTICATION": None,
 }
