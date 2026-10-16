@@ -81,11 +81,37 @@ TOKEN_PATH = "/api/v1/auth/token/"
 PATIENTS_PATH = "/api/v1/patients/"
 ABDM_CALLBACK_PATH = "/api/v1/abdm-callbacks/"
 
-#: The anonymous surface. A health probe has no tenant to bind and must answer
-#: without a credential; the ABDM gateway presents an HMAC rather than a user
-#: JWT, so ``IsAuthenticated`` is not what guards it. Both are deliberate, and
-#: the document is where that is stated rather than merely implied.
-HEALTH_PATHS = ("/api/v1/health/", "/api/v1/health/ready/")
+#: The health probes, and with :data:`ABDM_CALLBACK_PATH` below, the whole of
+#: the anonymous surface. Enumerated rather than described, because the previous
+#: revision listed only the two probes the container uses and therefore read as
+#: exhaustive while three of the seven anonymous operations went unasserted —
+#: which is how ``/api/v1/abdm-callbacks/health/`` came to be published
+#: anonymously with nothing in this module noticing. Seven of the 331 documented
+#: operations carry no security requirement, and all seven are here:
+#:
+#: * ``/api/v1/health/`` and ``/api/v1/health/ready/`` — the container probes.
+#:   There is no tenant to bind and no caller to authenticate, and the CI smoke
+#:   test polls them with no credential; AGENTS.md section 4 names the probe as
+#:   one of only two endpoints permitted to opt out of ``IsAuthenticated``.
+#: * ``/api/v1/abdm-callbacks/health/`` — the gateway adapter's own probe, on
+#:   the same reasoning. It lives on an ``AllowAny`` viewset, so it is anonymous
+#:   in fact as well as in the document.
+#: * ``/api/v1/abdm-callbacks/`` POST, asserted alongside these via
+#:   :data:`ABDM_CALLBACK_PATH` — the gateway presents an HMAC over the raw body
+#:   rather than a user JWT, so ``IsAuthenticated`` is not what guards it.
+#: * ``/api/v1/auth/token/``, ``/token/refresh/`` and ``/token/blacklist/`` —
+#:   the credential-issuing endpoints themselves. A client cannot present a
+#:   credential to obtain one.
+#:
+#: ``TOKEN_PATH`` is asserted anonymously by its own test rather than through
+#: this tuple; ``refresh`` and ``blacklist`` are published anonymous by
+#: SimpleJWT's own views and have no dedicated assertion. The document is where
+#: this posture is stated rather than merely implied.
+HEALTH_PATHS = (
+    "/api/v1/health/",
+    "/api/v1/health/ready/",
+    "/api/v1/abdm-callbacks/health/",
+)
 
 #: The documentation surface itself, which is served without a credential on
 #: purpose: an integrator has to be able to read the API contract before they
