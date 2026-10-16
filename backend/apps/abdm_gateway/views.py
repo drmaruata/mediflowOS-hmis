@@ -15,10 +15,19 @@ This endpoint is intentionally anonymous (gateway carries no user JWT).
 INT-002 adds a versioned adapter on top of that flow. The acknowledgement is
 shaped by the API version the gateway speaks, resolved in this order: the version
 the **request declares**, else the tenant's **active ``abdm`` adapter's**
-version, else ``"v2"``. Resolution runs after authentication, the
+version, else ``"v2"``. The declaration is *checked* after authentication, the
 mandatory-key check and the timestamp check, and before any write — an
 unauthenticated caller must not learn which versions exist (the 422 body names
 the supported set), and a refused call must leave no row behind.
+
+**A version label is never refused; only a malformed declaration is.** An
+unrecognised label falls back to ``"v2"`` — the shape this endpoint returned
+before version support existed — with a warning naming the label and the tenant,
+because the ABDM spec is unresolved (REG-009), so no label a gateway can send can
+be proven unsupported and refusing one would take a fully-implemented intake
+channel down over a wording difference. A declaration that is not a string at all
+(a list, an object, a number) has no honest fallback and is answered 422; see
+``apps.abdm_gateway.client`` for the full trade-off.
 """
 import hashlib
 import hmac
@@ -45,7 +54,7 @@ from .client import (
     SUPPORTED_API_VERSIONS,
     build_callback_ack,
     declared_api_version,
-    require_supported_api_version,
+    resolve_api_version,
 )
 from .consent import hash_profile, record_consent_event, store_link_token
 from .models import ABHACallbackLog
@@ -190,35 +199,29 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         except ABHACallbackLog.DoesNotExist:
             return None
 
-    def _unsupported_version_response(self, requested):
-        """422 for an API version this deployment does not serve (INT-002).
+    def _malformed_version_response(self, error):
+        """422 for a declaration that is not a version label at all (INT-002).
 
-        422 rather than DRF's default 400 because the request is *well formed* —
-        it authenticated, carried every mandatory key and a fresh timestamp — and
-        what makes it unprocessable is the contract revision it asks for. A 400
-        would tell the gateway its payload is malformed, which is a different
-        fault with a different fix on its side, and would sit inconsistently
-        beside the 400 this endpoint already returns for a genuinely malformed
-        callback.
+        The only refusal the version contract makes. An unrecognised *string*
+        never reaches this method: it is served in the default shape with a
+        warning, because refusing it would be a self-inflicted outage on an
+        endpoint whose specification is still unresolved (REG-009).
 
-        The body names the supported set on purpose: the caller is authenticated
-        by this point (the check runs after ABD-005), so the information is safe
-        to give and useless without it — this is an adapter that tells a peer
-        which revisions it can speak.
+        422 rather than DRF's default 400 because the request is otherwise *well
+        formed* — it authenticated, carried every mandatory key and a fresh
+        timestamp — and 400 would say "malformed payload", sitting
+        inconsistently beside the 400 this endpoint already returns for a
+        genuinely malformed callback.
+
+        The body names the supported set — it is in ``str(error)`` — because the
+        caller is authenticated by this point (the check runs after ABD-005), so
+        the information is safe to give and useless without it.
         """
-        supported = ", ".join(SUPPORTED_API_VERSIONS)
-        logger.warning(
-            "ABDM callback refused: unsupported API version %r (supported: %s)",
-            requested,
-            supported,
-        )
+        logger.warning("ABDM callback refused: %s", error)
         return Response(
             {
                 "status": "rejected",
-                "detail": (
-                    f"Unsupported ABDM API version: {requested!r}. "
-                    f"Supported versions: {supported}."
-                ),
+                "detail": str(error),
                 "supported_versions": list(SUPPORTED_API_VERSIONS),
             },
             status=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -247,23 +250,38 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         )
         return adapter.api_version if adapter is not None else None
 
-    def _resolve_api_version(self, declared, tenant_id: str):
-        """The version this callback is answered in, or an HTTP 422 response.
+    def _declared_or_default_version(self, declared, tenant_id: str) -> str:
+        """The shape a **declared** version resolves to, or the default (INT-002).
+
+        Used on the replay path, which deliberately does not consult the tenant's
+        adapter (see the note at the early return in :meth:`create`). Aliases and
+        unrecognised labels resolve here too, so a gateway retry is answered in a
+        shape it can parse rather than raising.
+
+        Cannot raise: the declaration's type was validated before the tenant was
+        resolved, so by this point it is a string or absent.
+        """
+        return resolve_api_version(
+            declared or DEFAULT_API_VERSION, tenant_id=tenant_id
+        )
+
+    def _resolve_api_version(self, declared, tenant_id: str) -> str:
+        """The version this callback is answered in (INT-002).
 
         Precedence: what the **request declares**, else the tenant's active
         ``abdm`` adapter's version, else the default — which is the shape this
         endpoint returned before version support existed, so a gateway that
         declares nothing is answered exactly as it always was.
 
-        A ``Response`` is returned rather than raised so the caller can answer
-        the 422 without an exception handler, matching how this view reports its
-        other refusals.
+        Returns the version string, and lets
+        :class:`~apps.abdm_gateway.client.ABDMUnsupportedVersionError` propagate
+        rather than returning a ``Response``: a resolver that can return two
+        different types makes every caller re-check what it got back, and one
+        forgotten check would feed a ``Response`` into ``build_callback_ack``. The
+        call site turns it into the 422 in one ``except``.
         """
-        candidate = declared or self._adapter_api_version(tenant_id) or DEFAULT_API_VERSION
-        try:
-            return require_supported_api_version(candidate)
-        except ABDMUnsupportedVersionError:
-            return self._unsupported_version_response(candidate)
+        candidate = declared or self._adapter_api_version(tenant_id)
+        return resolve_api_version(candidate, tenant_id=tenant_id)
 
     def _resolve_department(self, raw_department_id):
         """Resolve a department the gateway supplied to a real, local department.
@@ -447,22 +465,18 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # INT-002: the version the gateway declares, if it declares one. Checked
-        # here, after authentication and both payload checks and before any write,
-        # so an unauthenticated caller cannot use this endpoint to enumerate the
-        # supported versions (the 422 body names them) and a refused version
-        # leaves no row behind. It also runs *before* the idempotency
-        # early-return: a callback carrying an unsupported declaration must be
-        # told so rather than answered 200 with a replayed acknowledgement, or a
-        # bad version could ride a stored outcome. The full resolution —
-        # declared, else the tenant's adapter, else the default — needs the
-        # tenant session bound, so it happens inside the atomic block below.
+        # INT-002: the version the gateway declares, checked for *malformedness*
+        # only — an unrecognised label is served in the default shape below.
+        # The check sits after authentication and both payload checks and before
+        # any write, so an unauthenticated caller cannot use this endpoint to
+        # enumerate the supported versions (the 422 body names them), a refused
+        # call leaves no row behind, and a malformed declaration cannot ride a
+        # replayed acknowledgement through the idempotency early-return below.
         declared_version = declared_api_version(payload)
-        if declared_version is not None:
-            try:
-                require_supported_api_version(declared_version)
-            except ABDMUnsupportedVersionError:
-                return self._unsupported_version_response(declared_version)
+        if declared_version is not None and not isinstance(declared_version, str):
+            return self._malformed_version_response(
+                ABDMUnsupportedVersionError(declared_version)
+            )
 
         # Extract key fields. The schema check above guarantees requestId and
         # profile exist; neither is defaulted any further.
@@ -519,7 +533,8 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             }
             return Response(
                 build_callback_ack(
-                    declared_version or DEFAULT_API_VERSION, replay_fields
+                    self._declared_or_default_version(declared_version, tenant_id),
+                    replay_fields,
                 ),
                 status=status.HTTP_200_OK,
             )
@@ -532,12 +547,16 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             bind_tenant_session(tenant_id, facility_id)
 
             # INT-002: resolve the version now that the tenant session is bound —
-            # the adapter lookup is tenant-scoped and must not rely on RLS alone.
-            # It runs before any write, so a version this deployment does not
-            # serve is refused with no patient, no token and no ledger row.
-            api_version = self._resolve_api_version(declared_version, tenant_id)
-            if isinstance(api_version, Response):
-                return api_version
+            # the adapter lookup is tenant-scoped and must not rely on RLS alone,
+            # and the fallback warning can only name the tenant once it is known.
+            # The ``except`` is unreachable today (``IntegrationAdapter.api_version``
+            # is a ``CharField``, so a saved row can only hold a string) and is
+            # here as the single conversion point, so a row that somehow carried
+            # a list or an object would be refused rather than served.
+            try:
+                api_version = self._resolve_api_version(declared_version, tenant_id)
+            except ABDMUnsupportedVersionError as exc:
+                return self._malformed_version_response(exc)
 
             # ABD-010: resolve the department the gateway named *before* the
             # patient is matched or registered. A refusal from here returns a

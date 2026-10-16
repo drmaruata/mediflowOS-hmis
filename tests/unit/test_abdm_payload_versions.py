@@ -27,6 +27,18 @@ they are exactly the ones a new builder would break:
   their output keys explicitly, so a credential cannot reach the wire by being
   passed in, and the tests inject ``link_token`` to prove it.
 
+**The resolution contract, which is the opposite of "fail closed" on labels.**
+A version *label* is never refused. The official ABDM spec is unresolved (REG-009),
+so no string a gateway can send can be proven unsupported, and refusing one puts a
+tenant's whole scan-and-share channel down over a wording difference. So
+:func:`resolve_api_version` resolves an exact label to itself, a documented alias
+(``"v1.0"`` — the label this repository's own architecture doc and sandbox
+replay use) to its target, and *anything else* to ``DEFAULT_API_VERSION`` with a
+warning naming the label and the tenant. Only a **malformed** declaration — a
+list, an object or a number where a version label belongs — is refused, because
+that is a broken payload rather than a different vocabulary. INT-002 asks for two
+versions to be *served*; it does not ask for unknown ones to be rejected.
+
 **v3 is provisional.** The official ABDM sandbox spec is unresolved — see the
 REG-009 entry under Known gaps in ``docs/traceability.md`` — so v3's shape here
 is a *documented placeholder* derived only from the vocabulary this repository
@@ -35,18 +47,21 @@ already exchanges with the gateway (camelCase keys such as ``requestId``,
 must be re-verified when the spec is confirmed.
 """
 import json
+import logging
 
 import httpx
 import pytest
 
 from apps.abdm_gateway.client import (
     ABDMUnsupportedVersionError,
+    API_VERSION_ALIASES,
+    API_VERSION_PAYLOAD_KEY,
     DEFAULT_API_VERSION,
     SUPPORTED_API_VERSIONS,
     build_callback_ack,
     build_profile_share_request,
     declared_api_version,
-    require_supported_api_version,
+    resolve_api_version,
 )
 
 pytestmark = [pytest.mark.unit]
@@ -110,7 +125,14 @@ DUPLICATE_ACK_FIELDS = {
 
 
 class TestVersionRegistry:
-    """The supported set is declared once, and it is what validation enforces."""
+    """The supported set, the aliases onto it, and what an unknown label gets.
+
+    One rule, pinned four ways: an **exact** label resolves to itself, a
+    **documented alias** resolves to its target, an **unknown string** resolves
+    to the default shape with a warning, and a **non-string** is refused. Each
+    assertion below names a case the other three do not cover, so none of them
+    can be satisfied by a rule that only handles part of the contract.
+    """
 
     def test_the_supported_set_is_v2_and_v3(self):
         """INT-002: an older and a newer version, both served.
@@ -132,40 +154,118 @@ class TestVersionRegistry:
         assert DEFAULT_API_VERSION in SUPPORTED_API_VERSIONS
 
     @pytest.mark.parametrize("api_version", SUPPORTED_API_VERSIONS)
-    def test_every_supported_version_is_accepted(self, api_version):
-        assert require_supported_api_version(api_version) == api_version
+    def test_an_exact_label_resolves_to_itself(self, api_version):
+        assert resolve_api_version(api_version) == api_version
+
+    def test_the_gateway_documented_older_label_is_an_alias_of_the_default(self):
+        """``v1.0`` is this repository's own word for the legacy flow.
+
+        Architecture doc section 8.2 records v1.0 and v3 paths coexisting on the
+        gateway, and ``tests/integration/test_abdm_sandbox.py`` still calls its
+        replays "v1.0". So the legacy label is an **accepted alias** of the v2
+        shape, served deliberately rather than by accident: without this entry
+        those calls would merely fall back, and a future reader would not know
+        the vocabulary mismatch is a decision instead of a shrug.
+        """
+        assert API_VERSION_ALIASES["v1.0"] == "v2"
+        assert API_VERSION_ALIASES["1.0"] == "v2"
 
     @pytest.mark.parametrize(
-        "value",
-        ["v1", "v1.0", "v4", "V2", "2", "", None, 3, ["v2"]],
+        "label,target",
+        sorted(API_VERSION_ALIASES.items()),
+        ids=sorted(API_VERSION_ALIASES),
     )
-    def test_anything_outside_the_set_is_refused(self, value):
-        """Fail closed, with an error that names the supported set.
+    def test_an_alias_is_served_in_the_aliased_shape(self, label, target, caplog):
+        """Non-vacuous in three directions.
 
-        Near-misses matter as much as nonsense: ``"v1.0"`` is the label the
-        ABDM developer forum uses (architecture doc section 8.2) and
-        ``tests/integration/test_abdm_sandbox.py`` still calls its replays
-        "v1.0", so a deployment that guesses at the vocabulary must be told no
-        rather than silently served a shape nobody pinned.
+        ``target in SUPPORTED_API_VERSIONS`` keeps the table from pointing at a
+        version this deployment cannot build; ``label not in
+        SUPPORTED_API_VERSIONS`` keeps it from being a redundant second spelling
+        of an entry that already exists. And **no fallback warning** is what
+        separates an alias from an unrecognised label — both produce ``v2``
+        today, so without it this whole test would pass against an *empty* alias
+        table, which is exactly the state that erased the deliberate mapping.
+        """
+        with caplog.at_level(logging.WARNING, logger="apps.abdm_gateway.client"):
+            resolved = resolve_api_version(label)
+
+        assert resolved == target
+        assert target in SUPPORTED_API_VERSIONS
+        assert label not in SUPPORTED_API_VERSIONS
+        assert caplog.records == [], caplog.text
+
+    @pytest.mark.parametrize(
+        "label", ["v1", "v4", "V3", "2", "v2.0", "v3.1", "3.0", "latest"]
+    )
+    def test_an_unrecognised_label_is_served_in_the_default_shape(self, label):
+        """The ruling: an unknown string is never refused, only warned about.
+
+        Before this contract the same call raised, so every one of these labels
+        took a signed, authentic, in-window callback from a full 200 flow to a
+        permanent 422 — no patient, no token, no consent row.
+        """
+        assert resolve_api_version(label) == DEFAULT_API_VERSION
+
+    @pytest.mark.parametrize(
+        "label", ["v1", "v4", "V3", "2", "v2.0", "v3.1", "3.0", "latest"]
+    )
+    def test_an_unrecognised_label_is_logged_with_the_tenant_and_the_label(
+        self, label, caplog
+    ):
+        """The fallback is silent only if the operator never learns of it.
+
+        Both facts the operator needs are in the line: which label the gateway
+        sent, and whose channel is being answered in the wrong shape. No patient
+        data is involved — a version label is a contract token from an
+        already-authenticated body.
+        """
+        with caplog.at_level(logging.WARNING, logger="apps.abdm_gateway.client"):
+            resolve_api_version(label, tenant_id="11111111-2222-3333-4444-555555555555")
+
+        assert "11111111-2222-3333-4444-555555555555" in caplog.text
+        assert repr(label) in caplog.text
+        assert DEFAULT_API_VERSION in caplog.text
+
+    @pytest.mark.parametrize(
+        "value", [["v2"], {"version": "v3"}, 3, 2.0, True]
+    )
+    def test_a_malformed_declaration_is_refused(self, value):
+        """A list, an object or a number where a label belongs is a broken payload.
+
+        This is the *only* refusal the registry makes, and it is the one the
+        endpoint turns into a 422: nothing here can be read as a version, so
+        there is nothing to serve and no honest fallback to guess. It is also
+        the asymmetry that a non-string used to get the other way round: it was
+        silently served as ``v2``, which hides a broken sender behind a
+        successful-looking acknowledgement.
         """
         with pytest.raises(ABDMUnsupportedVersionError) as excinfo:
-            require_supported_api_version(value)
+            resolve_api_version(value)
 
-        message = str(excinfo.value)
+        assert excinfo.value.requested == value
         for supported in SUPPORTED_API_VERSIONS:
-            assert supported in message
+            assert supported in str(excinfo.value)
 
-    def test_whitespace_is_tolerated_but_case_is_not(self):
-        """A padded declaration is the same version; a differently-cased one is not.
+    def test_nothing_declared_resolves_to_the_default_shape(self):
+        """An absent declaration is the pre-versioning contract, not a failure."""
+        assert resolve_api_version(None) == DEFAULT_API_VERSION
 
-        Surrounding whitespace is a transport artefact and is stripped. Case is
-        not: folding ``"V3"`` into ``"v3"`` would decide the acknowledgement's
-        shape by guessing at what the sender meant, and the whole point of the
-        registry is that the shape is never guessed.
+    def test_surrounding_whitespace_is_stripped(self):
+        """A padded declaration is the same label; a transport artefact, not a version."""
+        assert resolve_api_version("  v3  ") == "v3"
+
+    def test_a_differently_cased_label_is_not_that_version(self, caplog):
+        """Case is still not folded — but the call is still served.
+
+        ``"V3"`` must not silently become ``"v3"``: that would decide the
+        acknowledgement's shape by guessing at what the sender meant. It is
+        served in the *default* shape instead, and the warning says so.
         """
-        assert require_supported_api_version("  v3  ") == "v3"
-        with pytest.raises(ABDMUnsupportedVersionError):
-            require_supported_api_version("V3")
+        with caplog.at_level(logging.WARNING, logger="apps.abdm_gateway.client"):
+            resolved = resolve_api_version("V3")
+
+        assert resolved == DEFAULT_API_VERSION
+        assert "'V3'" in caplog.text
 
 
 class TestDeclaredApiVersion:
@@ -187,9 +287,20 @@ class TestDeclaredApiVersion:
         """
         assert declared_api_version(payload) is None
 
-    def test_a_non_string_declaration_is_ignored_rather_than_coerced(self):
-        """Coercing ``{"apiVersion": {"v": 3}}`` into a version would be a guess."""
-        assert declared_api_version({"apiVersion": {"v": 3}}) is None
+    @pytest.mark.parametrize(
+        "declared,expected",
+        [({"version": "v3"}, {"version": "v3"}), ({"v": 3}, {"v": 3}), (3, 3), ([1, 2], [1, 2])],
+    )
+    def test_a_non_string_declaration_is_surfaced_rather_than_coerced(self, declared, expected):
+        """Neither guessed at nor dropped: handed on unchanged so it can be refused.
+
+        This is the other half of the refusal contract. Returning ``None`` here
+        — which is what this function used to do — made a broken sender
+        indistinguishable from one that said nothing, and it was then answered
+        ``200`` in the default shape as though it had been understood. Surfacing
+        it is what lets the endpoint answer 422 for a malformed declaration.
+        """
+        assert declared_api_version({"apiVersion": declared}) == expected
 
     def test_a_non_dict_payload_declares_nothing(self):
         assert declared_api_version(["not", "a", "dict"]) is None
@@ -250,6 +361,34 @@ class TestProfileShareRequestBuilders:
         for key, value in REQUEST_PAYLOAD.items():
             assert built[key] == value
 
+    def test_the_bound_version_wins_over_one_handed_in_on_the_payload(self):
+        """A v3 client cannot put ``"v2"`` on the wire while reporting v3.
+
+        The stamp is the client's, not the caller's: the payload used to be
+        merged *over* the version, so a caller-supplied ``apiVersion`` silently
+        decided the shape on the wire while ``client.api_version`` said
+        otherwise — two truths, and the wire carried the wrong one.
+        """
+        built = build_profile_share_request(
+            "v3", dict(PRE_CHANGE_CREATE_ABHA_INPUT, apiVersion="v2")
+        )
+
+        assert built[API_VERSION_PAYLOAD_KEY] == "v3"
+        assert list(built)[0] == API_VERSION_PAYLOAD_KEY
+
+    def test_v2_does_not_strip_a_version_the_caller_handed_in(self):
+        """The pre-versioning body is the caller's payload, verbatim.
+
+        ``v2`` is the pre-INT-002 bytes, so it must neither gain nor lose a key
+        the old client would not have sent — the version stamp belongs to v3
+        alone.
+        """
+        built = build_profile_share_request(
+            "v2", dict(PRE_CHANGE_CREATE_ABHA_INPUT, apiVersion="v3")
+        )
+
+        assert built == dict(PRE_CHANGE_CREATE_ABHA_INPUT, apiVersion="v3")
+
     def test_v3_does_not_mutate_the_caller_payload(self):
         payload = dict(REQUEST_PAYLOAD)
         build_profile_share_request("v3", payload)
@@ -262,9 +401,29 @@ class TestProfileShareRequestBuilders:
             build_profile_share_request("v3", REQUEST_PAYLOAD)
         )
 
-    def test_an_unsupported_version_is_refused_before_anything_is_built(self):
+    def test_an_unrecognised_label_builds_the_pre_versioning_body(self):
+        """A builder never refuses a string: an unknown label builds v2's body."""
+        assert build_profile_share_request(
+            "v9", PRE_CHANGE_CREATE_ABHA_INPUT
+        ) == build_profile_share_request("v2", PRE_CHANGE_CREATE_ABHA_INPUT)
+
+    def test_a_malformed_version_argument_is_refused_before_anything_is_built(self):
         with pytest.raises(ABDMUnsupportedVersionError):
-            build_profile_share_request("v9", REQUEST_PAYLOAD)
+            build_profile_share_request(["v3"], REQUEST_PAYLOAD)
+
+    def test_a_padded_or_aliased_label_builds_the_shape_it_names(self):
+        """The *resolved* label dispatches, not the raw argument.
+
+        The registry strips whitespace and maps aliases, but both builders used
+        to dispatch on the string they were handed, so ``"  v3  "`` validated as
+        v3 and then quietly built the v2 body.
+        """
+        assert build_profile_share_request("  v3  ", REQUEST_PAYLOAD) == (
+            build_profile_share_request("v3", REQUEST_PAYLOAD)
+        )
+        assert build_profile_share_request("v1.0", REQUEST_PAYLOAD) == (
+            build_profile_share_request("v2", REQUEST_PAYLOAD)
+        )
 
 
 class TestCallbackAckBuilders:
@@ -337,9 +496,44 @@ class TestCallbackAckBuilders:
         """Without this, "supports both versions" could be a claim with no body."""
         assert build_callback_ack("v2", ACK_FIELDS) != build_callback_ack("v3", ACK_FIELDS)
 
-    def test_an_unsupported_version_is_refused_before_anything_is_built(self):
+    def test_an_unrecognised_label_builds_the_pre_change_acknowledgement(self):
+        """A builder never refuses a string: an unknown label builds v2's ack."""
+        body = build_callback_ack("v9", ACK_FIELDS)
+
+        assert body == ACK_FIELDS
+        assert list(body) == list(ACK_FIELDS)
+
+    def test_a_malformed_version_argument_is_refused_before_anything_is_built(self):
         with pytest.raises(ABDMUnsupportedVersionError):
-            build_callback_ack("v9", ACK_FIELDS)
+            build_callback_ack({"version": "v3"}, ACK_FIELDS)
+
+    def test_a_padded_or_aliased_label_builds_the_shape_it_names(self):
+        """The *resolved* label dispatches, not the raw argument.
+
+        Both builders used to validate through the registry and then dispatch on
+        the string they were handed, so ``"  v3  "`` passed validation and built
+        the v2 body. Aliases hit the same gap.
+        """
+        assert build_callback_ack("  v3  ", ACK_FIELDS) == build_callback_ack(
+            "v3", ACK_FIELDS
+        )
+        assert build_callback_ack("v1.0", ACK_FIELDS) == build_callback_ack(
+            "v2", ACK_FIELDS
+        )
+
+    @pytest.mark.parametrize("label", ["v1.0", "1.0"])
+    def test_a_builder_given_an_alias_emits_no_fallback_warning(self, label, caplog):
+        """An alias is a deliberate mapping, so it must not look like a shrug.
+
+        Without this the alias and the unknown-label branches are
+        indistinguishable by output *and* by log, and the alias table could be
+        deleted without a single test noticing.
+        """
+        with caplog.at_level(logging.WARNING, logger="apps.abdm_gateway.client"):
+            body = build_callback_ack(label, ACK_FIELDS)
+
+        assert body == ACK_FIELDS
+        assert caplog.records == [], caplog.text
 
 
 class TestLinkTokenIsNeverAcknowledged:

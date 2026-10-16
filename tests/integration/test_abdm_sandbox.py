@@ -126,8 +126,12 @@ def _profile_share_payload(api_version: str, hip_id: str) -> dict:
 
     Note that ``v1.0`` and ``v3`` here are *replay labels*, not the adapter's
     vocabulary: the versions the adapter serves are ``v2`` and ``v3`` (see
-    ``SUPPORTED_API_VERSIONS`` in ``apps.abdm_gateway.client``), and a callback
-    declaring any other version is refused 422.
+    ``SUPPORTED_API_VERSIONS`` in ``apps.abdm_gateway.client``). Were this replay
+    to declare one, ``v1.0`` would be served as an accepted **alias** of the
+    ``v2`` shape (``API_VERSION_ALIASES``) and ``v3`` in its own shape; an
+    unrecognised label is served in the default ``v2`` shape with a warning, and
+    only a *malformed* declaration — a list, an object or a number — is refused
+    with 422. No version string is ever refused.
     """
     return _payload(
         requestId=f"sbx-profile-share-{api_version}",

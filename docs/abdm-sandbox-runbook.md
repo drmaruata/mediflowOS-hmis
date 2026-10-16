@@ -61,8 +61,12 @@ version's shape, and these replays declare none, so they are answered in the
 default `v2` shape — the one this endpoint returned before version support
 existed. Note that `v1.0` is a *label for this replay only*; the versions the
 adapter serves are `v2` and `v3` (architecture doc §8.2), and the two sets are
-not the same vocabulary. A replay declaring an unsupported version would be
-refused `422` and would prove nothing about the sandbox.
+not the same vocabulary. `v1.0` **is** an accepted alias of the `v2` shape
+(`API_VERSION_ALIASES` in `apps/abdm_gateway/client.py`), so a live gateway that
+declares it is served — deliberately, not by accident. A replay declaring an
+unrecognised version would be served in the default `v2` shape with a warning in
+the log, and only a malformed declaration (a list, an object or a number) would
+be refused `422`; neither outcome says anything about the sandbox either way.
 
 **Coverage caveat.** The sandbox's *authoritative* list of profile-share API
 versions could not be resolved offline, and is deliberately not invented here.
@@ -177,6 +181,7 @@ Two acknowledgements are notable answers rather than successes:
 | `400` `Missing required callback field: requestId` (or `timestamp`, `profile`) | Payload schema (ABD-007). | All three keys are mandatory and none is defaulted. A payload without them is malformed, not repairable. |
 | `400` `Invalid or stale timestamp` | Stale or unparseable timestamp (ABD-007). | The window is `ABDM_MAX_SKEW_SECONDS`, 300 seconds by default. Fix a drifting clock rather than widening the window; a wider window silently weakens the replay check. |
 | `404` `Unknown facility HIP ID` | The facility's HIP ID is not registered (ABD-004). | The callback resolves the tenant from `Facility.abdm_hip_id`, and the payload's `facilityId` must name a facility that exists in this installation. Register the facility's HIP ID first (tenant onboarding stamps `abdm.abdm_hip_id`). |
+| `422` `Malformed ABDM API version: …` | The signed body carries a non-string `apiVersion` (INT-002). | Only a *malformed* declaration is refused; a version **string** is always served. Fix the sender — the field must be a string naming an ABDM API version. Nothing was written. See [What a live callback does with the version it declares](#what-a-live-callback-does-with-the-version-it-declares-int-002). |
 | `404` `Supplied department is not part of this facility` | A `departmentId` from another tenant (ABD-013). | The gateway is not trusted to name our departments. Leave `departmentId` out of the replayed payload, or seed the department inside the tenant the HIP ID resolves to. |
 | `409` `No OPD department is configured` | No OPD-enabled department (ABD-010). | The token has to go somewhere. Seed a department with `opd_enabled=True` for the tenant. |
 | `503` `ABDM_SANDBOX_MISCONFIGURED` / `ABDM_SANDBOX_UNCONFIGURED` | The outbound sandbox gate (Task 14). | Not this replay — it makes no outbound call. These come from the ABHA create/verify actions at the counter, which fail closed when no sandbox base URL is configured or when it is not an https `sbx` URL. Set `ABDM_SANDBOX_BASE_URL` correctly and retry. |
@@ -235,3 +240,32 @@ That step needs **network egress to the ABDM sandbox and real sandbox
 credentials**, which this environment does not have. Until such an entry exists
 in the Run log, `docs/traceability.md` keeps ABD-017 as `deferred` and no
 report may claim the requirement is met.
+
+### What a live callback does with the version it declares (INT-002)
+
+A live gateway may declare an API version in the signed body
+(`apiVersion`), which is how the acknowledgement's vocabulary is chosen. What
+happens to each kind of declaration, so a live run is interpreted correctly:
+
+| Declared `apiVersion` | Answer | Shape | Where it is visible |
+| --- | --- | --- | --- |
+| `v2` | `200` | the pre-versioning acknowledgement, unchanged | — |
+| `v3` | `200` | the camelCase vocabulary (`requestId`, `patientId`, `consentEvent`), stamped `apiVersion: v3` | — |
+| `v1.0` or `1.0` (alias) | `200` | the `v2` shape — the alias target | — |
+| absent or blank | `200` | the tenant's active `abdm` adapter's version, else `v2` | — |
+| any other string (e.g. `V3`, `v3.1`) | `200` | the **default `v2` shape** | a `WARNING` on `apps.abdm_gateway.client` naming the label and the tenant, once per callback |
+| a list, an object or a number | `422` | none — refused before any write | `WARNING` on `apps.abdm_gateway.views`; the body names the supported set |
+
+Two consequences worth knowing before you record a run:
+
+- **No version string is ever refused.** An unrecognised label gets a full scan,
+  a consent row and a token in the default shape — that is deliberate, because the
+  sandbox spec is still unresolved, so refusing a label nobody has seen would
+  take the tenant's whole intake channel down (architecture doc §8.2). So a `200`
+  is *not* evidence that the gateway's declared version was understood: check the
+  log for the fallback warning before recording a version as exercised.
+- The same fallback applies to `IntegrationAdapter.api_version`. A row naming a
+  label nobody recognises (say `v3.1`) serves every callback for that tenant in
+  the default `v2` shape with a warning, rather than failing the channel. If a
+  tenant's acknowledgements arrive in the wrong vocabulary, that warning and the
+  adapter row's `api_version` are where to look.

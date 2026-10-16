@@ -871,16 +871,100 @@ class TestVersionedAdapterBinding:
 
         assert captured["url"] == f"{SANDBOX_BASE}/enrollment/mobile/verifyOtp/"
 
-    def test_for_adapter_refuses_an_unsupported_version_before_any_http(self, monkeypatch):
-        """Fail closed, and loudly: a bad row must not reach the network."""
+    def test_for_adapter_reads_the_row_it_was_handed(self, monkeypatch):
+        """Not a re-query: the binding is the row in hand, whoever else exists.
+
+        ``for_adapter`` used to call ``resolve_sandbox_base_url(tenant_id)``,
+        which queried for the newest active ``abdm`` row and returned *that* row's
+        URL. It agreed with the adapter in hand only by accident of
+        ``unique_together(tenant_id, name)``. Here the row in hand is unsaved and
+        carries a different URL from the one stored for the tenant, so a re-query
+        is observably wrong rather than merely redundant.
+        """
+        tenant, _, _ = _make_context()
+        _abdm_adapter(tenant, base_url="https://abha-sbx.abdm.gov.in/api/v1")
+        monkeypatch.setattr("apps.abdm_gateway.client.settings.ABDM_SANDBX_BASE_URL", "")
+        captured = {}
+
+        def handler(request):
+            captured["url"] = str(request.url)
+            return httpx.Response(200, json={"status": "SUCCESS"})
+
+        handed = IntegrationAdapter(
+            tenant_id=tenant.id, name="abdm", adapter_type="rest", active=True,
+            config={"base_url": "https://profile-sbx.abdm.gov.in/api/v1"},
+        )
+        ABDMClient.for_adapter(handed, transport=httpx.MockTransport(handler)).verify_abha(
+            "existing@abdm", "654321"
+        )
+
+        assert captured["url"].startswith("https://profile-sbx.abdm.gov.in/api/v1")
+
+    def test_for_adapter_binds_the_default_for_an_unrecognised_row_version(self, caplog, monkeypatch):
+        """A config typo must not take the tenant's channel down (INT-002).
+
+        ``api_version="v9"`` on one adapter row used to make **every** scan-and-
+        share callback for that tenant answer 422 — no patient, no token, no
+        consent row — because the row is read before any write. It now binds the
+        default shape with a warning, so the channel keeps working and the
+        operator is told which label to fix.
+        """
         tenant, _, _ = _make_context()
         adapter = _abdm_adapter(tenant, api_version="v9")
         monkeypatch.setattr(
             "apps.abdm_gateway.client.settings.ABDM_SANDBX_BASE_URL", SANDBOX_BASE
         )
 
+        with caplog.at_level("WARNING", logger="apps.abdm_gateway.client"):
+            client = ABDMClient.for_adapter(adapter, transport=_exploding_transport())
+
+        assert client.api_version == "v2"
+        assert str(tenant.id) in caplog.text
+        assert "'v9'" in caplog.text
+
+    def test_for_adapter_resolves_an_aliased_row_version_to_its_target(self, monkeypatch):
+        """The legacy label on a row is served as the alias it names, not refused."""
+        tenant, _, _ = _make_context()
+        adapter = _abdm_adapter(tenant, api_version="v1.0")
+        monkeypatch.setattr(
+            "apps.abdm_gateway.client.settings.ABDM_SANDBX_BASE_URL", SANDBOX_BASE
+        )
+
+        client = ABDMClient.for_adapter(adapter, transport=_exploding_transport())
+
+        assert adapter.api_version == "v1.0"
+        assert client.api_version == "v2"
+
+    def test_for_adapter_refuses_a_non_string_row_version(self, monkeypatch):
+        """A row whose ``api_version`` is not a label is a broken row, not a dialect.
+
+        Pinned against a **hand-built** instance on purpose: ``api_version`` is a
+        ``CharField``, so anything saved through the ORM is stored as its string
+        repr and comes back a string (asserted below) — the case that reaches
+        this guard is an in-memory adapter handed straight to the factory, which
+        is exactly what a future non-text column or a caller constructing a row
+        would look like. Refusing it is the same call the builders make, so there
+        is one rule rather than two.
+        """
+        tenant, _, _ = _make_context()
+        saved = _abdm_adapter(tenant)
+        monkeypatch.setattr(
+            "apps.abdm_gateway.client.settings.ABDM_SANDBX_BASE_URL", SANDBOX_BASE
+        )
+        # The premise, pinned: a value written through the ORM comes back a string.
+        IntegrationAdapter.objects.filter(pk=saved.pk).update(
+            api_version={"major": 3}
+        )
+        assert isinstance(
+            IntegrationAdapter.objects.get(pk=saved.pk).api_version, str
+        )
+        hand_built = IntegrationAdapter(
+            tenant_id=tenant.id, name="abdm", adapter_type="rest",
+            active=True, config={"base_url": SANDBOX_BASE}, api_version={"major": 3},
+        )
+
         with pytest.raises(ABDMUnsupportedVersionError):
-            ABDMClient.for_adapter(adapter, transport=_exploding_transport())
+            ABDMClient.for_adapter(hand_built, transport=_exploding_transport())
 
     def test_for_adapter_refuses_an_inactive_adapter(self, monkeypatch):
         """``active=False`` is the operator's off-switch, so it is honoured here.
@@ -917,14 +1001,23 @@ class TestVersionedAdapterBinding:
         with pytest.raises(ABDMSandboxUnconfiguredError):
             ABDMClient.for_adapter(adapter, transport=_exploding_transport())
 
-    def test_the_constructor_refuses_an_unsupported_version_too(self):
-        """A client can only be bound to a version the registry supports.
+    def test_the_constructor_binds_the_default_for_an_unrecognised_version(self, caplog):
+        """The same rule as the row: a string label is served, never refused.
 
         Without this the guard would live in one factory method, and a caller
-        constructing a client directly could bind a version no builder handles.
+        constructing a client directly could get a different contract from the
+        one the gateway-facing path applies.
         """
+        with caplog.at_level("WARNING", logger="apps.abdm_gateway.client"):
+            client = ABDMClient(SANDBOX_BASE, api_version="v9")
+
+        assert client.api_version == "v2"
+        assert "'v9'" in caplog.text
+
+    def test_the_constructor_refuses_a_non_string_version_too(self):
+        """A list, an object or a number is malformed, and malformed is refused."""
         with pytest.raises(ABDMUnsupportedVersionError):
-            ABDMClient(SANDBOX_BASE, api_version="v9")
+            ABDMClient(SANDBOX_BASE, api_version=["v3"])
 
 
 class TestCallbackApiVersionDispatch:
@@ -936,6 +1029,14 @@ class TestCallbackApiVersionDispatch:
     authentication, the mandatory-key check and the timestamp check, and before
     any write, so an unauthenticated caller cannot enumerate supported versions
     and a refused call leaves no row behind.
+
+    **A label is never refused.** The official ABDM spec is unresolved (REG-009),
+    so no version string a gateway can send can be proven unsupported, and a
+    refusal takes a fully-implemented intake channel down over a wording
+    difference. An exact label is served in its own shape, a documented alias in
+    the shape it names, and an unrecognised label in the default shape with a
+    warning. Only a **malformed** declaration — a list, an object or a number —
+    is answered ``422``.
     """
 
     def test_a_v2_ack_is_the_pre_change_acknowledgement_byte_for_byte(self):
@@ -1004,23 +1105,23 @@ class TestCallbackApiVersionDispatch:
 
         assert body == build_callback_ack("v3", canonical)
 
-    def test_an_unsupported_version_cannot_ride_a_replay(self):
-        """Pins *where* the declared-version check sits, not just that it exists.
+    def test_a_malformed_version_cannot_ride_a_replay(self):
+        """Pins *where* the version check sits, not just that it exists.
 
-        The declared check runs before the idempotency early-return, and the
-        replay branch depends on that. Moving the check down into the
-        transaction — the natural-looking place for it, next to the rest of the
-        resolution — makes this case answer 500 instead of 422: the replay branch
-        hands the declared version straight to ``build_callback_ack``, which
-        raises ``ABDMUnsupportedVersionError`` with no handler to turn it into a
-        response. The early check is therefore load-bearing twice over, which is
-        exactly the kind of coupling a test is here to make visible.
+        The declared-declaration check runs before the idempotency
+        early-return, and the replay branch depends on it. Moving it down into
+        the transaction — the natural-looking place for it, next to the rest of
+        the resolution — makes this case answer 200 with a replayed
+        acknowledgement instead of refusing, because the replay branch never
+        reaches a check that lives inside the atomic block. The early check is
+        therefore load-bearing twice over, which is exactly the kind of coupling
+        a test is here to make visible.
         """
         _tenant_with_opd()
         client = APIClient()
         _post(client, _payload(apiVersion="v2"))
 
-        replay = _post(client, _payload(apiVersion="v9"))
+        replay = _post(client, _payload(apiVersion=["v2"]))
 
         assert replay.status_code == 422, replay.content
         assert replay.json()["status"] == "rejected"
@@ -1029,64 +1130,149 @@ class TestCallbackApiVersionDispatch:
         assert Token.objects.count() == 1
         assert Patient.objects.count() == 1
 
-    def test_an_unsupported_declared_version_is_422_naming_the_supported_set(self):
+    @pytest.mark.parametrize("declared", ["v1.0", "v9", "V3"])
+    def test_a_declared_version_label_is_never_refused(self, declared):
+        """The Critical: a label that worked before INT-002 must still work.
+
+        Every one of these returned a complete 200 flow (row written, consent
+        recorded, token issued) at ``f1c0556`` and returned a permanent 422 with
+        nothing written afterwards. ``v1.0`` is the label this repository's own
+        architecture doc and sandbox replay use, so refusing it took down the
+        flow the project documents.
+        """
         _tenant_with_opd()
 
-        response = _post(APIClient(), _payload(apiVersion="v9"))
+        response = _post(APIClient(), _payload(apiVersion=declared))
+
+        assert response.status_code == 200, response.content
+        assert response.json()["status"] == "ok"
+        assert ABHACallbackLog.objects.count() == 1
+        assert Token.objects.count() == 1
+        assert Patient.objects.count() == 1
+        assert ConsentEvent.objects.count() == 1
+
+    @pytest.mark.parametrize("declared", ["v1.0", "1.0"])
+    def test_an_alias_declared_version_is_served_in_the_aliased_shape(self, declared, caplog):
+        """Not merely "200": the body is the aliased (v2) shape, byte for byte.
+
+        Asserted against the pre-change capture, key order included, so a label
+        that resolves to ``v2`` cannot be answered in some other shape and still
+        pass. **No fallback warning** is asserted too: an alias and an
+        unrecognised label produce the same body, so the absence of the warning
+        is the only thing that proves the alias table did the work rather than
+        the default doing it.
+        """
+        _tenant_with_opd()
+
+        with caplog.at_level("WARNING", logger="apps.abdm_gateway.client"):
+            body = _post(APIClient(), _payload(apiVersion=declared)).json()
+
+        assert _with_sentinels(body) == PRE_CHANGE_OK_ACK
+        assert list(body) == list(PRE_CHANGE_OK_ACK)
+        assert declared not in body
+        assert [
+            record for record in caplog.records if record.name == "apps.abdm_gateway.client"
+        ] == [], caplog.text
+
+    def test_an_unrecognised_label_is_served_in_the_default_shape_with_a_warning(
+        self, caplog
+    ):
+        """Served, in the pre-versioning shape, and the operator is told."""
+        tenant, _, _ = _tenant_with_opd()
+
+        with caplog.at_level("WARNING", logger="apps.abdm_gateway.client"):
+            response = _post(APIClient(), _payload(apiVersion="V3"))
+        body = response.json()
+
+        assert response.status_code == 200, response.content
+        assert _with_sentinels(body) == PRE_CHANGE_OK_ACK
+        assert list(body) == list(PRE_CHANGE_OK_ACK)
+        # Case is not folded, so this is a fallback and not a v3 acknowledgement.
+        assert "apiVersion" not in body
+        assert str(tenant.id) in caplog.text
+        assert "'V3'" in caplog.text
+
+    def test_a_replay_declaring_an_alias_is_answered_in_the_aliased_shape(self):
+        """The replay branch resolves the declaration too, not just the first pass.
+
+        The early return hands a version to ``build_callback_ack``; if it used
+        the raw declaration, an alias or an unknown label would either raise
+        (a 500 on an honest gateway retry) or build a shape nobody asked for.
+        """
+        _tenant_with_opd()
+        client = APIClient()
+        _post(client, _payload())
+
+        replay = _post(client, _payload(apiVersion="v1.0"))
+
+        assert replay.status_code == 200, replay.content
+        body = replay.json()
+        assert body["status"] == "duplicate"
+        assert body["request_id"] == "req-1"
+        assert "patient_id" in body and "requestId" not in body
+
+    @pytest.mark.parametrize("declared", [["v9"], {"version": "v3"}, 3])
+    def test_a_malformed_declared_version_is_422_naming_the_supported_set(self, declared):
+        """The one refusal: a payload that cannot be read as a version at all."""
+        _tenant_with_opd()
+
+        response = _post(APIClient(), _payload(apiVersion=declared))
 
         assert response.status_code == 422, response.content
         assert response.json()["status"] == "rejected"
         detail = response.json()["detail"]
-        assert "v9" in detail
         for supported in ABDM_API_VERSIONS:
             assert supported in detail
 
-    def test_an_unsupported_version_writes_nothing(self):
+    def test_a_malformed_declared_version_writes_nothing(self):
         """Refused before any write: no patient, no token, no ledger row."""
         _tenant_with_opd()
 
-        _post(APIClient(), _payload(apiVersion="v9"))
+        _post(APIClient(), _payload(apiVersion=["v9"]))
 
         assert ABHACallbackLog.objects.count() == 0
         assert Token.objects.count() == 0
         assert Patient.objects.count() == 0
         assert ConsentEvent.objects.count() == 0
 
-    def test_an_unauthenticated_caller_cannot_probe_supported_versions(self):
+    @pytest.mark.parametrize("declared", ["v9", ["v9"], {"version": "v3"}])
+    def test_an_unauthenticated_caller_cannot_probe_supported_versions(self, declared):
         """The version check runs *after* authentication (ABD-005).
 
         Answering 422 to an unsigned call would turn the supported set into an
-        unauthenticated oracle, and the 422 body names the set explicitly.
+        unauthenticated oracle, and the 422 body names the set explicitly. The
+        string case is pinned alongside the malformed one because both must be
+        authenticated before anything is said about the vocabulary.
         """
         _tenant_with_opd()
 
         response = APIClient().post(
-            "/api/v1/abdm-callbacks/", _payload(apiVersion="v9"), format="json"
+            "/api/v1/abdm-callbacks/", _payload(apiVersion=declared), format="json"
         )
 
         assert response.status_code == 401
         assert ABHACallbackLog.objects.count() == 0
 
-    def test_a_missing_mandatory_key_is_still_400_even_with_a_bad_version(self):
+    def test_a_missing_mandatory_key_is_still_400_even_with_a_malformed_version(self):
         """Pins the order: the mandatory-key check runs before the version check.
 
         If the version check came first, a malformed callback would be told its
-        API version is unsupported — a different diagnosis for the same broken
+        API version is unprocessable — a different diagnosis for the same broken
         payload, and one that leaks the supported set to a merely-malformed call.
         """
         _tenant_with_opd()
 
-        response = _post(APIClient(), _payload(apiVersion="v9", requestId=None))
+        response = _post(APIClient(), _payload(apiVersion=["v9"], requestId=None))
 
         assert response.status_code == 400, response.content
         assert "requestId" in response.json()["detail"]
 
-    def test_a_stale_timestamp_is_still_400_even_with_a_bad_version(self):
+    def test_a_stale_timestamp_is_still_400_even_with_a_malformed_version(self):
         """Same ordering pin for the timestamp check (ABD-007)."""
         _tenant_with_opd()
 
         response = _post(
-            APIClient(), _payload(apiVersion="v9", timestamp="2020-01-01T00:00:00Z")
+            APIClient(), _payload(apiVersion=["v9"], timestamp="2020-01-01T00:00:00Z")
         )
 
         assert response.status_code == 400, response.content
@@ -1121,22 +1307,64 @@ class TestCallbackApiVersionDispatch:
 
         assert list(body) == list(PRE_CHANGE_OK_ACK)
 
-    def test_an_unsupported_adapter_version_is_refused(self):
-        """A row naming a version we do not serve is a 422, not a guess.
+    def test_an_unrecognised_adapter_version_serves_the_default_shape(self, caplog):
+        """One mis-typed row must not 422 every scan-and-share callback (INT-002).
 
-        Falling back to the default would answer a v3-configured tenant in v2
-        vocabulary because of a typo, and the gateway would parse a shape it did
-        not ask for.
+        The adapter row is read before any write, so refusing an unrecognised
+        label on it does not fail one scan: it fails the tenant's whole intake
+        channel, permanently, until somebody fixes a JSON column nobody is
+        watching. The scan is therefore served in the default shape with a
+        warning naming the row's label.
         """
         tenant, _, _ = _tenant_with_opd()
-        _abdm_adapter(tenant, api_version="v9")
+        _abdm_adapter(tenant, api_version="v3.1")
 
-        response = _post(APIClient(), _payload())
+        with caplog.at_level("WARNING", logger="apps.abdm_gateway.client"):
+            response = _post(APIClient(), _payload())
+        body = response.json()
 
-        assert response.status_code == 422, response.content
-        assert ABHACallbackLog.objects.count() == 0
-        assert Token.objects.count() == 0
-        assert Patient.objects.count() == 0
+        assert response.status_code == 200, response.content
+        assert _with_sentinels(body) == PRE_CHANGE_OK_ACK
+        assert str(tenant.id) in caplog.text
+        assert "'v3.1'" in caplog.text
+        # The scan completed: the channel is alive, which is the whole point.
+        assert ABHACallbackLog.objects.count() == 1
+        assert Token.objects.count() == 1
+        assert Patient.objects.count() == 1
+
+    def test_an_aliased_adapter_version_shapes_the_ack_as_its_target(self, caplog):
+        """A row naming the legacy label is served as the alias it names."""
+        tenant, _, _ = _tenant_with_opd()
+        _abdm_adapter(tenant, api_version="v1.0")
+
+        with caplog.at_level("WARNING", logger="apps.abdm_gateway.client"):
+            body = _post(APIClient(), _payload()).json()
+
+        assert list(body) == list(PRE_CHANGE_OK_ACK)
+        assert [
+            record for record in caplog.records if record.name == "apps.abdm_gateway.client"
+        ] == [], caplog.text
+
+    def test_a_row_value_that_is_not_a_label_is_served_as_an_unrecognised_label(self, caplog):
+        """The row cannot deliver a non-string, so the callback path cannot 422 on it.
+
+        ``api_version`` is a ``CharField``: a dict written to the row comes back
+        as its string repr, which is an unrecognised *label* like any other, so
+        the scan is served in the default shape with a warning. The 422 is
+        reserved for the signed callback body, where JSON really can carry a list
+        or an object. Pinned because the asymmetry is otherwise invisible — the
+        column quietly makes the malformed case unreachable from this direction.
+        """
+        tenant, _, _ = _tenant_with_opd()
+        _abdm_adapter(tenant, api_version={"major": 3})
+
+        with caplog.at_level("WARNING", logger="apps.abdm_gateway.client"):
+            response = _post(APIClient(), _payload())
+
+        assert response.status_code == 200, response.content
+        assert _with_sentinels(response.json()) == PRE_CHANGE_OK_ACK
+        assert str(tenant.id) in caplog.text
+        assert "major" in caplog.text
 
     def test_another_tenants_adapter_cannot_shape_the_ack(self):
         """Tenant isolation on the adapter lookup (never RLS alone).
