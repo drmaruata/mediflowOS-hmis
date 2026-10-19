@@ -10,6 +10,7 @@ from .auth_views import (
     TOTPEnrolViewSet,
     TenantTokenObtainPairView,
 )
+from .oidc import OIDCTokenExchangeView
 
 app_name = "identity"
 
@@ -47,6 +48,7 @@ urlpatterns = [
         TokenBlacklistView.as_view(),
         name="token-blacklist",
     ),
+    path("auth/oidc/", OIDCTokenExchangeView.as_view(), name="oidc-exchange"),
     path("auth/me/", MeView.as_view(), name="me"),
     path("auth/break-glass/", BreakGlassView.as_view(), name="break-glass"),
     path("mfa-devices/", _mfa_list, name="mfadevice-list"),

@@ -67,12 +67,13 @@ TOKEN_PATH = "/api/v1/auth/token/"
 PATIENTS_PATH = "/api/v1/patients/"
 ABDM_CALLBACK_PATH = "/api/v1/abdm-callbacks/"
 
-#: The health probes, and with :data:`ABDM_CALLBACK_PATH` the whole of the
-#: anonymous surface. Enumerated rather than described, because the previous
-#: revision listed only the two probes the container uses and therefore read as
-#: exhaustive while three of the seven anonymous operations went unasserted —
-#: which is how ``/api/v1/abdm-callbacks/health/`` came to be published
-#: anonymously with nothing here noticing.
+#: The health probes, and with :data:`ABDM_CALLBACK_PATH` and
+#: :data:`OIDC_PATH` the whole of the anonymous surface. Enumerated rather
+#: than described, because the previous revision listed only the two probes
+#: the container uses and therefore read as exhaustive while three of the
+#: then-seven anonymous operations went unasserted — which is how
+#: ``/api/v1/abdm-callbacks/health/`` came to be published anonymously with
+#: nothing here noticing.
 #:
 #: * the two container health probes — no tenant to bind and no caller to
 #:   authenticate; AGENTS.md §4 names the probe as one of only two endpoints
@@ -85,7 +86,10 @@ ABDM_CALLBACK_PATH = "/api/v1/abdm-callbacks/"
 #: * ``/api/v1/auth/token/``, ``/token/refresh/`` and ``/token/blacklist/`` — a
 #:   client cannot present a credential to obtain one. ``refresh`` and
 #:   ``blacklist`` are published anonymous by SimpleJWT's own views and have no
-#:   dedicated assertion.
+#:   dedicated assertion;
+#: * ``/api/v1/auth/oidc/`` POST — the OIDC ID-token exchange is a
+#:   credential-issuing endpoint; its authentication IS the verified IdP
+#:   signature on the token it presents, not a bearer header (INT-009).
 #:
 #: The document is where this posture is stated rather than merely implied.
 HEALTH_PATHS = (
@@ -93,6 +97,10 @@ HEALTH_PATHS = (
     "/api/v1/health/ready/",
     "/api/v1/abdm-callbacks/health/",
 )
+
+#: The OIDC single sign-on exchange (INT-009): anonymous on the same terms as
+#: the token-issuing routes above it in this list.
+OIDC_PATH = "/api/v1/auth/oidc/"
 
 #: The documentation surface, served without a credential on purpose: an
 #: integrator has to be able to read the API contract before they have one.
@@ -439,11 +447,14 @@ class TestDenyByDefaultIsVisible:
                 "credential, which contradicts DEFAULT_PERMISSION_CLASSES"
             )
 
-    @pytest.mark.parametrize("path_name", HEALTH_PATHS + (ABDM_CALLBACK_PATH,))
+    @pytest.mark.parametrize(
+        "path_name", HEALTH_PATHS + (ABDM_CALLBACK_PATH, OIDC_PATH)
+    )
     def test_the_anonymous_surface_is_documented_as_anonymous(
         self, generated_document, path_name
     ):
-        """The health probes and the ABDM callback carry no credential.
+        """The health probes, the ABDM callback and the OIDC exchange carry no
+        credential.
 
         The other half of the same claim. A gate asserting only "everything requires
         auth" would pass on a document in which the health probe had been locked

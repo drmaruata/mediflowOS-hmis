@@ -394,6 +394,26 @@ $env:CELERY_BROKER_URL = "redis://localhost:6379/0"
 > ```powershell
 > $env:MEDIA_ROOT = "D:\mediflow\uploads"  # a mounted volume in production
 > ```
+>
+> **OIDC_ISSUER / OIDC_AUDIENCE / OIDC_JWKS_URI / OIDC_TENANT_CLAIM /
+> OIDC_JIT_PROVISION (INT-009):** single sign-on via `POST /api/v1/auth/oidc/`,
+> which exchanges an OIDC ID token — issuer, audience, signature and expiry
+> all verified against the IdP's published JWKS — for the same token pair
+> `auth/token/` issues. The first three are required: with any of them unset
+> the endpoint answers **501** with a structured body before any verification
+> work, never a fake 200. `OIDC_TENANT_CLAIM` names the ID-token claim carrying
+> the tenant **slug** to bind (default `tenant`); an absent or unresolvable
+> claim is refused with 403, and there is no default-tenant fallback.
+> `OIDC_JIT_PROVISION` (`true`/`false`, default **false**) opts in to
+> just-in-time account creation on first sign-on: while it is off an unknown
+> identity is refused with 403. Example:
+>
+> ```powershell
+> $env:OIDC_ISSUER = "https://sso.hospital.example"
+> $env:OIDC_AUDIENCE = "mediflow-hmis"
+> $env:OIDC_JWKS_URI = "https://sso.hospital.example/.well-known/jwks.json"
+> $env:OIDC_JIT_PROVISION = "true"   # create accounts on first sign-on
+> ```
 
 > The project defaults to PostgreSQL on `localhost` and Redis at `redis://redis:6379/0` in many settings. If you are using local services instead of containers, update these values accordingly.
 

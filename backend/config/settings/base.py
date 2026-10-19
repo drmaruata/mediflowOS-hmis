@@ -319,6 +319,25 @@ SIMPLE_JWT = {
     "UPDATE_LAST_LOGIN": True,
 }
 
+# INT-009: OIDC single sign-on. The IdP's signature is the root of trust —
+# apps/identity_tenancy/oidc.py verifies issuer, audience, signature and
+# expiry against the IdP's published JWKS before any local effect. The three
+# required values default to empty strings rather than half-working
+# placeholders, so an unconfigured deployment answers 501 with a structured
+# body before the request body is even parsed — never a fake 200.
+OIDC_ISSUER = os.getenv("OIDC_ISSUER", "").strip()
+OIDC_AUDIENCE = os.getenv("OIDC_AUDIENCE", "").strip()
+OIDC_JWKS_URI = os.getenv("OIDC_JWKS_URI", "").strip()
+# The ID-token claim carrying the tenant slug the exchange binds. A blank or
+# whitespace-only value falls back to the documented default rather than
+# disabling tenant binding: an empty claim name would make every configured
+# login unresolvable, which would read as breakage, not as configuration.
+OIDC_TENANT_CLAIM = os.getenv("OIDC_TENANT_CLAIM", "").strip() or "tenant"
+# Just-in-time account creation on first sign-on. Off by default: an unknown
+# identity is refused (403) until the operator opts in, mirroring the house
+# "true"/"false" env-flag shape (see DEBUG above).
+OIDC_JIT_PROVISION = os.getenv("OIDC_JIT_PROVISION", "false") == "true"
+
 CHANNEL_LAYERS = {
     "default": {"BACKEND": "channels_redis.core.RedisChannelLayer", "CONFIG": {"hosts": [os.getenv("REDIS_URL", "redis://redis:6379/0")]}},
 }
