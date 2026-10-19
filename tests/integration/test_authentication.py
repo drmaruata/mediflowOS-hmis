@@ -150,6 +150,30 @@ class TestTokenIssuance:
         assert response.status_code == 200
         assert response.json()["tenant_id"] == str(TENANT_A)
 
+    def test_me_reports_the_mfa_gate_state_from_the_token_claim(self, users):
+        """/auth/me/ must publish both MFA fields (UI-001).
+
+        The SPA routes on this response before it renders the shell, so the
+        unverified half must be visible, not just the role's requirement: a
+        missing ``mfa_verified`` would force the client to guess from
+        ``requires_mfa`` alone and every privileged user would be either
+        stuck on or waved past the challenge.
+        """
+        from apps.identity_tenancy.tokens import TenantAwareTokenSerializer
+
+        unverified = _authed("admin-a").get("/api/v1/auth/me/").json()
+        assert unverified["requires_mfa"] is True
+        assert unverified["mfa_verified"] is False
+
+        # The verified half mirrors the token the planned MFA-verify endpoint
+        # will mint, the same way TestMfaEnforcement mints it.
+        refresh = TenantAwareTokenSerializer.get_token(users["admin"])
+        refresh["mfa_verified"] = True
+        client = APIClient()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {refresh.access_token}")
+        verified = client.get("/api/v1/auth/me/").json()
+        assert verified["mfa_verified"] is True
+
 
 class TestTenantComesFromTheToken:
     """The regression this step exists to close."""

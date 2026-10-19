@@ -184,9 +184,15 @@ describe("AppHeader", () => {
     expect(screen.getByText("Demo data")).toBeInTheDocument();
 
     rerender(
-      <MemoryRouter>
-        <AppHeader isLive />
-      </MemoryRouter>,
+      <QueryClientProvider
+        client={new QueryClient({
+          defaultOptions: { queries: { retry: false } },
+        })}
+      >
+        <MemoryRouter>
+          <AppHeader isLive />
+        </MemoryRouter>
+      </QueryClientProvider>,
     );
     expect(screen.getByText("Live Data")).toBeInTheDocument();
   });

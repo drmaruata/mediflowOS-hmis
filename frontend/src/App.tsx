@@ -22,13 +22,15 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 
 import { useAuthStore } from "@/stores/authStore";
 import { useThemeStore } from "@/stores/themeStore";
+import { useSession } from "@/lib/session";
 import { AppHeader } from "@/components/AppHeader";
 import { AppSidebar, AppSidebarDrawer } from "@/components/AppSidebar";
 import LoginPage from "@/modules/auth/LoginPage";
 
 const DashboardView = lazy(() => import("@/modules/dashboard/DashboardView"));
+const MfaChallenge = lazy(() => import("@/modules/auth/MfaChallenge"));
 
-const queryClient = new QueryClient({
+export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       retry: 2,
@@ -42,6 +44,32 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   // No token yet ⇒ sign-in; authenticated ⇒ requested route.
   return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
+}
+
+/**
+ * Second-factor navigation gate (TEN-006): a session whose role demands MFA
+ * but has not proven it sees the challenge, never the shell. Acts only on
+ * positive session knowledge — MFARequiredIfConfigured on the server remains
+ * the enforcement, this is routing.
+ */
+function MfaGate({ children }: { children: React.ReactNode }) {
+  const session = useSession();
+  const me = session.data;
+
+  if (me && me.requires_mfa && !me.mfa_verified) {
+    return <Navigate to="/mfa" replace />;
+  }
+  if (!me && session.isPending) {
+    return (
+      <div
+        aria-busy="true"
+        className="flex min-h-svh items-center justify-center text-muted-foreground"
+      >
+        <span>Loading session…</span>
+      </div>
+    );
+  }
+  return <>{children}</>;
 }
 
 /**
@@ -115,7 +143,25 @@ export default function App() {
             path="/"
             element={
               <AuthGuard>
-                <AuthLayout />
+                <MfaGate>
+                  <AuthLayout />
+                </MfaGate>
+              </AuthGuard>
+            }
+          />
+          <Route
+            path="/mfa"
+            element={
+              <AuthGuard>
+                <Suspense
+                  fallback={
+                    <div className="flex min-h-svh items-center justify-center text-muted-foreground">
+                      <span>Loading…</span>
+                    </div>
+                  }
+                >
+                  <MfaChallenge />
+                </Suspense>
               </AuthGuard>
             }
           />

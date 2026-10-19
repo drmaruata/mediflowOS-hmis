@@ -17,6 +17,7 @@ from .models import BreakGlassAccess, UserMembership
 from common.authentication import claims_from
 from .tokens import (
     BREAK_GLASS_CLAIM,
+    MFA_CLAIM,
     PERMISSIONS_CLAIM,
     ROLE_CLAIM,
     TenantAwareTokenSerializer,
@@ -51,6 +52,7 @@ _MeSerializer = inline_serializer(
         "permissions": serializers.ListField(child=serializers.CharField()),
         "allows_break_glass": serializers.BooleanField(),
         "requires_mfa": serializers.BooleanField(),
+        "mfa_verified": serializers.BooleanField(),
     },
 )
 
@@ -79,6 +81,10 @@ class MeView(APIView):
                 "permissions": claims.get(PERMISSIONS_CLAIM, []),
                 "allows_break_glass": claims.get(BREAK_GLASS_CLAIM, False),
                 "requires_mfa": bool(membership.role.require_mfa) if membership else False,
+                # The SPA routes on this claim before rendering the shell
+                # (UI-001); read from the token, not the database, so the
+                # answer matches what the permission layer will enforce.
+                "mfa_verified": bool(claims.get(MFA_CLAIM, False)),
             }
         )
 
