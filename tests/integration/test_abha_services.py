@@ -1105,7 +1105,7 @@ class TestCallbackApiVersionDispatch:
     def test_a_malformed_version_cannot_ride_a_replay(self):
         """Pins *where* the version check sits, not just that it exists.
 
-        The declared-declaration check runs before the idempotency
+        The declared ``apiVersion`` check runs before the idempotency
         early-return, and the replay branch depends on it. Moving it down into
         the transaction — the natural-looking place for it, next to the rest of
         the resolution — makes this case answer **500**, not 200: the replay

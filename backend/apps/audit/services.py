@@ -71,10 +71,12 @@ _CHAIN_COERCE = {
 def _canonical_fields(source) -> dict:
     """The canonical field dict for one event, from kwargs or from a row.
 
-    ``source`` is either the writer's kwargs dict or an ``AuditEvent`` instance;
-    both sides go through this one function. An omitted name resolves to ``None``,
-    matching the row's NULL default, so an omitted column and a stored NULL hash
-    to the same value.
+    A non-None value is coerced through the field's own ``to_python``
+    (``_CHAIN_COERCE``), so the value hashed is the value the row stores,
+    whichever side it came from. ``source`` is either the writer's kwargs
+    dict or an ``AuditEvent`` instance; both sides go through this one
+    function. An omitted name resolves to ``None``, matching the row's NULL
+    default, so an omitted column and a stored NULL hash to the same value.
 
     Raises:
         django.core.exceptions.ValidationError: if a chained value cannot be
