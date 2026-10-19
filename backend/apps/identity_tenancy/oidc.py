@@ -147,7 +147,14 @@ def verify_id_token(id_token: str) -> dict:
     jwk = _matching_jwk(jwks, header.get("kid"))
     if jwk is None:
         raise jwt.InvalidTokenError("no key in the IdP's JWKS matches this token")
-    key = jwt.PyJWK(jwk)
+    try:
+        key = jwt.PyJWK(jwk)
+    except (jwt.InvalidKeyError, KeyError) as error:
+        # A structurally broken JWK is the IdP's failure, not a bad token:
+        # the installed PyJWT raises InvalidKeyError for the shapes it
+        # validates and a bare KeyError for a member from_jwk dereferences
+        # unguarded. ValueError is the shape the view maps to 503.
+        raise ValueError(str(error)) from error
     return jwt.decode(
         id_token,
         key=key.key,
@@ -162,18 +169,21 @@ def verify_id_token(id_token: str) -> dict:
 def _resolve_user(claims, tenant):
     """The local account for this verified identity, provisioned if allowed.
 
-    Existing accounts are matched by the ``email`` claim and by ``sub`` (the
-    provisioned username), so a provisioned user is found again on their next
-    sign-on even when their token carries no email. Every refusal below raises
-    the same stable message, so the endpoint cannot distinguish — for a caller
-    — an unknown identity from an ambiguous one from a disabled one, and cannot
+    Existing accounts are matched by ``sub`` (the provisioned username, so a
+    provisioned user is found again on their next sign-on) and by ``email`` —
+    the email leg only while the IdP attests ``email_verified``: some IdPs do
+    not emit the claim, and those deployments lose email-matching rather than
+    gain an impersonation path, because a self-service IdP email must never
+    reference a local account. Every refusal below raises the same
+    stable message, so the endpoint cannot distinguish — for a caller — an
+    unknown identity from an ambiguous one from a disabled one, and cannot
     be used to enumerate accounts.
     """
     UserModel = get_user_model()
     email = str(claims.get("email") or "").strip()
     sub = str(claims.get("sub") or "").strip()
     matches = set()
-    if email:
+    if email and claims.get("email_verified"):
         matches.update(UserModel.objects.filter(email__iexact=email))
     if sub:
         matches.update(UserModel.objects.filter(username__iexact=sub))

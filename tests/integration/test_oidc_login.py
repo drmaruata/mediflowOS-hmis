@@ -14,12 +14,17 @@ What each refusal family pins:
   structured body before the request body is parsed, so no garbage token can
   make it do cryptographic work or touch a row.
 * **401** — anything about the token itself: foreign signature, wrong
-  audience, expired, or carrying no ``exp`` at all (a token with no expiry
-  would otherwise verify forever).
+  audience, expired, carrying no ``exp`` at all (a token with no expiry
+  would otherwise verify forever), ``alg: none``, a ``kid`` the JWKS does
+  not publish, or a signature the published key does not verify.
+* **503** — the IdP's own failure: a JWKS that cannot be reached, or one whose
+  key material cannot be built. An integration failure, never a verdict on
+  the caller's token.
 * **403 with one stable message** — a *verified* identity that may not log in
-  to the bound tenant. Every condition below reads identically to the caller,
-  so the endpoint cannot be used to enumerate accounts or probe which tenants
-  exist.
+  to the bound tenant, including one whose ``email`` the IdP did not attest
+  verified, which must never map a local account. Every condition below reads
+  identically to the caller, so the endpoint cannot be used to enumerate
+  accounts or probe which tenants exist.
 * **The decode pin** — the returned access token carries the bound tenant in
   its signed claims, exactly as the password flow's does, because the same
   serializer issued it.
@@ -28,6 +33,7 @@ import base64
 import time
 import uuid
 
+import httpx
 import jwt
 import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
@@ -35,7 +41,11 @@ from django.contrib.auth import get_user_model
 from rest_framework.test import APIClient
 from rest_framework_simplejwt.tokens import AccessToken
 
-from apps.identity_tenancy.oidc import NO_ACCOUNT_MESSAGE, NO_TENANT_MESSAGE
+from apps.identity_tenancy.oidc import (
+    IDP_UNAVAILABLE_MESSAGE,
+    NO_ACCOUNT_MESSAGE,
+    NO_TENANT_MESSAGE,
+)
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db]
 
@@ -74,6 +84,19 @@ def foreign_key():
 def jwks(signing_key):
     """The IdP's published key set, served from the stub fetcher."""
     numbers = signing_key.public_key().public_numbers()
+    return {"keys": [{
+        "kty": "RSA", "alg": "RS256", "use": "sig", "kid": KID,
+        "n": _b64url_uint(numbers.n), "e": _b64url_uint(numbers.e),
+    }]}
+
+
+@pytest.fixture
+def foreign_jwks(foreign_key):
+    """A key set that publishes the foreign key under the token's ``kid``: a
+    matching ``kid`` names a key, it does not vouch for the signature, so the
+    stub cannot be a rubber stamp.
+    """
+    numbers = foreign_key.public_key().public_numbers()
     return {"keys": [{
         "kty": "RSA", "alg": "RS256", "use": "sig", "kid": KID,
         "n": _b64url_uint(numbers.n), "e": _b64url_uint(numbers.e),
@@ -127,8 +150,8 @@ def clerk(tenant):
     return user
 
 
-def _id_token(key, claims=None):
-    """A signed ID token; ``claims`` merge over the valid defaults (None drops one)."""
+def _claims(overrides=None):
+    """The valid ID-token payload; ``overrides`` merge over it (None drops one)."""
     now = int(time.time())
     payload = {
         "iss": ISSUER,
@@ -139,12 +162,19 @@ def _id_token(key, claims=None):
         "exp": now + 300,
         "tenant": "hospital-sso",
     }
-    for claim, value in (claims or {}).items():
+    for claim, value in (overrides or {}).items():
         if value is None:
             payload.pop(claim, None)
         else:
             payload[claim] = value
-    return jwt.encode(payload, key, algorithm="RS256", headers={"kid": KID})
+    return payload
+
+
+def _id_token(key, claims=None, headers=None):
+    """A signed ID token; ``headers`` override the published-``kid`` default."""
+    return jwt.encode(
+        _claims(claims), key, algorithm="RS256", headers=headers or {"kid": KID}
+    )
 
 
 def _post(id_token):
@@ -226,6 +256,20 @@ class TestTheExchange:
         assert response.status_code == 403
         assert response.json()["detail"] == NO_TENANT_MESSAGE
 
+    def test_a_custom_tenant_claim_name_is_honoured(
+        self, configured, signing_key, tenant, clerk
+    ):
+        """The slug is read from wherever the deployment moved the claim; the
+        default name is dropped from the token to prove it is not consulted."""
+        configured.OIDC_TENANT_CLAIM = "hospital"
+
+        response = _post(_id_token(signing_key, {
+            "tenant": None, "hospital": "hospital-sso",
+        }))
+
+        assert response.status_code == 200, response.content
+        assert response.json()["tenant_id"] == str(tenant.id)
+
     def test_an_unknown_identity_is_refused_while_jit_is_off(
         self, configured, signing_key, tenant, clerk
     ):
@@ -282,6 +326,64 @@ class TestTheExchange:
         assert response.json()["detail"] == NO_ACCOUNT_MESSAGE
 
 
+class TestEmailVerifiedMapping:
+    """The ``email`` claim maps an account only while the IdP attests it.
+
+    Anyone can register ``victim@hospital.test`` at a self-service IdP and
+    present a perfectly valid signed token for it, so an unverified email
+    must never reference a local account; IdPs that do not emit the claim
+    lose email-matching rather than grant that path.
+    """
+
+    @pytest.fixture
+    def victim(self, tenant):
+        """The account an unverified IdP email must never reach: no ``sub``
+        in these tokens names it, so ``email`` is its only mapping leg.
+        """
+        from apps.identity_tenancy.models import Role, UserMembership
+
+        user = get_user_model().objects.create_user(
+            username="records-victim", password="pw-for-tests-only",
+            email="victim@hospital.test",
+        )
+        role = Role.objects.create(tenant=tenant, name="records")
+        UserMembership.objects.create(user=user, tenant=tenant, role=role, active=True)
+        return user
+
+    def test_a_verified_email_maps_the_existing_account(
+        self, configured, signing_key, tenant, victim
+    ):
+        response = _post(_id_token(signing_key, {
+            "sub": "idp-stranger", "email": "victim@hospital.test",
+            "email_verified": True,
+        }))
+
+        assert response.status_code == 200, response.content
+        assert response.json()["tenant_id"] == str(tenant.id)
+        assert response.json()["role"] == "records"
+
+    def test_an_unverified_email_does_not_map_the_account(
+        self, configured, signing_key, victim
+    ):
+        response = _post(_id_token(signing_key, {
+            "sub": "idp-stranger", "email": "victim@hospital.test",
+            "email_verified": False,
+        }))
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == NO_ACCOUNT_MESSAGE
+
+    def test_an_absent_email_verified_claim_does_not_map_the_account(
+        self, configured, signing_key, victim
+    ):
+        response = _post(_id_token(signing_key, {
+            "sub": "idp-stranger", "email": "victim@hospital.test",
+        }))
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == NO_ACCOUNT_MESSAGE
+
+
 class TestJustInTimeProvisioning:
     def test_first_sign_on_provisions_a_least_privilege_account(
         self, configured, signing_key, tenant
@@ -325,3 +427,74 @@ class TestJustInTimeProvisioning:
 
         assert response.status_code == 403
         assert not get_user_model().objects.filter(email="newcomer@hospital.test").exists()
+
+
+class TestHostileTokensAndKeySets:
+    """The verification step's attack surface, pinned so the stub is never a
+    rubber stamp — the alg, the ``kid`` and the served key material must all
+    matter — and so an unreachable or unusable JWKS is a 503 integration
+    failure, never a verdict on the caller's token and never a crash.
+    """
+
+    def test_an_alg_none_token_is_refused(self, configured, signing_key, tenant, clerk):
+        token = jwt.encode(_claims(), None, algorithm="none")
+
+        assert _post(token).status_code == 401
+
+    def test_a_kid_absent_from_the_jwks_is_refused(
+        self, configured, signing_key, tenant, clerk
+    ):
+        response = _post(_id_token(signing_key, headers={"kid": "absent-from-jwks"}))
+
+        assert response.status_code == 401
+
+    def test_a_jwks_serving_the_wrong_key_under_a_matching_kid_is_refused(
+        self, configured, foreign_jwks, monkeypatch, signing_key, tenant, clerk
+    ):
+        from apps.identity_tenancy import oidc
+
+        monkeypatch.setattr(oidc, "fetch_jwks", lambda uri: foreign_jwks)
+
+        assert _post(_id_token(signing_key)).status_code == 401
+
+    def test_an_unreachable_jwks_is_the_idps_failure_not_the_callers(
+        self, configured, monkeypatch, signing_key, tenant, clerk
+    ):
+        from apps.identity_tenancy import oidc
+
+        def _unreachable(uri):
+            raise httpx.ConnectError("the IdP is down")
+
+        monkeypatch.setattr(oidc, "fetch_jwks", _unreachable)
+        response = _post(_id_token(signing_key))
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == IDP_UNAVAILABLE_MESSAGE
+
+    def test_an_oct_jwk_with_no_key_material_is_the_idps_failure(
+        self, configured, monkeypatch, signing_key, tenant, clerk
+    ):
+        from apps.identity_tenancy import oidc
+
+        monkeypatch.setattr(
+            oidc, "fetch_jwks", lambda uri: {"keys": [{"kty": "oct", "kid": KID}]}
+        )
+        response = _post(_id_token(signing_key))
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == IDP_UNAVAILABLE_MESSAGE
+
+    def test_an_rsa_jwk_missing_its_modulus_is_the_idps_failure(
+        self, configured, monkeypatch, signing_key, tenant, clerk
+    ):
+        from apps.identity_tenancy import oidc
+
+        monkeypatch.setattr(
+            oidc, "fetch_jwks",
+            lambda uri: {"keys": [{"kty": "RSA", "kid": KID, "alg": "RS256",
+                                   "e": "AQAB"}]},
+        )
+        response = _post(_id_token(signing_key))
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == IDP_UNAVAILABLE_MESSAGE
