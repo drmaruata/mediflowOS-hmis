@@ -328,11 +328,13 @@ def audit_read(instance, request):
     tenant comes from the request's resolved context, never the client; an
     unresolved tenant writes nothing at all, mirroring the mixin — an audit row
     with no tenant would be an unscoped row no RLS policy could read back.
+    Callers must resolve the tenant first: nothing is bound here, and a request
+    with no tenant silently records no read.
 
     The write is synchronous and inside the request transaction. Read completeness
     is a safety net, so it is chosen over read latency: a read that returned data
     but failed to record would leave a gap in the trail. Volume is bounded by the
-    read rate and, for ``search``, by the returned page size.
+    read rate and, for the list-style reads, by the returned page or queue size.
 
     No PHI lands in the row: ``entity_type`` is the table name and ``entity_id``
     the pk, both identifiers.

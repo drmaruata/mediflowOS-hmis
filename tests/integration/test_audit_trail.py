@@ -11,9 +11,11 @@ silently never applied. That defect is only *invisible* when a single audit
 row exists (unfiltered and filtered both return one), which is why every
 drill-down case below seeds several rows.
 
-The **read-logging** half closes AUD-001's read side: a patient detail GET and
-each row a counter ``search`` returns must land an ``AuditEvent(action="read")``
-naming the row by table + pk and the requester, with no PHI in the row.
+The **read-logging** half closes AUD-001's read side: a patient detail GET,
+each row a counter ``search`` returns, the bulk list's page, the verification
+queue and the OP slip print payload must all land an
+``AuditEvent(action="read")`` naming the row by table + pk and the requester,
+with no PHI in the row — and only under the tenant that actually read.
 
 The **hash-chain** half pins AUD-002 and AUD-004: every writer routes through
 ``append_event`` so no row is left unchained, ``GET /audit-log/verify/``
@@ -29,15 +31,17 @@ from datetime import timedelta
 
 import pytest
 from django.contrib.auth import get_user_model
+from django.contrib.auth.models import AnonymousUser
 from django.utils import timezone
-from rest_framework.test import APIClient
+from rest_framework.test import APIClient, APIRequestFactory
 
 from apps.audit.models import AuditEvent
-from apps.audit.services import append_event, purge_expired
+from apps.audit.services import append_event, audit_read, purge_expired
 from apps.identity_tenancy.models import (
     Department, Facility, Role, Tenant, UserMembership,
 )
 from apps.identity_tenancy.tokens import TenantAwareTokenSerializer
+from apps.opd.models import OPDEncounter
 from apps.patient_registry.models import Patient, QRCode
 
 pytestmark = [pytest.mark.integration, pytest.mark.django_db]
@@ -229,7 +233,7 @@ class TestPatientReadLogging:
     """A patient read is audited (AUD-001, read half)."""
 
     def setup_method(self):
-        self.tenant, self.facility, _ = _make_context()
+        self.tenant, self.facility, self.department = _make_context()
         self.client, self.user = _make_client(self.tenant)
 
     def test_retrieve_writes_one_read_event(self):
@@ -274,6 +278,212 @@ class TestPatientReadLogging:
         reads = AuditEvent.objects.filter(action="read", entity_type=PATIENT_DB_TABLE)
         assert reads.count() == 3
         assert {event.entity_id for event in reads} == {str(p.id) for p in patients}
+
+    def test_list_writes_one_read_per_returned_patient(self):
+        """The bulk list is the largest PHI read surface — every page row is audited.
+
+        RED before this change: the default list returned full demographics
+        and wrote no read event at all. The response shape must stay the
+        default paginated one; only the audit rows are added.
+        """
+        patients = [
+            Patient.objects.create(
+                tenant_id=self.tenant.id, uhid=f"UHID-LIST-{index}",
+                demographics={"name": "Listed", "gender": "F", "yearOfBirth": 1980},
+            )
+            for index in range(3)
+        ]
+
+        response = self.client.get(PATIENTS_URL)
+
+        assert response.status_code == 200, response.content
+        assert len(response.json()["results"]) == 3
+        reads = AuditEvent.objects.filter(
+            action="read", tenant_id=self.tenant.id
+        )
+        assert reads.count() == 3
+        assert {event.entity_id for event in reads} == {str(p.id) for p in patients}
+        # Identifiers only: the UHID and name never land in the event row.
+        for event in reads:
+            assert event.entity_type == PATIENT_DB_TABLE
+            assert event.reason is None
+            assert event.source is None
+
+    def test_list_volume_is_bounded_by_the_page_size(self):
+        """51 patients, a 50-row page: exactly 50 reads, never 51.
+
+        A read that logs more rows than the response carried would be as
+        wrong as one that logs fewer — the trail must name the rows the
+        caller actually saw. PAGE_SIZE is 50, so the 51st row stays off
+        page one and must stay out of the trail.
+        """
+        [
+            Patient.objects.create(
+                tenant_id=self.tenant.id, uhid=f"UHID-PAGE-{index}",
+                demographics={"name": "Paged", "gender": "M", "yearOfBirth": 1970},
+            )
+            for index in range(51)
+        ]
+
+        response = self.client.get(PATIENTS_URL)
+
+        assert response.status_code == 200, response.content
+        returned_ids = {row["id"] for row in response.json()["results"]}
+        assert len(returned_ids) == 50
+        reads = AuditEvent.objects.filter(
+            action="read", tenant_id=self.tenant.id
+        )
+        assert reads.count() == 50
+        assert {event.entity_id for event in reads} == returned_ids
+
+    def test_verification_queue_writes_one_read_per_queued_patient(self):
+        """The queue hands a clerk full PHI rows, so each one is a read (AUD-001).
+
+        RED before this change: the queue emitted no read event. The
+        verified patient is not queued, not returned, and must not be
+        logged.
+        """
+        queued = [
+            Patient.objects.create(
+                tenant_id=self.tenant.id, uhid="UHID-QUEUE-1",
+                demographics={"name": "Pending", "gender": "F", "yearOfBirth": 1980},
+                verification_status="pending",
+            ),
+            Patient.objects.create(
+                tenant_id=self.tenant.id, uhid="UHID-QUEUE-2",
+                demographics={"name": "Ambiguous", "gender": "M", "yearOfBirth": 1981},
+                verification_status="ambiguous",
+            ),
+        ]
+        settled = Patient.objects.create(
+            tenant_id=self.tenant.id, uhid="UHID-QUEUE-3",
+            demographics={"name": "Verified", "gender": "F", "yearOfBirth": 1982},
+            verification_status="verified",
+        )
+
+        response = self.client.get(f"{PATIENTS_URL}verification_queue/")
+
+        assert response.status_code == 200, response.content
+        # The response stays the bare unpaginated work-queue list.
+        assert len(response.json()) == 2
+        reads = AuditEvent.objects.filter(
+            action="read", tenant_id=self.tenant.id
+        )
+        assert reads.count() == 2
+        assert {event.entity_id for event in reads} == {str(p.id) for p in queued}
+        assert not AuditEvent.objects.filter(
+            action="read", entity_id=str(settled.id)
+        ).exists()
+
+    def test_op_slip_writes_one_read_event_for_the_patient(self):
+        """The slip prints the patient's UHID and name, so it is a read (AUD-001).
+
+        RED before this change: the print payload carried PHI and wrote no
+        read event. The row must name the patient, not the encounter —
+        every other patient read lands under ``registry.patient``, so the
+        audit screen's one-entity-type filter keeps finding them all.
+        """
+        patient = Patient.objects.create(
+            tenant_id=self.tenant.id, uhid="UHID-SLIP-1",
+            demographics={"name": "Printed", "gender": "F", "yearOfBirth": 1985},
+        )
+        encounter = OPDEncounter.objects.create(
+            tenant_id=self.tenant.id,
+            patient_id=patient.id,
+            department_id=self.department.id,
+            visit_type="new",
+            registration_time=timezone.now(),
+        )
+
+        response = self.client.get(f"/api/v1/visits/{encounter.id}/op-slip/")
+
+        assert response.status_code == 200, response.content
+        reads = AuditEvent.objects.filter(
+            action="read", tenant_id=self.tenant.id
+        )
+        assert reads.count() == 1
+        event = reads.get()
+        assert event.entity_type == PATIENT_DB_TABLE
+        assert event.entity_id == str(patient.id)
+
+    def test_op_slip_logs_nothing_for_a_foreign_visit(self):
+        """A cross-tenant slip probe 404s and must leave no read row.
+
+        The tenant-scoped encounter lookup must fail before any read is
+        recorded: a read row naming another tenant's patient would itself
+        be a cross-tenant leak.
+        """
+        tenant_b, _, department_b = _make_context("Slip Hospital B")
+        patient_b = Patient.objects.create(
+            tenant_id=tenant_b.id, uhid="UHID-SLIP-B",
+            demographics={"name": "Foreign", "gender": "M", "yearOfBirth": 1986},
+        )
+        encounter_b = OPDEncounter.objects.create(
+            tenant_id=tenant_b.id,
+            patient_id=patient_b.id,
+            department_id=department_b.id,
+            visit_type="new",
+            registration_time=timezone.now(),
+        )
+
+        response = self.client.get(f"/api/v1/visits/{encounter_b.id}/op-slip/")
+
+        assert response.status_code == 404, response.content
+        assert AuditEvent.objects.filter(action="read").count() == 0
+
+    def test_list_read_never_lands_for_a_tenant_that_did_not_read(self):
+        """Tenant A's list cannot write a read row for tenant B (AUD-001).
+
+        The event's tenant comes from the requester's resolved context,
+        never from the rows read: billing tenant B for tenant A's reads
+        would both pollute B's trail and record patient ids A has no
+        right to name.
+        """
+        tenant_a, _, _ = _make_context("List Hospital A")
+        tenant_b, _, _ = _make_context("List Hospital B")
+        client_a, _ = _make_client(tenant_a, username="list-a")
+        mine = Patient.objects.create(
+            tenant_id=tenant_a.id, uhid="UHID-A-1",
+            demographics={"name": "Mine", "gender": "F", "yearOfBirth": 1980},
+        )
+        theirs = Patient.objects.create(
+            tenant_id=tenant_b.id, uhid="UHID-B-1",
+            demographics={"name": "Theirs", "gender": "M", "yearOfBirth": 1981},
+        )
+
+        response = client_a.get(PATIENTS_URL)
+
+        assert response.status_code == 200, response.content
+        assert {row["uhid"] for row in response.json()["results"]} == {"UHID-A-1"}
+        reads = AuditEvent.objects.filter(action="read")
+        assert reads.count() == 1
+        event = reads.get()
+        assert event.tenant_id == tenant_a.id
+        assert event.entity_id == str(mine.id)
+        assert not AuditEvent.objects.filter(
+            action="read", entity_id=str(theirs.id)
+        ).exists()
+
+    def test_audit_read_without_a_resolved_tenant_writes_nothing(self):
+        """The fail-closed guard: no tenant bound means no row, ever (AUD-001).
+
+        ``audit_read`` takes the tenant from the request rather than
+        binding one itself. A refactor that "fixed" the silent no-op by
+        writing the row anyway would mint an audit event no RLS policy
+        could read back and no tenant's trail would show — an unscoped
+        write. The request below is complete except for the tenant, so
+        only the guard can make this pass.
+        """
+        patient = Patient.objects.create(
+            tenant_id=self.tenant.id, uhid="UHID-UNBOUND-1",
+            demographics={"name": "Unbound", "gender": "F", "yearOfBirth": 1980},
+        )
+        request = APIRequestFactory().get("/")
+        request.user = AnonymousUser()
+
+        audit_read(patient, request)
+
+        assert AuditEvent.objects.count() == 0
 
     def test_read_event_carries_no_phi(self):
         """The read row is identifiers only — no name, ABHA or demographics.

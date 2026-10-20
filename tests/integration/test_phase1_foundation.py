@@ -536,9 +536,19 @@ class TestAuditLogAPI:
         assert len(response.data["results"]) == 1
 
     def test_audit_log_drill_down(self):
-        response = self.client.get("/api/v1/audit-log/?resource_type=Patient&resource_id=123")
+        # Seed rows the filter must exclude — a different entity type, and the
+        # same type under a different id — or one seeded row passes whether the
+        # filter works or not. (The old version also queried with
+        # `resource_type=`/`resource_id=` — params the view never reads — so
+        # the filter never ran at all.)
+        AuditEvent.objects.create(tenant_id=self.tenant.id, action="read",
+                                  entity_type="registry.qr_code", entity_id="Q-1")
+        AuditEvent.objects.create(tenant_id=self.tenant.id, action="update",
+                                  entity_type="Patient", entity_id="456")
+        response = self.client.get(
+            "/api/v1/audit-log/?entity_type=Patient&entity_id=123")
         assert response.status_code == status.HTTP_200_OK
-        assert len(response.data["results"]) == 1
+        assert [row["entity_id"] for row in response.data["results"]] == ["123"]
 
 
 @pytest.mark.django_db(transaction=True)

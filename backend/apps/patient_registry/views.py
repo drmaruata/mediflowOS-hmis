@@ -203,6 +203,27 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         audit_read(patient, request)
         return Response(self.get_serializer(patient).data)
 
+    def list(self, request, *args, **kwargs):
+        """Bulk patient list — every returned row is a PHI read (AUD-001).
+
+        The default paginated response shape is untouched: this is the
+        standard list with one read event per returned row added before
+        serialisation.
+        """
+        from apps.audit.services import audit_read
+
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        rows = list(page) if page is not None else list(queryset)
+        # Volume bounded by the page size, mirroring ``search``.
+        for patient in rows:
+            audit_read(patient, request)
+        if page is not None:
+            return self.get_paginated_response(
+                self.get_serializer(rows, many=True).data
+            )
+        return Response(self.get_serializer(rows, many=True).data)
+
     @action(detail=False, methods=["get"])
     def search(self, request):
         """UHID / name / mobile / ABHA / age lookup for the counter (REG-002).
@@ -376,11 +397,20 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         row). They share this queue with ``pending`` registrations because the
         work is the same — confirm identity — and a clerk resolving that scan
         must see it next to every other record awaiting verification.
+
+        Every queued row returned is a PHI read, so each lands an AUD-001 read
+        event; the volume is bounded by the queue length (a work queue,
+        expected small).
         """
+        from apps.audit.services import audit_read
+
         queryset = self.get_queryset().filter(
             verification_status__in=["pending", "ambiguous"]
         )
-        return Response(PatientSerializer(queryset, many=True).data)
+        rows = list(queryset)
+        for patient in rows:
+            audit_read(patient, request)
+        return Response(PatientSerializer(rows, many=True).data)
 
     # --- ABDM outbound ABHA actions (REG-009) ---------------------------
 
@@ -775,6 +805,12 @@ class OpSlipView(APIView):
             .order_by("-issued_at")
             .first()
         )
+
+        # AUD-001: log the patient, not the encounter — every other patient read
+        # lands under "registry.patient", so the audit screen filters one type.
+        from apps.audit.services import audit_read
+
+        audit_read(patient, request)
 
         demographics = patient.demographics or {}
         payload = {
