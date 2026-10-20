@@ -149,11 +149,14 @@ def verify_id_token(id_token: str) -> dict:
         raise jwt.InvalidTokenError("no key in the IdP's JWKS matches this token")
     try:
         key = jwt.PyJWK(jwk)
-    except (jwt.InvalidKeyError, KeyError) as error:
+    except (jwt.InvalidKeyError, jwt.PyJWKError, KeyError) as error:
         # A structurally broken JWK is the IdP's failure, not a bad token:
         # the installed PyJWT raises InvalidKeyError for the shapes it
-        # validates and a bare KeyError for a member from_jwk dereferences
-        # unguarded. ValueError is the shape the view maps to 503.
+        # validates, PyJWKError for an ``alg`` it has no key implementation
+        # for, and a bare KeyError for a member from_jwk dereferences
+        # unguarded — one left off this tuple escapes as a PyJWTError the
+        # view misreads as the caller's bad token. ValueError is the shape
+        # the view maps to 503.
         raise ValueError(str(error)) from error
     return jwt.decode(
         id_token,
@@ -213,7 +216,8 @@ def _resolve_user(claims, tenant):
             )
             raise _ExchangeRefused()
         try:
-            user = UserModel(username=sub, email=email)
+            # A squatted email poisons the email-matching leg for the real owner's later login.
+            user = UserModel(username=sub, email=email if claims.get("email_verified") else "")
             user.set_unusable_password()
             user.save()
             UserMembership.objects.create(

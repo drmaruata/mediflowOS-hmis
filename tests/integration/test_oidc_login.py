@@ -389,7 +389,10 @@ class TestJustInTimeProvisioning:
         self, configured, signing_key, tenant
     ):
         configured.OIDC_JIT_PROVISION = True
-        claims = {"sub": "idp-newcomer", "email": "newcomer@hospital.test"}
+        claims = {
+            "sub": "idp-newcomer", "email": "newcomer@hospital.test",
+            "email_verified": True,
+        }
 
         first = _post(_id_token(signing_key, claims))
 
@@ -407,6 +410,59 @@ class TestJustInTimeProvisioning:
         second = _post(_id_token(signing_key, claims))
         assert second.status_code == 200, second.content
         assert get_user_model().objects.filter(email="newcomer@hospital.test").count() == 1
+
+    def test_an_unverified_email_is_not_stored_on_the_provisioned_account(
+        self, configured, signing_key, tenant
+    ):
+        """The claimed address is stored only once the IdP attests it: an
+        unverified email belongs to whoever registered it at the IdP, and
+        storing it would squat an address this account does not own.
+        """
+        configured.OIDC_JIT_PROVISION = True
+
+        response = _post(_id_token(signing_key, {
+            "sub": "idp-squatter", "email": "victim@hospital.test",
+            "email_verified": False,
+        }))
+
+        assert response.status_code == 200, response.content
+        account = get_user_model().objects.get(username="idp-squatter")
+        assert account.email == ""
+
+    def test_an_unverified_squat_does_not_poison_the_owners_later_login(
+        self, configured, signing_key, tenant
+    ):
+        """The failure the empty store prevents: the squatted address is the
+        only mapping leg the real owner's later verified login has, so it
+        must resolve to the owner's own account — not find two matches and
+        refuse them both.
+        """
+        from apps.identity_tenancy.models import Role, UserMembership
+
+        configured.OIDC_JIT_PROVISION = True
+        owner = get_user_model().objects.create_user(
+            username="records-owner", password="pw-for-tests-only",
+            email="victim@hospital.test",
+        )
+        UserMembership.objects.create(
+            user=owner, tenant=tenant,
+            role=Role.objects.create(tenant=tenant, name="records"),
+            active=True,
+        )
+
+        squat = _post(_id_token(signing_key, {
+            "sub": "idp-squatter", "email": "victim@hospital.test",
+            "email_verified": False,
+        }))
+        assert squat.status_code == 200, squat.content
+
+        owner_login = _post(_id_token(signing_key, {
+            "sub": "idp-owner-sub", "email": "victim@hospital.test",
+            "email_verified": True,
+        }))
+
+        assert owner_login.status_code == 200, owner_login.content
+        assert owner_login.json()["role"] == "records"
 
     def test_a_privileged_role_named_for_sso_is_not_adopted(
         self, configured, signing_key, tenant
@@ -493,6 +549,29 @@ class TestHostileTokensAndKeySets:
             oidc, "fetch_jwks",
             lambda uri: {"keys": [{"kty": "RSA", "kid": KID, "alg": "RS256",
                                    "e": "AQAB"}]},
+        )
+        response = _post(_id_token(signing_key))
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == IDP_UNAVAILABLE_MESSAGE
+
+    def test_an_rsa_jwk_with_an_unknown_alg_is_the_idps_failure(
+        self, configured, monkeypatch, signing_key, tenant, clerk
+    ):
+        """``PyJWK.__init__`` raises ``PyJWKError`` — a ``PyJWTError``
+        sibling — for an ``alg`` it has no key implementation for, and that
+        sibling must not escape the conversion: the view would read the
+        IdP's broken key set as the caller's bad token (401).
+        """
+        from apps.identity_tenancy import oidc
+
+        numbers = signing_key.public_key().public_numbers()
+        monkeypatch.setattr(
+            oidc, "fetch_jwks",
+            lambda uri: {"keys": [{
+                "kty": "RSA", "kid": KID, "alg": "not-a-real-alg",
+                "n": _b64url_uint(numbers.n), "e": _b64url_uint(numbers.e),
+            }]},
         )
         response = _post(_id_token(signing_key))
 
