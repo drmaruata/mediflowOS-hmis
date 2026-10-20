@@ -71,12 +71,36 @@ export async function listMfaDevices(): Promise<MfaDevice[]> {
   return apiClient<MfaDevice[]>("/api/v1/mfa-devices/");
 }
 
+/** Confirm's response: the device is usable, and the current backend also
+ * completes the session by returning the pair. Older deployments minted no
+ * pair and answered with the status alone.
+ */
+export type ConfirmMfaDeviceResponse =
+  | { status: "confirmed" }
+  | { status: "confirmed"; access: string; refresh: string };
+
 export async function confirmMfaDevice(
   persistentId: string,
   token: string,
-): Promise<void> {
-  await apiClient<void>(`/api/v1/mfa-devices/${persistentId}/confirm/`, {
-    method: "POST",
-    body: JSON.stringify({ token }),
-  });
+): Promise<ConfirmMfaDeviceResponse> {
+  return apiClient<ConfirmMfaDeviceResponse>(
+    `/api/v1/mfa-devices/${persistentId}/confirm/`,
+    {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    },
+  );
+}
+
+export async function verifyMfaToken(token: string): Promise<TokenPair> {
+  return apiClient<TokenPair>(
+    "/api/v1/auth/mfa/verify/",
+    {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    },
+    // A token-lifecycle call: the response replaces both tokens, so a 401
+    // refresh-retry against it would recurse.
+    { skipRefresh: true },
+  );
 }

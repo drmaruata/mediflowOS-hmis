@@ -7,6 +7,7 @@ from . import views
 from .auth_views import (
     BreakGlassView,
     MeView,
+    MFAVerifyView,
     TOTPEnrolViewSet,
     TenantTokenObtainPairView,
 )
@@ -51,6 +52,7 @@ urlpatterns = [
     path("auth/oidc/", OIDCTokenExchangeView.as_view(), name="oidc-exchange"),
     path("auth/me/", MeView.as_view(), name="me"),
     path("auth/break-glass/", BreakGlassView.as_view(), name="break-glass"),
+    path("auth/mfa/verify/", MFAVerifyView.as_view(), name="mfa-verify"),
     path("mfa-devices/", _mfa_list, name="mfadevice-list"),
     re_path(r"^mfa-devices/(?P<persistent_id>.+)/confirm/$", _mfa_confirm, name="mfadevice-confirm"),
     re_path(r"^mfa-devices/(?P<persistent_id>.+)/$", _mfa_destroy, name="mfadevice-detail"),

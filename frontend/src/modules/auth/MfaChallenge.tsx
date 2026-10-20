@@ -1,9 +1,11 @@
 /**
- * MfaChallenge — second-factor confirmation for privileged roles (TEN-006, UI-001).
+ * MfaChallenge — second-factor challenge for privileged roles (TEN-006, UI-001).
  *
  * Rendered when the session reports requires_mfa && !mfa_verified: lists the
- * caller's pending authenticators, confirms one with a TOTP, then rotates the
- * access token and refetches the session so the MFA gate reopens to the shell.
+ * caller's authenticators, pending and confirmed. Confirming a pending device
+ * or verifying against a confirmed one both return a fresh pair carrying
+ * mfa_verified, so the store is swapped and the session refetched before the
+ * MFA gate reopens the shell.
  */
 
 import { useState } from "react";
@@ -23,13 +25,19 @@ import {
 import { ApiError } from "@/lib/apiClient";
 import { useSession } from "@/lib/session";
 import type { Session } from "@/lib/session";
-import { refreshSession } from "@/lib/tokenRefresh";
-import { confirmMfaDevice, listMfaDevices } from "./auth.api";
+import { useAuthStore } from "@/stores/authStore";
+import {
+  confirmMfaDevice,
+  listMfaDevices,
+  verifyMfaToken,
+} from "./auth.api";
+import type { ConfirmMfaDeviceResponse, MfaDevice, TokenPair } from "./auth.api";
 
 export default function MfaChallenge() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const session = useSession();
+  const setTokens = useAuthStore((s) => s.setTokens);
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [code, setCode] = useState("");
   const [unverifiable, setUnverifiable] = useState(false);
@@ -40,21 +48,35 @@ export default function MfaChallenge() {
     retry: false,
   });
 
-  const pending = (devicesQuery.data ?? []).filter(
-    (device) => !device.confirmed,
-  );
+  const devices = devicesQuery.data ?? [];
   const selected =
-    pending.find((device) => device.persistent_id === deviceId) ?? pending[0];
+    devices.find((device) => device.persistent_id === deviceId) ?? devices[0];
 
-  // Partial (UI-001): the backend cannot yet mint mfa_verified, so a still-unverified session after confirm stays here with an honest notice instead of navigating into the gate's redirect loop.
-  const confirmMutation = useMutation({
-    mutationFn: (input: { persistentId: string; token: string }) =>
-      confirmMfaDevice(input.persistentId, input.token),
-    onSuccess: async () => {
-      // Rotate so the new access token carries the second factor, then make
-      // the session current before navigating — the gate reads /auth/me/.
-      if (!(await refreshSession())) {
-        return; // session died mid-challenge; AuthGuard redirects to /login
+  // Regression guard (UI-001): if the minted pair somehow did not carry the
+  // claim — or an older backend minted none — a still-unverified session
+  // stays here with an honest notice instead of navigating into the gate's
+  // redirect loop.
+  const challengeMutation = useMutation({
+    mutationFn: async ({
+      device,
+      token,
+    }: {
+      device: MfaDevice;
+      token: string;
+    }): Promise<TokenPair | ConfirmMfaDeviceResponse> =>
+      // A pending device is confirmed (first enrolment); a confirmed one is
+      // verified (later sessions). Either way the backend completes the
+      // session in the same request.
+      device.confirmed
+        ? verifyMfaToken(token)
+        : confirmMfaDevice(device.persistent_id, token),
+    onSuccess: async (result) => {
+      const pair =
+        "access" in result && "refresh" in result
+          ? { access: result.access, refresh: result.refresh }
+          : null;
+      if (pair) {
+        setTokens(pair.access, pair.refresh);
       }
       await queryClient.refetchQueries({ queryKey: ["auth", "me"] });
       const me = queryClient.getQueryData<Session>(["auth", "me"]);
@@ -75,7 +97,7 @@ export default function MfaChallenge() {
   const onSubmit = (event: React.FormEvent) => {
     event.preventDefault();
     if (selected) {
-      confirmMutation.mutate({ persistentId: selected.persistent_id, token: code });
+      challengeMutation.mutate({ device: selected, token: code });
     }
   };
 
@@ -88,8 +110,8 @@ export default function MfaChallenge() {
             Two-factor authentication
           </h1>
           <CardDescription>
-            Your role requires a second factor. Confirm your authenticator to
-            continue.
+            Your role requires a second factor. Enter a code from your
+            authenticator to continue.
           </CardDescription>
         </CardHeader>
 
@@ -109,7 +131,7 @@ export default function MfaChallenge() {
               Couldn't load your authenticators. Refresh the page and try
               again.
             </p>
-          ) : pending.length === 0 ? (
+          ) : devices.length === 0 ? (
             <p className="text-sm text-muted-foreground">
               No pending authenticator is registered for your account. Ask
               your administrator to enrol one.
@@ -117,8 +139,8 @@ export default function MfaChallenge() {
           ) : (
             <form onSubmit={onSubmit} noValidate className="flex flex-col gap-4">
               <fieldset className="flex flex-col gap-2">
-                <legend className="sr-only">Pending authenticators</legend>
-                {pending.map((device) => (
+                <legend className="sr-only">Your authenticators</legend>
+                {devices.map((device) => (
                   <label
                     key={device.persistent_id}
                     className="flex items-center gap-2 rounded-md border px-3 py-2 text-sm text-foreground"
@@ -145,15 +167,15 @@ export default function MfaChallenge() {
                   placeholder="6-digit code"
                   value={code}
                   onChange={(event) => setCode(event.target.value)}
-                  aria-invalid={confirmMutation.isError || undefined}
+                  aria-invalid={challengeMutation.isError || undefined}
                   autoFocus
                 />
               </div>
 
-              {confirmMutation.isError && (
+              {challengeMutation.isError && (
                 <p role="alert" className="text-sm text-destructive">
-                  {confirmMutation.error instanceof ApiError &&
-                  confirmMutation.error.status === 429
+                  {challengeMutation.error instanceof ApiError &&
+                  challengeMutation.error.status === 429
                     ? "Too many attempts. Wait a minute and try again."
                     : "That code didn't match. Check your authenticator and try again."}
                 </p>
@@ -162,9 +184,11 @@ export default function MfaChallenge() {
               <Button
                 type="submit"
                 className="h-11 w-full text-sm font-semibold"
-                disabled={!selected || code.trim() === "" || confirmMutation.isPending}
+                disabled={
+                  !selected || code.trim() === "" || challengeMutation.isPending
+                }
               >
-                {confirmMutation.isPending ? (
+                {challengeMutation.isPending ? (
                   <>
                     <Loader2 className="size-4 animate-spin" aria-hidden="true" />
                     Verifying…

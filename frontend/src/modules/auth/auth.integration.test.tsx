@@ -39,6 +39,12 @@ const PENDING_DEVICE = {
   config_url: "otpauth://totp/Mediflow:clerk-a?secret=ABC",
 };
 
+const CONFIRMED_DEVICE = {
+  ...PENDING_DEVICE,
+  persistent_id: "otp_totp.dev-2",
+  confirmed: true,
+};
+
 interface RecordedCall {
   url: string;
   body: string | null;
@@ -173,7 +179,7 @@ describe("authentication shell", () => {
     expect(screen.queryByText(/Welcome back/)).not.toBeInTheDocument();
   });
 
-  it("confirms the device, rotates the token and lands on the dashboard", async () => {
+  it("confirms the device, stores the minted pair and lands on the dashboard", async () => {
     useAuthStore.setState({
       accessToken: "access-1",
       refreshToken: "refresh-1",
@@ -189,9 +195,8 @@ describe("authentication shell", () => {
           mfa_verified: meCalls > 1,
         });
       }
-      if (url.endsWith("/confirm/")) return ok({ status: "confirmed" });
-      if (url.endsWith("/auth/token/refresh/")) {
-        return ok({ access: "access-2", refresh: "refresh-2" });
+      if (url.endsWith("/confirm/")) {
+        return ok({ status: "confirmed", access: "access-2", refresh: "refresh-2" });
       }
       if (url.endsWith("/mfa-devices/")) return ok([PENDING_DEVICE]);
       if (url.endsWith("/health/")) return ok({ status: "ok" });
@@ -212,12 +217,85 @@ describe("authentication shell", () => {
     expect(calls.find((call) => call.url.endsWith("/confirm/"))?.body).toBe(
       JSON.stringify({ token: "123456" }),
     );
+    // Confirm completes the session in one request: the response carries the
+    // pair, so no separate rotation is made.
     expect(
-      calls.find((call) => call.url.endsWith("/auth/token/refresh/"))?.body,
-    ).toBe(JSON.stringify({ refresh: "refresh-1" }));
+      calls.find((call) => call.url.endsWith("/auth/token/refresh/")),
+    ).toBeUndefined();
     expect(
       screen.queryByLabelText(/email.*user id/i),
     ).not.toBeInTheDocument();
+  });
+
+  it("verifies against a confirmed device, stores the pair and lands on the dashboard", async () => {
+    useAuthStore.setState({
+      accessToken: "access-1",
+      refreshToken: "refresh-1",
+      isAuthenticated: true,
+    });
+    let meCalls = 0;
+    const calls = stubFetch((url) => {
+      if (url.endsWith("/auth/me/")) {
+        meCalls += 1;
+        return ok({
+          ...SESSION,
+          requires_mfa: true,
+          mfa_verified: meCalls > 1,
+        });
+      }
+      if (url.endsWith("/auth/mfa/verify/")) {
+        return ok({ access: "access-2", refresh: "refresh-2" });
+      }
+      if (url.endsWith("/mfa-devices/")) return ok([CONFIRMED_DEVICE]);
+      if (url.endsWith("/health/")) return ok({ status: "ok" });
+      return ok({});
+    });
+
+    render(<App />);
+
+    const code = await screen.findByLabelText(/authenticator code/i);
+    await userEvent.type(code, "654321");
+    await userEvent.click(
+      screen.getByRole("button", { name: /verify and continue/i }),
+    );
+
+    expect(await screen.findByText(/Welcome back/)).toBeInTheDocument();
+    expect(useAuthStore.getState().accessToken).toBe("access-2");
+    expect(useAuthStore.getState().refreshToken).toBe("refresh-2");
+    expect(
+      calls.find((call) => call.url.endsWith("/auth/mfa/verify/"))?.body,
+    ).toBe(JSON.stringify({ token: "654321" }));
+  });
+
+  it("keeps the user on the challenge when the code is wrong", async () => {
+    useAuthStore.setState({
+      accessToken: "access-1",
+      refreshToken: "refresh-1",
+      isAuthenticated: true,
+    });
+    stubFetch((url) => {
+      if (url.endsWith("/auth/me/")) {
+        return ok({ ...SESSION, requires_mfa: true, mfa_verified: false });
+      }
+      if (url.endsWith("/auth/mfa/verify/")) {
+        return jsonResponse(400, { token: "Invalid token." });
+      }
+      if (url.endsWith("/mfa-devices/")) return ok([CONFIRMED_DEVICE]);
+      return ok({});
+    });
+
+    render(<App />);
+
+    const code = await screen.findByLabelText(/authenticator code/i);
+    await userEvent.type(code, "000000");
+    await userEvent.click(
+      screen.getByRole("button", { name: /verify and continue/i }),
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /didn't match/i,
+    );
+    expect(window.location.pathname).toBe("/mfa");
   });
 
   it("keeps the user on the challenge with an honest notice when the session still cannot be verified", async () => {

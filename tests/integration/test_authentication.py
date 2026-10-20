@@ -108,6 +108,25 @@ def _authed(username, tenants_header=None):
     return client
 
 
+def _totp_code(device):
+    """The device's current valid code, the way an authenticator app computes it.
+
+    django-otp's own TOTP helper rather than a hand-rolled one — the technique
+    ``test_confirm_with_a_real_token_marks_the_device_usable`` established.
+    """
+    from django_otp.oath import TOTP
+
+    return TOTP(device.bin_key, device.step, device.t0, device.digits, device.drift).token()
+
+
+def _confirmed_device(user):
+    """A confirmed TOTP device for ``user``, plus a code that verifies right now."""
+    from django_otp.plugins.otp_totp.models import TOTPDevice
+
+    device = TOTPDevice.objects.create(user=user, name="Authenticator", confirmed=True)
+    return device, _totp_code(device)
+
+
 class TestTokenIssuance:
     def test_token_carries_tenant_role_and_permissions(self, users):
         client = APIClient()
@@ -165,8 +184,8 @@ class TestTokenIssuance:
         assert unverified["requires_mfa"] is True
         assert unverified["mfa_verified"] is False
 
-        # The verified half mirrors the token the planned MFA-verify endpoint
-        # will mint, the same way TestMfaEnforcement mints it.
+        # The verified half mirrors the token POST /auth/mfa/verify/ mints, the
+        # same way TestMfaEnforcement mints it.
         refresh = TenantAwareTokenSerializer.get_token(users["admin"])
         refresh["mfa_verified"] = True
         client = APIClient()
@@ -290,6 +309,222 @@ class TestSecondFactor:
         totp_device.refresh_from_db()
         assert totp_device.confirmed is True
 
+    def test_confirm_completes_the_session(self, users):
+        """Confirm mints the verified pair in the same request (TEN-006).
+
+        One TOTP presentation proves both possession of the device and the
+        second factor, so the session completes here instead of the client
+        re-presenting the same code to verify — the library's timestep replay
+        protection (``verify_token`` demands a step above ``last_t``) would
+        refuse that second presentation.
+        """
+        from django_otp.plugins.otp_totp.models import TOTPDevice
+
+        client = _authed("admin-a")
+        device = client.post(
+            "/api/v1/mfa-devices/", {"name": "Authenticator"}, format="json"
+        ).json()
+        totp_device = TOTPDevice.objects.get(
+            name="Authenticator", user__username="admin-a"
+        )
+
+        response = client.post(
+            f"/api/v1/mfa-devices/{device['persistent_id']}/confirm/",
+            {"token": _totp_code(totp_device)},
+            format="json",
+        )
+
+        assert response.status_code == 200, response.content
+        body = response.json()
+        assert body["status"] == "confirmed"
+        claims = AccessToken(body["access"]).payload
+        assert claims["mfa_verified"] is True
+        assert claims["tenant_id"] == str(TENANT_A)
+        assert claims["role"] == "tenant-admin"
+
+    def test_confirm_refuses_a_deactivated_membership(self, users):
+        """Confirm mints a pair now, so it must refuse an offboarded membership
+        like every other issuance path (TEN-008) — and must not half-confirm
+        the device on the way out.
+        """
+        from django_otp.plugins.otp_totp.models import TOTPDevice
+
+        from apps.identity_tenancy.models import UserMembership
+
+        client = _authed("admin-a")
+        device = client.post(
+            "/api/v1/mfa-devices/", {"name": "Authenticator"}, format="json"
+        ).json()
+        totp_device = TOTPDevice.objects.get(
+            name="Authenticator", user__username="admin-a"
+        )
+        UserMembership.objects.filter(user=users["admin"]).update(active=False)
+
+        response = client.post(
+            f"/api/v1/mfa-devices/{device['persistent_id']}/confirm/",
+            {"token": _totp_code(totp_device)},
+            format="json",
+        )
+
+        assert response.status_code == 401, response.content
+        assert "deactivated" in response.json()["detail"]
+        totp_device.refresh_from_db()
+        assert totp_device.confirmed is False
+
+
+class TestMfaVerify:
+    """POST /auth/mfa/verify/ — the missing half of TEN-006.
+
+    Enrolment's confirm flips a device usable but authenticates nothing, so a
+    privileged caller could never obtain a token the MFA gate accepts. Verify
+    checks a code against a confirmed device and mints a fresh pair in the
+    same request, the claim riding the refresh token so later rotations keep
+    it — the reversion trap a verify that minted only an access token would
+    fall into, since rotation copies claims from the login-time refresh token.
+    """
+
+    def test_verify_mints_a_pair_carrying_the_verified_claim(self, users):
+        """A valid code returns a pair whose access carries the claim.
+
+        The caller's login token is asserted first: requires_mfa true and
+        mfa_verified false is exactly the caller MFARequiredIfConfigured
+        denies, so the 200 below is also the permission opt-out pin — the
+        endpoint must stay reachable by the unverified privileged user who
+        needs it, the deliberate default replacement TOTPEnrolViewSet makes.
+        """
+        client = APIClient()
+        access = _token(client, "admin-a")
+        payload = AccessToken(access).payload
+        assert payload["requires_mfa"] is True
+        assert payload["mfa_verified"] is False
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+
+        device, code = _confirmed_device(users["admin"])
+        response = client.post(
+            "/api/v1/auth/mfa/verify/", {"token": code}, format="json"
+        )
+
+        assert response.status_code == 200, response.content
+        body = response.json()
+        assert set(body) == {"access", "refresh"}
+        claims = AccessToken(body["access"]).payload
+        assert claims["mfa_verified"] is True
+        assert claims["tenant_id"] == str(TENANT_A)
+        assert claims["role"] == "tenant-admin"
+
+    def test_the_verified_claim_survives_refresh_rotation(self, users):
+        """The returned REFRESH mints verified access tokens after rotation.
+
+        This is the design's whole point: rotation copies claims from the
+        refresh token presented to it, and the login-time refresh token never
+        saw the second factor. A pair whose refresh half carries the claim is
+        the only shape that does not revert to unverified on the next refresh.
+        """
+        client = _authed("admin-a")
+        device, code = _confirmed_device(users["admin"])
+        pair = client.post(
+            "/api/v1/auth/mfa/verify/", {"token": code}, format="json"
+        ).json()
+
+        refreshed = APIClient().post(
+            "/api/v1/auth/token/refresh/", {"refresh": pair["refresh"]}, format="json"
+        )
+
+        assert refreshed.status_code == 200, refreshed.content
+        rotated = AccessToken(refreshed.json()["access"]).payload
+        assert rotated["mfa_verified"] is True
+        assert rotated["tenant_id"] == str(TENANT_A)
+
+    def test_wrong_code_is_rejected(self, users):
+        client = _authed("admin-a")
+        _confirmed_device(users["admin"])
+
+        response = client.post(
+            "/api/v1/auth/mfa/verify/", {"token": "000000"}, format="json"
+        )
+
+        assert response.status_code == 400
+        assert response.json()["token"] == "Invalid token."
+
+    def test_repeated_failures_are_throttled(self, users):
+        """The device model's own throttling answers 429 — fail closed, so
+        even a valid code is refused inside the backoff window."""
+        client = _authed("admin-a")
+        device, code = _confirmed_device(users["admin"])
+
+        first = client.post(
+            "/api/v1/auth/mfa/verify/", {"token": "000000"}, format="json"
+        )
+        assert first.status_code == 400
+
+        second = client.post(
+            "/api/v1/auth/mfa/verify/", {"token": code}, format="json"
+        )
+        assert second.status_code == 429
+        assert second.json()["detail"] == "Too many attempts. Try again later."
+
+    def test_without_a_confirmed_device_verify_refuses(self, users):
+        """403 with a stable message, and not the mfa_required code — the
+        caller is told to enrol, not to keep guessing."""
+        from django_otp.plugins.otp_totp.models import TOTPDevice
+
+        client = _authed("admin-a")
+        TOTPDevice.objects.create(
+            user=users["admin"], name="Authenticator", confirmed=False
+        )
+
+        response = client.post(
+            "/api/v1/auth/mfa/verify/", {"token": "123456"}, format="json"
+        )
+
+        assert response.status_code == 403, response.content
+        assert response.json()["detail"] == (
+            "No confirmed authenticator is registered for your account. "
+            "Enrol one at /api/v1/mfa-devices/ and confirm it."
+        )
+
+    def test_verify_requires_authentication(self, users):
+        assert (
+            APIClient()
+            .post("/api/v1/auth/mfa/verify/", {"token": "123456"}, format="json")
+            .status_code
+            == 401
+        )
+
+    def test_verify_reopens_the_privileged_endpoints(self, users):
+        """The end-to-end enforcement pin: the login-time token is still
+        denied by MFARequiredIfConfigured while the pair verify mints is not."""
+        client = APIClient()
+        access = _token(client, "admin-a")
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {access}")
+        denied = client.get("/api/v1/patients/")
+        assert denied.status_code == 403
+        assert denied.json()["code"] == "mfa_required"
+
+        device, code = _confirmed_device(users["admin"])
+        pair = client.post(
+            "/api/v1/auth/mfa/verify/", {"token": code}, format="json"
+        ).json()
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {pair['access']}")
+
+        allowed = client.get("/api/v1/patients/")
+        assert allowed.status_code == 200, allowed.content
+
+    def test_deactivated_membership_cannot_verify(self, users):
+        """An offboarded caller must not re-mint through verify (TEN-008)."""
+        from apps.identity_tenancy.models import UserMembership
+
+        client = _authed("admin-a")
+        device, code = _confirmed_device(users["admin"])
+        UserMembership.objects.filter(user=users["admin"]).update(active=False)
+
+        response = client.post(
+            "/api/v1/auth/mfa/verify/", {"token": code}, format="json"
+        )
+
+        assert response.status_code == 401, response.content
+        assert "deactivated" in response.json()["detail"]
+
 
 class TestBreakGlass:
     def test_requires_break_glass_permission(self, users):
@@ -378,11 +613,12 @@ class TestBreakGlassAuditAndRevocation:
     def _admin_access(self, users):
         """An admin-a access token that satisfies the break-glass gates.
 
-        The tenant-admin role demands MFA, and this backend has no verify
-        endpoint yet, so the ``mfa_verified`` claim is flagged on the issued
-        token exactly the way ``test_mfa_verified_claim_unblocks_access``
-        does — the token that a verify endpoint will mint. The permission
-        claim comes from the role row, unchanged.
+        The tenant-admin role demands MFA, so the ``mfa_verified`` claim is
+        flagged on the issued token exactly the way
+        ``test_mfa_verified_claim_unblocks_access`` does — the same claim
+        ``POST /auth/mfa/verify/`` mints. Setting it directly keeps this pin
+        independent of the verify endpoint. The permission claim comes from
+        the role row, unchanged.
         """
         from apps.identity_tenancy.tokens import TenantAwareTokenSerializer
 
@@ -766,11 +1002,12 @@ class TestMfaEnforcement:
     def test_mfa_verified_claim_unblocks_access(self, users):
         """The other half of the gate: a token that proves the factor passes.
 
-        The claim is set by hand because the backend has no MFA-verify
-        endpoint yet (``POST /auth/mfa/verify`` in the UI spec) — this is
-        exactly the token that endpoint will mint, and it pins that the
+        The claim is set by hand rather than obtained from
+        ``POST /auth/mfa/verify/`` so this pin exercises the permission alone,
+        in isolation from the endpoint's availability — it pins that the
         permission denies only when ``mfa_verified`` is absent, not for every
-        ``requires_mfa`` role.
+        ``requires_mfa`` role. ``TestMfaVerify`` pins the endpoint's own
+        minting.
         """
         from apps.identity_tenancy.tokens import TenantAwareTokenSerializer
 

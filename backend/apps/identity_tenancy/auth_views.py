@@ -22,6 +22,7 @@ from .tokens import (
     ROLE_CLAIM,
     TenantAwareTokenSerializer,
     active_membership,
+    refuse_deactivated_membership,
 )
 
 BREAK_GLASS_REASON_HEADER = "X-Break-Glass-Reason"
@@ -231,6 +232,91 @@ class BreakGlassView(APIView):
         )
 
 
+@extend_schema(tags=["auth"])
+class MFAVerifyView(APIView):
+    """Verifies a TOTP against a confirmed device and completes the session (TEN-006).
+
+    The other half of enrolment: ``confirm`` flips a device usable but
+    authenticates nothing, so a privileged caller could never hold a token the
+    MFA gate accepts. ``permission_classes`` is declared explicitly because a
+    view that does so replaces the project defaults wholesale — dropping
+    ``MFARequiredIfConfigured`` on purpose, the same deliberate opt-out
+    ``TOTPEnrolViewSet`` makes: the caller this view exists for is by
+    definition unverified, and must be able to reach it in order to verify.
+
+    The pair is minted in the same request as the verification because
+    rotation copies claims from the refresh token presented to it: a response
+    carrying only an access token would revert to unverified at the next
+    refresh.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        request=inline_serializer(
+            "MFAVerifyRequest",
+            fields={"token": serializers.CharField()},
+        ),
+        responses={200: inline_serializer(
+            "MFAVerifyResponse",
+            fields={
+                "access": serializers.CharField(),
+                "refresh": serializers.CharField(),
+            },
+        )},
+    )
+    def post(self, request):
+        from django_otp import devices_for_user, login
+
+        # Coerced to text because a client may legitimately send the code as a
+        # JSON number, and ``.strip()`` on an int raises. An authenticator app
+        # shows six digits, which encourages exactly that mistake.
+        raw = request.data.get("token")
+        token = str(raw).strip() if raw is not None else ""
+        if not token:
+            raise serializers.ValidationError({"token": "This field is required."})
+
+        # Both other issuance paths refuse an offboarded membership (TEN-008);
+        # a verify that re-minted tokens for a deactivated account would
+        # defeat deactivation for a session already in progress.
+        refuse_deactivated_membership(request.user)
+
+        devices = list(devices_for_user(request.user, confirmed=True))
+        if not devices:
+            return Response(
+                {
+                    "detail": (
+                        "No confirmed authenticator is registered for your account. "
+                        "Enrol one at /api/v1/mfa-devices/ and confirm it."
+                    )
+                },
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        for device in devices:
+            # verify_is_allowed applies the library's attempt throttling, so a
+            # brute force against a 6-digit code is rate limited. It fires even
+            # for a correct code, which is the fail-closed direction.
+            allowed, _detail = device.verify_is_allowed()
+            if not allowed:
+                return Response(
+                    {"detail": "Too many attempts. Try again later."},
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                )
+            if device.verify_token(token):
+                # login attaches the verified device to request.user, which is
+                # what get_token reads to write the claim; the session row the
+                # library also writes is incidental — enforcement reads the
+                # signed token, never the session.
+                login(request, device)
+                refresh = TenantAwareTokenSerializer.get_token(request.user)
+                return Response(
+                    {"access": str(refresh.access_token), "refresh": str(refresh)}
+                )
+
+        raise serializers.ValidationError({"token": "Invalid token."})
+
+
 class TOTPEnrolViewSet(viewsets.ViewSet):
     """Second-factor enrolment for privileged roles (TEN-006).
 
@@ -288,9 +374,23 @@ class TOTPEnrolViewSet(viewsets.ViewSet):
             status=status.HTTP_201_CREATED,
         )
 
+    @extend_schema(
+        request=inline_serializer(
+            "TOTPConfirmRequest",
+            fields={"token": serializers.CharField()},
+        ),
+        responses={200: inline_serializer(
+            "TOTPConfirmResponse",
+            fields={
+                "status": serializers.CharField(),
+                "access": serializers.CharField(),
+                "refresh": serializers.CharField(),
+            },
+        )},
+    )
     def confirm(self, request, persistent_id=None):
-        """Verify a token from the new device and mark it usable."""
-        from django_otp import devices_for_user
+        """Verify a token from the new device, mark it usable, complete the session."""
+        from django_otp import devices_for_user, login
 
         # Coerced to text because a client may legitimately send the code as a JSON
         # number, and ``.strip()`` on an int raises. An authenticator app shows
@@ -299,6 +399,10 @@ class TOTPEnrolViewSet(viewsets.ViewSet):
         token = str(raw).strip() if raw is not None else ""
         if not token:
             raise serializers.ValidationError({"token": "This field is required."})
+
+        # Confirm mints a pair now, so it refuses an offboarded membership like
+        # every other issuance path (TEN-008).
+        refuse_deactivated_membership(request.user)
 
         for device in devices_for_user(request.user, confirmed=False):
             if device.persistent_id != persistent_id:
@@ -315,7 +419,19 @@ class TOTPEnrolViewSet(viewsets.ViewSet):
                 raise serializers.ValidationError({"token": "Invalid token."})
             device.confirmed = True
             device.save(update_fields=["confirmed"])
-            return Response({"status": "confirmed"})
+            # One TOTP presentation proves possession AND the second factor; a
+            # second verify with the same code would hit the library's timestep
+            # replay protection (verify_token demands a step above last_t), so
+            # the session completes here.
+            login(request, device)
+            refresh = TenantAwareTokenSerializer.get_token(request.user)
+            return Response(
+                {
+                    "status": "confirmed",
+                    "access": str(refresh.access_token),
+                    "refresh": str(refresh),
+                }
+            )
 
         return Response(
             {"detail": "No pending device with that id."},
