@@ -41,12 +41,12 @@ the frontend, so Modelled/API/RLS read `no` for them by construction.
 | OPD | opd | R2 | `8` | yes | yes | `16` | yes |
 | OT | ot | R5 | `4` | yes | yes | `13` | yes |
 | PHM | pharmacy | R4 | `6` | yes | yes | `1` | yes |
-| PLT | platform | R1 | `8` | yes | yes | `18` | yes |
+| PLT | platform | R1 | `8` | yes | yes | `24` | yes |
 | QOS | quality_os | R3 | `48` | yes | yes | `35` | yes |
 | REG | patient_registry | R1 | `13` | yes | yes | `31` | yes |
 | RIS | ris | R4 | `4` | yes | yes | `6` | yes |
-| SET | identity_tenancy | R1 | `13` | yes | yes | `82` | yes |
-| TEN | identity_tenancy | R1 | `11` | yes | yes | `82` | yes |
+| SET | identity_tenancy | R1 | `13` | yes | yes | `84` | yes |
+| TEN | identity_tenancy | R1 | `11` | yes | yes | `84` | yes |
 | UI | - | - | `7` | no | no | `0` | no |
 
 ### What these numbers do and do not mean
@@ -67,7 +67,6 @@ this file is regenerated):
 - **QOS-001** (not implemented) - indicator catalogue exists in docs/ but no loader has been written; the 406 records are not in the database
 - **REG-009** (deferred) - the outbound ABDM sandbox ABHA adapter shipped (create/verify actions on the patient endpoint, `apps/abdm_gateway/client.py`, 503 `ABDM_SANDBOX_UNCONFIGURED` fail-closed path, env + IntegrationAdapter base-URL resolution) but the official sandbox create/verify spec (endpoint paths, payloads, OTP flow) is unresolved — the enrollment paths are patterned on the community-mirrored sandbox v1 spec and must be re-verified before production
 - **TEN-004** (partial) - RequirePermission reads the token's `permissions` claim and gates the role/membership writes, tenant CRUD and the quality catalogue, RoleSerializer rejects `platform.` codes on tenant-scoped roles at the write path (platform scope = Role.tenant is None; token-level scope binding deferred), and role/membership/scheduled-job querysets are tenant-scoped — but most endpoints still authorise by authentication alone, and facility/department-scoped permissions (TEN-005) are unimplemented
-- **TEN-006** (partial) - TOTP enrol/confirm works and MFARequiredIfConfigured is installed after IsAuthenticated in DEFAULT_PERMISSION_CLASSES, with the token carrying `requires_mfa`/`mfa_verified` claims — but no POST /auth/mfa/verify endpoint exists, so mfa_verified can never become True after login and require_mfa roles are denied every default-permission endpoint (fail-closed)
 
 ## Per-requirement detail
 

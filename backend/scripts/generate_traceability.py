@@ -87,15 +87,6 @@ KNOWN_GAPS = {
         "by authentication alone, and facility/department-scoped "
         "permissions (TEN-005) are unimplemented",
     ),
-    "TEN-006": (
-        "partial",
-        "TOTP enrol/confirm works and MFARequiredIfConfigured is installed "
-        "after IsAuthenticated in DEFAULT_PERMISSION_CLASSES, with the token "
-        "carrying `requires_mfa`/`mfa_verified` claims — but no POST "
-        "/auth/mfa/verify endpoint exists, so mfa_verified can never become "
-        "True after login and require_mfa roles are denied every "
-        "default-permission endpoint (fail-closed)",
-    ),
     # Task 21 deleted AUD-002: the chain is now real — every writer routes
     # through `apps/audit/services.append_event`, `hash_chain` is an
     # HMAC-SHA256 over the tenant's previous hash and the canonical field set,
@@ -110,6 +101,10 @@ KNOWN_GAPS = {
     # not yet cover is the *engines* behind the job types — the indicator and
     # report generators are post-R1 — which is a different requirement (QOS)
     # than running background jobs reliably.
+    # Task 30 deleted TEN-006: POST /auth/mfa/verify/ exists and TOTP
+    # confirm completes the session, so mfa_verified becomes true after
+    # login and persists across refresh rotations — require_mfa roles
+    # reach default-permission endpoints with a verified pair.
     "QOS-001": (
         "**not implemented**",
         "indicator catalogue exists in docs/ but no loader has been written; "
