@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/card";
 import { ApiError } from "@/lib/apiClient";
 import { useSession } from "@/lib/session";
+import type { Session } from "@/lib/session";
 import { refreshSession } from "@/lib/tokenRefresh";
 import { confirmMfaDevice, listMfaDevices } from "./auth.api";
 
@@ -31,6 +32,7 @@ export default function MfaChallenge() {
   const session = useSession();
   const [deviceId, setDeviceId] = useState<string | null>(null);
   const [code, setCode] = useState("");
+  const [unverifiable, setUnverifiable] = useState(false);
 
   const devicesQuery = useQuery({
     queryKey: ["auth", "mfa-devices"],
@@ -44,6 +46,7 @@ export default function MfaChallenge() {
   const selected =
     pending.find((device) => device.persistent_id === deviceId) ?? pending[0];
 
+  // Partial (UI-001): the backend cannot yet mint mfa_verified, so a still-unverified session after confirm stays here with an honest notice instead of navigating into the gate's redirect loop.
   const confirmMutation = useMutation({
     mutationFn: (input: { persistentId: string; token: string }) =>
       confirmMfaDevice(input.persistentId, input.token),
@@ -54,6 +57,11 @@ export default function MfaChallenge() {
         return; // session died mid-challenge; AuthGuard redirects to /login
       }
       await queryClient.refetchQueries({ queryKey: ["auth", "me"] });
+      const me = queryClient.getQueryData<Session>(["auth", "me"]);
+      if (me?.requires_mfa && !me.mfa_verified) {
+        setUnverifiable(true);
+        return;
+      }
       await queryClient.invalidateQueries({ queryKey: ["auth", "mfa-devices"] });
       void navigate("/", { replace: true });
     },
@@ -86,7 +94,13 @@ export default function MfaChallenge() {
         </CardHeader>
 
         <CardContent>
-          {devicesQuery.isPending ? (
+          {unverifiable ? (
+            <p role="status" className="text-sm text-muted-foreground">
+              Authenticator confirmed. This deployment cannot yet issue a
+              verified session — sign out and try again later, or contact
+              your administrator.
+            </p>
+          ) : devicesQuery.isPending ? (
             <p className="text-sm text-muted-foreground">
               Loading your devices…
             </p>

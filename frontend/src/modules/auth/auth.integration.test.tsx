@@ -19,7 +19,9 @@ const jsonResponse = (status: number, body: unknown): Response =>
     headers: { "Content-Type": "application/json" },
   });
 
-const ok = (body: unknown): Response => jsonResponse(200, body);const SESSION = {
+const ok = (body: unknown): Response => jsonResponse(200, body);
+
+const SESSION = {
   username: "clerk-a",
   tenant_id: "aaaaaaaa-0000-0000-0000-0000000000a1",
   facility_id: null,
@@ -215,6 +217,51 @@ describe("authentication shell", () => {
     ).toBe(JSON.stringify({ refresh: "refresh-1" }));
     expect(
       screen.queryByLabelText(/email.*user id/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps the user on the challenge with an honest notice when the session still cannot be verified", async () => {
+    useAuthStore.setState({
+      accessToken: "access-1",
+      refreshToken: "refresh-1",
+      isAuthenticated: true,
+    });
+    let confirmed = false;
+    stubFetch((url) => {
+      if (url.endsWith("/auth/me/")) {
+        return ok({ ...SESSION, requires_mfa: true, mfa_verified: false });
+      }
+      if (url.endsWith("/confirm/")) {
+        confirmed = true;
+        return ok({ status: "confirmed" });
+      }
+      if (url.endsWith("/auth/token/refresh/")) {
+        return ok({ access: "access-2", refresh: "refresh-2" });
+      }
+      if (url.endsWith("/mfa-devices/")) {
+        // TOTPEnrolViewSet.confirm flips device.confirmed, so the
+        // post-confirm list holds nothing pending — the honest panel must
+        // win over the "No pending authenticator" dead end.
+        return ok([{ ...PENDING_DEVICE, confirmed }]);
+      }
+      return ok({});
+    });
+
+    render(<App />);
+
+    const code = await screen.findByLabelText(/authenticator code/i);
+    await userEvent.type(code, "123456");
+    await userEvent.click(
+      screen.getByRole("button", { name: /verify and continue/i }),
+    );
+
+    const panel = await screen.findByRole("status");
+    expect(panel).toHaveTextContent(
+      "Authenticator confirmed. This deployment cannot yet issue a verified session — sign out and try again later, or contact your administrator.",
+    );
+    expect(window.location.pathname).toBe("/mfa");
+    expect(
+      screen.queryByText(/No pending authenticator/i),
     ).not.toBeInTheDocument();
   });
 });
