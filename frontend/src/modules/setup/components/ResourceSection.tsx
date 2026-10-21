@@ -8,6 +8,9 @@
  * A plain semantic <table> (the doc's Table component is not vendored):
  * caption names the table for role-based queries, th scope=col, and the
  * loading/empty states are explicit text — never a silently blank area.
+ * The list endpoints paginate at the backend's fixed page size, so when the
+ * tenant-wide `count` exceeds the rendered rows a visible caption states the
+ * truncation — a short table must never masquerade as the whole list.
  */
 
 import type { ReactNode } from "react";
@@ -25,6 +28,8 @@ interface ResourceSectionProps<T> {
   columns: Array<Column<T>>;
   rowKey: (row: T) => string;
   emptyText: string;
+  /** Tenant-wide total from the paginated `count`; the caption renders only when it exceeds the rows shown. */
+  totalCount?: number | null;
   /** The step's add-form (fields + its own submit button + error alert). */
   children?: ReactNode;
 }
@@ -36,8 +41,11 @@ export function ResourceSection<T>({
   columns,
   rowKey,
   emptyText,
+  totalCount,
   children,
 }: ResourceSectionProps<T>) {
+  const truncated =
+    totalCount !== undefined && totalCount !== null && totalCount > rows.length;
   return (
     <section aria-label={title} className="mt-6 first:mt-0">
       <h3 className="text-base font-semibold text-card-foreground">{title}</h3>
@@ -78,6 +86,11 @@ export function ResourceSection<T>({
           )}
         </tbody>
       </table>
+      {truncated && (
+        <p className="mt-1 text-sm text-muted-foreground">
+          Showing {rows.length} of {totalCount}
+        </p>
+      )}
       {children}
     </section>
   );

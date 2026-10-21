@@ -14,7 +14,15 @@
  * of spinners or silent no-ops (UI-002, UI_UX §7).
  */
 
-import { act, cleanup, render, screen, within, fireEvent } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -30,6 +38,9 @@ const jsonResponse = (status: number, body: unknown): Response =>
 
 const ok = (body: unknown): Response => jsonResponse(200, body);
 const created = (body: unknown): Response => jsonResponse(201, body);
+
+/** The backend's fixed DRF page size (settings/base.py PAGE_SIZE). */
+const PAGE_SIZE = 50;
 
 const SETUP_KEYS = [
   "hospital_identity",
@@ -114,6 +125,26 @@ const WARD = {
   active: true,
 };
 
+/** 51 wards — the ward on page 2 is what the bed→ward join must still name. */
+const MANY_WARDS = Array.from({ length: 51 }, (_, i) => ({
+  id: `ward-${i + 1}`,
+  tenant_id: "t",
+  department: DEPT_OPD_ID,
+  name: `Ward ${i + 1}`,
+  type_tag: "Medical",
+  active: true,
+}));
+
+/** 103 beds in ward-51 — past the 50-row page, the PRD's own "~100 beds" scale. */
+const MANY_BEDS = Array.from({ length: 103 }, (_, i) => ({
+  id: `bed-${i + 1}`,
+  tenant: "t",
+  ward: "ward-51",
+  bed_number: `B-${i + 1}`,
+  functional: true,
+  active: true,
+}));
+
 interface RecordedCall {
   url: string;
   method: string;
@@ -123,13 +154,17 @@ interface RecordedCall {
 /**
  * Stub fetch for the whole wizard surface. GET /setup/ serves `setup` (which
  * PUTs mutate, proving invalidation drives the refetch); the paginated CRUD
- * lists serve `lists` and POSTs append to them, so an added row appears the
- * way production would render it — through the invalidation, not the POST
- * response.
+ * lists slice `lists` at the backend's fixed PAGE_SIZE the same way the real
+ * paginator does (with an absolute `next`, like DRF's, for the page-walking
+ * fetch-all to consume) and POSTs append to them, so an added row appears
+ * the way production would render it — through the invalidation, not the
+ * POST response. A list named in `failingPosts` answers every POST with a
+ * non-field 500, the shape the alert tests must surface.
  */
 function stubWizardFetch(
   setup: ReturnType<typeof setupBody>,
   lists: Record<string, Array<Record<string, unknown>>>,
+  failingPosts: string[] = [],
 ) {
   const calls: RecordedCall[] = [];
   vi.stubGlobal(
@@ -154,26 +189,36 @@ function stubWizardFetch(
         }
         return ok(row ?? {});
       }
-      if (url.endsWith("/api/v1/setup/")) {
+      if (url.split("?")[0].endsWith("/api/v1/setup/")) {
         // Fresh objects per GET, like a real API response: TanStack's
         // structural sharing skips the update when handed the same mutated
         // reference, and the wizard would never re-render.
         return ok(setup.map((s) => ({ ...s })));
       }
 
+      const path = url.split("?")[0];
+      const page = Number(new URLSearchParams(url.split("?")[1] ?? "").get("page") ?? "1");
       for (const [name, rows] of Object.entries(lists)) {
-        if (!url.endsWith(`/api/v1/${name}/`)) continue;
+        if (!path.endsWith(`/api/v1/${name}/`)) continue;
         if (method === "POST") {
+          if (failingPosts.includes(name)) {
+            return jsonResponse(500, { detail: "could not save the row" });
+          }
           const body = JSON.parse(typeof init?.body === "string" ? init.body : "{}");
           const row = { id: `new-${rows.length + 1}`, ...body };
           rows.push(row);
           return created(row);
         }
+        const start = (page - 1) * PAGE_SIZE;
+        const pageRows = rows.slice(start, start + PAGE_SIZE);
         return ok({
           count: rows.length,
-          next: null,
+          next:
+            start + PAGE_SIZE < rows.length
+              ? `http://localhost${path}?page=${page + 1}`
+              : null,
           previous: null,
-          results: rows.map((r) => ({ ...r })),
+          results: pageRows.map((r) => ({ ...r })),
         });
       }
       return ok({ count: 0, next: null, previous: null, results: [] });
@@ -311,9 +356,13 @@ describe("SetupWizard", () => {
       status: "complete",
       payload: { name: "Seed District Hospital" },
     });
-    expect(
-      await screen.findByRole("heading", { level: 2, name: "Ownership level" }),
-    ).toBeInTheDocument();
+    const nextHeading = await screen.findByRole("heading", {
+      level: 2,
+      name: "Ownership level",
+    });
+    // The submitted form just unmounted; focus must land on the new step's
+    // heading instead of falling to <body> (UI-002's focus clause).
+    await waitFor(() => expect(nextHeading).toHaveFocus());
     // The invalidation refetched the spine: step 1 now shows its flag.
     const done = await screen.findByRole("button", { name: /^1\. Hospital/ });
     expect(within(done).getByText("Complete")).toBeInTheDocument();
@@ -454,6 +503,281 @@ describe("SetupWizard", () => {
     expect(
       await within(departments).findByRole("cell", { name: "Paediatrics" }),
     ).toBeInTheDocument();
+  });
+
+  it("surfaces a failed department add as an explicit alert, not a silent no-op", async () => {
+    stubWizardFetch(
+      setupBody(completedThrough(5)),
+      { facilities: [FACILITY], departments: [], wards: [], beds: [] },
+      ["departments"],
+    );
+
+    renderWizard();
+    expect(
+      await screen.findByRole("heading", {
+        level: 2,
+        name: "Departments, wards & beds",
+      }),
+    ).toBeInTheDocument();
+    const departments = screen.getByRole("region", { name: "Departments" });
+    await within(departments).findByRole("option", { name: FACILITY.name });
+    await userEvent.selectOptions(
+      within(departments).getByLabelText(/facility/i),
+      FACILITY_ID,
+    );
+    await userEvent.type(within(departments).getByLabelText(/department name/i), "Cardiology");
+    await userEvent.click(within(departments).getByRole("button", { name: "Add department" }));
+
+    const alert = await within(departments).findByRole("alert");
+    expect(alert).toHaveTextContent("could not save the row");
+  });
+
+  it("surfaces a failed ward add as an explicit alert, not a silent no-op", async () => {
+    stubWizardFetch(
+      setupBody(completedThrough(5)),
+      { facilities: [FACILITY], departments: [DEPARTMENT_OPD], wards: [], beds: [] },
+      ["wards"],
+    );
+
+    renderWizard();
+    expect(
+      await screen.findByRole("heading", {
+        level: 2,
+        name: "Departments, wards & beds",
+      }),
+    ).toBeInTheDocument();
+    const wards = screen.getByRole("region", { name: "Wards" });
+    // The ward form's department options come from the page-walking
+    // fetch-all — waiting for one pins that the join source is loaded.
+    await within(wards).findByRole("option", { name: DEPARTMENT_OPD.name });
+    await userEvent.selectOptions(within(wards).getByLabelText(/department/i), DEPT_OPD_ID);
+    await userEvent.type(within(wards).getByLabelText(/ward name/i), "ICU Ward");
+    await userEvent.selectOptions(within(wards).getByLabelText(/ward type/i), "ICU");
+    await userEvent.click(within(wards).getByRole("button", { name: "Add ward" }));
+
+    const alert = await within(wards).findByRole("alert");
+    expect(alert).toHaveTextContent("could not save the row");
+  });
+
+  it("surfaces a failed bed add as an explicit alert, not a silent no-op", async () => {
+    stubWizardFetch(
+      setupBody(completedThrough(5)),
+      { facilities: [FACILITY], departments: [], wards: [WARD], beds: [] },
+      ["beds"],
+    );
+
+    renderWizard();
+    expect(
+      await screen.findByRole("heading", {
+        level: 2,
+        name: "Departments, wards & beds",
+      }),
+    ).toBeInTheDocument();
+    const beds = screen.getByRole("region", { name: "Beds" });
+    await within(beds).findByRole("option", { name: WARD.name });
+    await userEvent.selectOptions(within(beds).getByLabelText(/^ward/i), WARD_ID);
+    await userEvent.type(within(beds).getByLabelText(/bed number/i), "B-9");
+    await userEvent.click(within(beds).getByRole("button", { name: "Add bed" }));
+
+    const alert = await within(beds).findByRole("alert");
+    expect(alert).toHaveTextContent("could not save the row");
+  });
+
+  it("surfaces a failed service-unit add as an explicit alert, not a silent no-op", async () => {
+    stubWizardFetch(
+      setupBody(completedThrough(6)),
+      { facilities: [FACILITY], "service-units": [] },
+      ["service-units"],
+    );
+
+    renderWizard();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Service units" }),
+    ).toBeInTheDocument();
+    const units = screen.getByRole("region", { name: "Service units" });
+    await within(units).findByRole("option", { name: FACILITY.name });
+    await userEvent.selectOptions(within(units).getByLabelText(/facility/i), FACILITY_ID);
+    await userEvent.type(within(units).getByLabelText(/service unit name/i), "Central Lab");
+    await userEvent.selectOptions(within(units).getByLabelText(/unit type/i), "Laboratory");
+    await userEvent.click(within(units).getByRole("button", { name: "Add service unit" }));
+
+    const alert = await within(units).findByRole("alert");
+    expect(alert).toHaveTextContent("could not save the row");
+  });
+
+  it("surfaces a failed staff-position add as an explicit alert, not a silent no-op", async () => {
+    stubWizardFetch(
+      setupBody(completedThrough(7)),
+      { departments: [DEPARTMENT_OPD], "staff-positions": [] },
+      ["staff-positions"],
+    );
+
+    renderWizard();
+    expect(
+      await screen.findByRole("heading", { level: 2, name: "Staff positions" }),
+    ).toBeInTheDocument();
+    const positions = screen.getByRole("region", { name: "Staff positions" });
+    await within(positions).findByRole("option", { name: DEPARTMENT_OPD.name });
+    await userEvent.selectOptions(within(positions).getByLabelText(/department/i), DEPT_OPD_ID);
+    await userEvent.type(within(positions).getByLabelText(/designation/i), "Staff Nurse");
+    await userEvent.click(within(positions).getByRole("button", { name: "Add position" }));
+
+    const alert = await within(positions).findByRole("alert");
+    expect(alert).toHaveTextContent("could not save the row");
+  });
+
+  it("caps the tables at the backend's page size with a visible caption, and still names past-page-1 parents", async () => {
+    stubWizardFetch(setupBody(completedThrough(5)), {
+      facilities: [FACILITY],
+      departments: [DEPARTMENT_OPD],
+      wards: MANY_WARDS,
+      beds: MANY_BEDS,
+    });
+
+    renderWizard();
+    expect(
+      await screen.findByRole("heading", {
+        level: 2,
+        name: "Departments, wards & beds",
+      }),
+    ).toBeInTheDocument();
+
+    // Page 1 of a 103-row list is 50 rows — the truncation must be visible,
+    // not a silent lie that looks like the whole list.
+    const beds = screen.getByRole("region", { name: "Beds" });
+    await within(beds).findByText("Showing 50 of 103");
+    const wards = screen.getByRole("region", { name: "Wards" });
+    await within(wards).findByText("Showing 50 of 51");
+    const departments = screen.getByRole("region", { name: "Departments" });
+    await within(departments).findByRole("cell", { name: "OPD" });
+    expect(within(departments).queryByText(/^Showing \d+ of/)).not.toBeInTheDocument();
+
+    // The beds reference ward-51, which sits on wards page 2: the join
+    // resolves its name instead of degrading to the raw id.
+    expect(await within(beds).findAllByRole("cell", { name: "Ward 51" })).toHaveLength(50);
+    // The ward rows resolve their department through the same walker.
+    expect(await within(wards).findAllByRole("cell", { name: "OPD" })).toHaveLength(50);
+  });
+
+  it("blocks a duplicate department name client-side before posting", async () => {
+    const calls = stubWizardFetch(setupBody(completedThrough(5)), {
+      facilities: [FACILITY],
+      departments: [DEPARTMENT_OPD],
+      wards: [],
+      beds: [],
+    });
+
+    renderWizard();
+    expect(
+      await screen.findByRole("heading", {
+        level: 2,
+        name: "Departments, wards & beds",
+      }),
+    ).toBeInTheDocument();
+    const departments = screen.getByRole("region", { name: "Departments" });
+    // The pre-check reads the fetch-all list; its presence in the ward
+    // form's select is what proves that source has loaded.
+    const wards = screen.getByRole("region", { name: "Wards" });
+    await within(departments).findByRole("option", { name: FACILITY.name });
+    await within(wards).findByRole("option", { name: DEPARTMENT_OPD.name });
+    await userEvent.selectOptions(
+      within(departments).getByLabelText(/facility/i),
+      FACILITY_ID,
+    );
+    // "opd" differs from the seeded "OPD" only in case — the pre-check is
+    // case-insensitive, which is what makes it catch real duplicates.
+    await userEvent.type(within(departments).getByLabelText(/department name/i), "opd");
+    await userEvent.click(within(departments).getByRole("button", { name: "Add department" }));
+
+    expect(await within(departments).findByText(/already exists/i)).toBeInTheDocument();
+    expect(findCall(calls, "/api/v1/departments/", "POST")).toBeUndefined();
+  });
+
+  it("blocks a duplicate bed code within a ward client-side before posting", async () => {
+    const calls = stubWizardFetch(setupBody(completedThrough(5)), {
+      facilities: [FACILITY],
+      departments: [DEPARTMENT_OPD],
+      wards: [WARD],
+      beds: [{ id: "bed-1", ward: WARD_ID, bed_number: "B-1", functional: true, active: true }],
+    });
+
+    renderWizard();
+    expect(
+      await screen.findByRole("heading", {
+        level: 2,
+        name: "Departments, wards & beds",
+      }),
+    ).toBeInTheDocument();
+    const beds = screen.getByRole("region", { name: "Beds" });
+    // The pre-check reads the loaded beds page; the seeded row's cell is
+    // what proves that list has loaded.
+    await within(beds).findByRole("cell", { name: "B-1" });
+    await within(beds).findByRole("option", { name: WARD.name });
+    await userEvent.selectOptions(within(beds).getByLabelText(/^ward/i), WARD_ID);
+    await userEvent.type(within(beds).getByLabelText(/bed number/i), "B-1");
+    await userEvent.click(within(beds).getByRole("button", { name: "Add bed" }));
+
+    expect(await within(beds).findByText(/already exists/i)).toBeInTheDocument();
+    expect(findCall(calls, "/api/v1/beds/", "POST")).toBeUndefined();
+  });
+
+  it("labels an MFA-gate 403 as the server's MFA instruction, not a missing claim", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = String(input);
+        if (url.split("?")[0].endsWith("/api/v1/setup/")) return ok(setupBody());
+        if (url.match(/\/api\/v1\/setup\/[a-z_]+\/$/) && init?.method === "PUT") {
+          return jsonResponse(403, {
+            detail:
+              "Your role requires multi-factor authentication. Enrol a TOTP " +
+              "device at /api/v1/mfa-devices/ and confirm it.",
+            code: "mfa_required",
+          });
+        }
+        return ok({});
+      }),
+    );
+
+    renderWizard();
+    await screen.findByRole("heading", { level: 2, name: "Hospital identity" });
+    await userEvent.type(screen.getByLabelText(/hospital name/i), "Seed District Hospital");
+    await userEvent.click(screen.getByRole("button", { name: "Next" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/multi-factor authentication/i);
+    expect(alert).not.toHaveTextContent(/identity\.setup\.manage/);
+  });
+
+  it("Next on a table step confirms before discarding a half-typed add-form", async () => {
+    const calls = stubWizardFetch(setupBody(completedThrough(5)), {
+      facilities: [FACILITY],
+      departments: [],
+      wards: [],
+      beds: [],
+    });
+
+    renderWizard();
+    expect(
+      await screen.findByRole("heading", {
+        level: 2,
+        name: "Departments, wards & beds",
+      }),
+    ).toBeInTheDocument();
+    const departments = screen.getByRole("region", { name: "Departments" });
+    await userEvent.type(within(departments).getByLabelText(/department name/i), "Half");
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await userEvent.click(screen.getByRole("button", { name: "Next" }));
+    expect(confirm).toHaveBeenCalledWith(
+      expect.stringMatching(/discard unsaved changes/i),
+    );
+    // Refused: nothing is PUT and the half-typed form is still in place.
+    expect(findCall(calls, "/api/v1/setup/departments_wards_beds/", "PUT")).toBeUndefined();
+    expect(
+      screen.getByRole("heading", { level: 2, name: "Departments, wards & beds" }),
+    ).toBeInTheDocument();
+    expect(within(departments).getByLabelText(/department name/i)).toHaveValue("Half");
   });
 
   it("posts a reference-data row with the value shape the step's kind requires", async () => {

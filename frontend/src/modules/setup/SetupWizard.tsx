@@ -108,6 +108,8 @@ export default function SetupWizard() {
   const [activeIndex, setActiveIndex] = useState(0);
   const [dirty, setDirty] = useState(false);
   const restoredRef = useRef(false);
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  const previousIndexRef = useRef(activeIndex);
 
   const setupQuery = useQuery({
     queryKey: ["setup"],
@@ -127,6 +129,17 @@ export default function SetupWizard() {
       setActiveIndex(firstIncomplete);
     }
   }, [steps]);
+
+  // On a step change the previously focused control unmounts, which would
+  // drop focus to <body>; land it on the new step's heading instead
+  // (UI-002's "focus moves to the next field" clause). The previous-index
+  // guard skips the mount run so loading the screen never steals focus and
+  // stays idempotent under StrictMode's double effect.
+  useEffect(() => {
+    if (previousIndexRef.current === activeIndex) return;
+    previousIndexRef.current = activeIndex;
+    headingRef.current?.focus();
+  }, [activeIndex]);
 
   // The tab-level half of the dirty guard; the in-wizard half confirms on
   // Back and stepper jumps.
@@ -223,7 +236,11 @@ export default function SetupWizard() {
 
       <Card className="mt-4">
         <CardHeader>
-          <h2 className="text-lg font-semibold tracking-tight text-card-foreground">
+          <h2
+            ref={headingRef}
+            tabIndex={-1}
+            className="text-lg font-semibold tracking-tight text-card-foreground"
+          >
             {meta.title}
           </h2>
         </CardHeader>

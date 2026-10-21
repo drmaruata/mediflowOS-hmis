@@ -269,6 +269,42 @@ export const createBaselineInput = (body: {
   post<BaselineInputRow>("/api/v1/baseline-inputs/", body);
 
 // ---------------------------------------------------------------------------
+// Page-walking fetch-all. Every list is paginated at the backend's fixed
+// PAGE_SIZE 50 with no client page-size control, so a join source read one
+// page would degrade parent names to raw UUIDs once the parent sits past
+// page 1. Only the realistically small join sources (departments, wards)
+// walk `next` until null; the main tables stay single-page behind a visible
+// truncation caption (full pagination belongs to the admin table screens).
+// ---------------------------------------------------------------------------
+
+/**
+ * DRF's `next` is an absolute URL while apiClient takes a path — strip the
+ * origin so walked pages keep the auth header and the refresh logic.
+ * shortcut: a VITE_API_BASE that itself carries a path prefix would be
+ * doubled here; no such deployment exists today.
+ */
+function nextPagePath(next: string): string {
+  const { pathname, search } = new URL(next, window.location.origin);
+  return pathname + search;
+}
+
+async function fetchAllPages<T>(path: string): Promise<T[]> {
+  const rows: T[] = [];
+  let next: string | null = path;
+  while (next !== null) {
+    const page: Page<T> = await apiClient<Page<T>>(nextPagePath(next));
+    rows.push(...page.results);
+    next = page.next;
+  }
+  return rows;
+}
+
+export const fetchAllDepartments = (): Promise<Department[]> =>
+  fetchAllPages<Department>("/api/v1/departments/");
+
+export const fetchAllWards = (): Promise<Ward[]> => fetchAllPages<Ward>("/api/v1/wards/");
+
+// ---------------------------------------------------------------------------
 // Server errors. The server stays the authority: DRF 400 bodies are field
 // maps ({name: ["..."]}) or a detail string; the client maps them back onto
 // the forms field-by-field instead of showing one generic failure.

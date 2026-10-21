@@ -15,12 +15,12 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ResourceSection } from "../components/ResourceSection";
-import { StepFooter, useStepDirtyBridge } from "../components/StepFooter";
+import { StepAlert, StepFooter, useStepDirtyBridge } from "../components/StepFooter";
 import type { StepComponentProps } from "../components/StepFooter";
 import {
   createStaffPosition,
   extractServerErrors,
-  fetchDepartments,
+  fetchAllDepartments,
   fetchStaffPositions,
   useSaveSetupStep,
 } from "../setup.api";
@@ -51,7 +51,13 @@ export default function StaffPositionsStep({
   isLast,
 }: StepComponentProps) {
   const queryClient = useQueryClient();
-  const departments = useQuery({ queryKey: ["departments"], queryFn: fetchDepartments });
+  // Fetch-all, not the paginated list: departments here are only a join
+  // source and a select feed, so a department past page 1 must still
+  // resolve by name and stay selectable.
+  const departments = useQuery({
+    queryKey: ["departments", "all"],
+    queryFn: fetchAllDepartments,
+  });
   const staffPositions = useQuery({
     queryKey: ["staff-positions"],
     queryFn: fetchStaffPositions,
@@ -83,9 +89,7 @@ export default function StaffPositionsStep({
   const complete = () =>
     save.mutate({ status: "complete", payload: counts }, { onSuccess: onAdvance });
 
-  const departmentNames = new Map(
-    (departments.data?.results ?? []).map((row) => [row.id, row.name]),
-  );
+  const departmentNames = new Map((departments.data ?? []).map((row) => [row.id, row.name]));
 
   return (
     <div>
@@ -95,6 +99,7 @@ export default function StaffPositionsStep({
         rows={staffPositions.data?.results ?? []}
         rowKey={(row) => row.id}
         emptyText="No staff positions yet."
+        totalCount={staffPositions.data?.count ?? null}
         columns={[
           { key: "designation", header: "Designation", render: (row) => row.designation },
           { key: "specialty", header: "Specialty", render: (row) => row.specialty ?? "—" },
@@ -107,6 +112,7 @@ export default function StaffPositionsStep({
           { key: "in_position", header: "In position", render: (row) => row.in_position },
         ]}
       >
+        <StepAlert error={addPosition.error} />
         <form
           className="mt-3"
           noValidate
@@ -151,7 +157,7 @@ export default function StaffPositionsStep({
                 {...form.register("department")}
               >
                 <option value="">Select department…</option>
-                {(departments.data?.results ?? []).map((department) => (
+                {(departments.data ?? []).map((department) => (
                   <option key={department.id} value={department.id}>
                     {department.name}
                   </option>

@@ -4,15 +4,20 @@
  * endpoints, so this step stores only a counts summary in its payload when
  * the step is saved or finished — the rows are the restorable state and the
  * status flag is what the spine restores. Tables compose the shared
- * ResourceSection; parent names are joined client-side because the
- * serializers expose FK ids, not names.
+ * ResourceSection; parent names are joined client-side from the page-walking
+ * fetch-all lists (the serializers expose FK ids, not names), so a parent
+ * past the backend's fixed 50-row page still resolves by name.
  *
  * Each add-form is its own <form>, so Enter adds the row in focus instead
  * of finishing the step — the step has no outer form, and its Next is a
  * plain button (see StepFooter). Validation mirrors the doc's rules: a
  * department needs a parent facility, a ward a parent department, a bed a
- * parent ward — each a required select. Uniqueness (department name, bed
- * code) stays server-authoritative and surfaces as a field error.
+ * parent ward — each a required select. Duplicate department names (over
+ * the full list, via the fetch-all) and bed codes within a ward (over the
+ * loaded page only) are pre-checked client-side and render a field error
+ * without posting; the backend itself enforces no uniqueness — a
+ * documented gap, so duplicates remain creatable through the API and
+ * UI_UX §7's uniqueness rule is unenforced server-side.
  */
 
 import { useForm } from "react-hook-form";
@@ -24,13 +29,15 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ResourceSection } from "../components/ResourceSection";
-import { StepFooter, useStepDirtyBridge } from "../components/StepFooter";
+import { StepAlert, StepFooter, useStepDirtyBridge } from "../components/StepFooter";
 import type { StepComponentProps } from "../components/StepFooter";
 import {
   createBed,
   createDepartment,
   createWard,
   extractServerErrors,
+  fetchAllDepartments,
+  fetchAllWards,
   fetchBeds,
   fetchDepartments,
   fetchFacilities,
@@ -87,7 +94,15 @@ export default function DepartmentsWardsBedsStep({
   const queryClient = useQueryClient();
   const facilities = useQuery({ queryKey: ["facilities"], queryFn: fetchFacilities });
   const departments = useQuery({ queryKey: ["departments"], queryFn: fetchDepartments });
+  // Join sources, not table feeds: they walk every page so a parent past
+  // page 1 resolves by name; the tables above stay single-page with a
+  // visible caption (full pagination is the admin table screens' job).
+  const allDepartments = useQuery({
+    queryKey: ["departments", "all"],
+    queryFn: fetchAllDepartments,
+  });
   const wards = useQuery({ queryKey: ["wards"], queryFn: fetchWards });
+  const allWards = useQuery({ queryKey: ["wards", "all"], queryFn: fetchAllWards });
   const beds = useQuery({ queryKey: ["beds"], queryFn: fetchBeds });
 
   const departmentForm = useForm<DepartmentValues>({
@@ -128,7 +143,8 @@ export default function DepartmentsWardsBedsStep({
     },
   });
 
-  const save = useSaveSetupStep("departments_wards_beds");  const dirty =
+  const save = useSaveSetupStep("departments_wards_beds");
+  const dirty =
     departmentForm.formState.isDirty ||
     wardForm.formState.isDirty ||
     bedForm.formState.isDirty;
@@ -143,12 +159,23 @@ export default function DepartmentsWardsBedsStep({
   const complete = () =>
     save.mutate({ status: "complete", payload: counts }, { onSuccess: onAdvance });
 
-  const departmentNames = new Map(
-    (departments.data?.results ?? []).map((row) => [row.id, row.name]),
-  );
-  const wardNames = new Map((wards.data?.results ?? []).map((row) => [row.id, row.name]));
+  const departmentNames = new Map((allDepartments.data ?? []).map((row) => [row.id, row.name]));
+  const wardNames = new Map((allWards.data ?? []).map((row) => [row.id, row.name]));
   const noFacility =
     facilities.isSuccess && (facilities.data?.results.length ?? 0) === 0;
+
+  const departmentNameExists = (candidate: string) =>
+    (allDepartments.data ?? []).some(
+      (row) => row.name.trim().toLowerCase() === candidate.trim().toLowerCase(),
+    );
+  // Bed codes are numbered per ward; the check sees only the loaded page
+  // (the beds table stays single-page) — advisory, like the name check.
+  const bedCodeExists = (ward: string, candidate: string) =>
+    (beds.data?.results ?? []).some(
+      (row) =>
+        row.ward === ward &&
+        row.bed_number.trim().toLowerCase() === candidate.trim().toLowerCase(),
+    );
 
   return (
     <div>
@@ -158,6 +185,7 @@ export default function DepartmentsWardsBedsStep({
         rows={departments.data?.results ?? []}
         rowKey={(row) => row.id}
         emptyText="No departments yet."
+        totalCount={departments.data?.count ?? null}
         columns={[
           { key: "name", header: "Name", render: (row) => row.name },
           { key: "opd", header: "OPD", render: (row) => (row.opd_enabled ? "Yes" : "No") },
@@ -175,10 +203,17 @@ export default function DepartmentsWardsBedsStep({
             first facility.
           </p>
         )}
+        <StepAlert error={addDepartment.error} />
         <form
           className="mt-3"
           noValidate
-          onSubmit={departmentForm.handleSubmit((values) =>
+          onSubmit={departmentForm.handleSubmit((values) => {
+            if (departmentNameExists(values.name)) {
+              departmentForm.setError("name", {
+                message: "A department with this name already exists.",
+              });
+              return;
+            }
             addDepartment.mutate(values, {
               onSuccess: () =>
                 departmentForm.reset({
@@ -202,8 +237,8 @@ export default function DepartmentsWardsBedsStep({
                   });
                 }
               },
-            }),
-          )}
+            });
+          })}
         >
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-1.5">
@@ -290,6 +325,7 @@ export default function DepartmentsWardsBedsStep({
         rows={wards.data?.results ?? []}
         rowKey={(row) => row.id}
         emptyText="No wards yet."
+        totalCount={wards.data?.count ?? null}
         columns={[
           { key: "name", header: "Name", render: (row) => row.name },
           { key: "type_tag", header: "Type", render: (row) => row.type_tag },
@@ -300,6 +336,7 @@ export default function DepartmentsWardsBedsStep({
           },
         ]}
       >
+        <StepAlert error={addWard.error} />
         <form
           className="mt-3"
           noValidate
@@ -335,7 +372,7 @@ export default function DepartmentsWardsBedsStep({
                 {...wardForm.register("department")}
               >
                 <option value="">Select department…</option>
-                {(departments.data?.results ?? []).map((department) => (
+                {(allDepartments.data ?? []).map((department) => (
                   <option key={department.id} value={department.id}>
                     {department.name}
                   </option>
@@ -395,6 +432,7 @@ export default function DepartmentsWardsBedsStep({
         rows={beds.data?.results ?? []}
         rowKey={(row) => row.id}
         emptyText="No beds yet."
+        totalCount={beds.data?.count ?? null}
         columns={[
           { key: "bed_number", header: "Bed number", render: (row) => row.bed_number },
           {
@@ -409,10 +447,17 @@ export default function DepartmentsWardsBedsStep({
           },
         ]}
       >
+        <StepAlert error={addBed.error} />
         <form
           className="mt-3"
           noValidate
-          onSubmit={bedForm.handleSubmit((values) =>
+          onSubmit={bedForm.handleSubmit((values) => {
+            if (bedCodeExists(values.ward, values.bed_number)) {
+              bedForm.setError("bed_number", {
+                message: "A bed with this number already exists in this ward.",
+              });
+              return;
+            }
             addBed.mutate(values, {
               onSuccess: () => bedForm.reset({ ward: "", bed_number: "" }),
               onError: (error) => {
@@ -424,8 +469,8 @@ export default function DepartmentsWardsBedsStep({
                   bedForm.setError("ward", { message: fieldErrors.ward });
                 }
               },
-            }),
-          )}
+            });
+          })}
         >
           <div className="grid gap-3 sm:grid-cols-2">
             <div className="grid gap-1.5">
@@ -438,7 +483,7 @@ export default function DepartmentsWardsBedsStep({
                 {...bedForm.register("ward")}
               >
                 <option value="">Select ward…</option>
-                {(wards.data?.results ?? []).map((ward) => (
+                {(allWards.data ?? []).map((ward) => (
                   <option key={ward.id} value={ward.id}>
                     {ward.name}
                   </option>

@@ -1,8 +1,9 @@
 /**
  * StepFooter — the wizard's Back/Save/Next chrome plus the three behaviours
- * UI_UX §7 puts on it: Ctrl+S saves, Back asks before discarding a dirty
- * step, and failures render as explicit alerts (permission refusals name the
- * claim the server gated on) rather than silent no-ops.
+ * UI_UX §7 puts on it: Ctrl+S saves, Back and a table step's Next ask before
+ * discarding a dirty step, and failures render as explicit alerts
+ * (permission refusals name the claim the server gated on) rather than
+ * silent no-ops.
  *
  * Form steps render the footer inside their <form>, so Next is the submit
  * button and Enter anywhere in the form does what Next does (UI-002). Only
@@ -43,20 +44,38 @@ export function useStepDirtyBridge(
 }
 
 /**
- * The failure surface for a step's save or row mutation: 403 names the
- * claim the server gated on (WritePermissionMixin), 400s surface the
- * server's own message, anything else is an honest retry suggestion. Never
- * a spinner that never ends and never a silent drop.
+ * The failure surface for a step's save or row mutation: a 403 from a
+ * claim-gated endpoint names the claim the server gated on
+ * (WritePermissionMixin), a 403 from the MFA gate surfaces the server's own
+ * instruction instead (it carries code "mfa_required"; common/mfa.py) — the
+ * two must never be confused — and surfaces without a claim (the config
+ * viewsets gate writes on no permission) render the server's detail.
+ * 400s surface the server's own message, anything else is an honest retry
+ * suggestion. Never a spinner that never ends and never a silent drop.
  */
-export function StepAlert({ error, claim }: { error: unknown; claim: string }) {
+export function StepAlert({ error, claim }: { error: unknown; claim?: string }) {
   if (error === null || error === undefined) return null;
   if (error instanceof ApiError && error.status === 403) {
+    const { fieldErrors, general } = extractServerErrors(error);
+    // The MFA body is {detail, code: "mfa_required"} and the parser parks
+    // the code key in fieldErrors — that is how the gate is told apart from
+    // a claim refusal, which carries only detail.
+    if (claim !== undefined && fieldErrors.code !== "mfa_required") {
+      return (
+        <p
+          role="alert"
+          className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          Saving requires the {claim} permission. Your changes were not saved.
+        </p>
+      );
+    }
     return (
       <p
         role="alert"
         className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
       >
-        Saving requires the {claim} permission. Your changes were not saved.
+        {general ?? "The server refused this change; nothing was saved."}
       </p>
     );
   }
@@ -92,6 +111,8 @@ interface StepFooterProps {
   onNext?: () => void;
 }
 
+const CONFIRM_MESSAGE = "Discard unsaved changes to this step?";
+
 export function StepFooter({
   onBack,
   dirty,
@@ -115,8 +136,15 @@ export function StepFooter({
   }, [onSave]);
 
   const goBack = () => {
-    if (dirty && !window.confirm("Discard unsaved changes to this step?")) return;
+    if (dirty && !window.confirm(CONFIRM_MESSAGE)) return;
     onBack?.();
+  };
+
+  // Table steps only reach this (form steps submit instead): Next must not
+  // silently discard a half-typed add-form — the same guard as Back.
+  const goNext = () => {
+    if (dirty && !window.confirm(CONFIRM_MESSAGE)) return;
+    onNext?.();
   };
 
   return (
@@ -147,7 +175,7 @@ export function StepFooter({
               {nextLabel}
             </Button>
           ) : (
-            <Button type="button" onClick={onNext} disabled={saving}>
+            <Button type="button" onClick={goNext} disabled={saving}>
               {nextLabel}
             </Button>
           )}

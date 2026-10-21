@@ -83,6 +83,7 @@ export default function IndicatorsBaselineStep({
         rows={baselineInputs.data?.results ?? []}
         rowKey={(row) => row.id}
         emptyText="No baseline inputs yet."
+        totalCount={baselineInputs.data?.count ?? null}
         columns={[
           {
             key: "indicator_source_code",

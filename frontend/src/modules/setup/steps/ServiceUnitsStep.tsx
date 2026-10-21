@@ -14,7 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { ResourceSection } from "../components/ResourceSection";
-import { StepFooter, useStepDirtyBridge } from "../components/StepFooter";
+import { StepAlert, StepFooter, useStepDirtyBridge } from "../components/StepFooter";
 import type { StepComponentProps } from "../components/StepFooter";
 import {
   createServiceUnit,
@@ -88,11 +88,13 @@ export default function ServiceUnitsStep({
         rows={serviceUnits.data?.results ?? []}
         rowKey={(row) => row.id}
         emptyText="No service units yet."
+        totalCount={serviceUnits.data?.count ?? null}
         columns={[
           { key: "name", header: "Name", render: (row) => row.name },
           { key: "type_tag", header: "Type", render: (row) => row.type_tag },
         ]}
       >
+        <StepAlert error={addUnit.error} />
         <form
           className="mt-3"
           noValidate

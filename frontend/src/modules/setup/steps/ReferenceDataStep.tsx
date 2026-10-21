@@ -95,6 +95,7 @@ export default function ReferenceDataStep({
         rows={referenceData.data?.results ?? []}
         rowKey={(row) => row.id}
         emptyText="No reference data yet."
+        totalCount={referenceData.data?.count ?? null}
         columns={[
           { key: "kind", header: "Kind", render: (row) => row.kind },
           { key: "key", header: "Key", render: (row) => row.key },
