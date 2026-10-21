@@ -10,20 +10,25 @@
 
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { MemoryRouter, useLocation } from "react-router-dom";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { AppRoutes } from "@/App";
 import { AppHeader } from "./AppHeader";
 import { AppSidebar } from "./AppSidebar";
+import { useAuthStore } from "@/stores/authStore";
 import { useThemeStore } from "@/stores/themeStore";
 
-function renderWithProviders(ui: React.ReactElement) {
+function renderWithProviders(
+  ui: React.ReactElement,
+  initialEntries?: string[],
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
   return render(
     <QueryClientProvider client={client}>
-      <MemoryRouter>{ui}</MemoryRouter>
+      <MemoryRouter initialEntries={initialEntries}>{ui}</MemoryRouter>
     </QueryClientProvider>,
   );
 }
@@ -109,9 +114,9 @@ describe("AppSidebar", () => {
   });
 
   it("links Dashboard and marks it as the current page", () => {
-    renderWithProviders(<AppSidebar />);
+    renderWithProviders(<AppSidebar />, ["/dashboard"]);
     const link = screen.getByRole("link", { name: "Dashboard" });
-    expect(link).toHaveAttribute("href", "/");
+    expect(link).toHaveAttribute("href", "/dashboard");
     expect(link).toHaveAttribute("aria-current", "page");
   });
 
@@ -208,5 +213,81 @@ describe("AppHeader", () => {
     useThemeStore.getState().setPreference("dark");
     renderWithProviders(<AppHeader />);
     expect(document.documentElement.classList.contains("dark")).toBe(true);
+  });
+});
+
+describe("route contract (UI_UX §4.3/§18.2)", () => {
+  // MemoryRouter keeps the URL out of window.history; the probe makes the
+  // router's post-redirect location assertable next to the real routes.
+  function LocationProbe() {
+    const { pathname } = useLocation();
+    return <p>Current path: {pathname}</p>;
+  }
+
+  beforeEach(() => {
+    useAuthStore.setState({
+      accessToken: null,
+      refreshToken: null,
+      isAuthenticated: false,
+    });
+  });
+
+  it("redirects the legacy /login path to the canonical /auth/sign-in", async () => {
+    renderWithProviders(
+      <>
+        <AppRoutes />
+        <LocationProbe />
+      </>,
+      ["/login"],
+    );
+
+    expect(await screen.findByLabelText(/email.*user id/i)).toBeInTheDocument();
+    expect(
+      screen.getByText("Current path: /auth/sign-in"),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the dashboard at the canonical /dashboard route", async () => {
+    useAuthStore.setState({
+      accessToken: "access-1",
+      refreshToken: "refresh-1",
+      isAuthenticated: true,
+    });
+    const okJson = (body: unknown): Response =>
+      new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.endsWith("/auth/me/")) {
+          return okJson({
+            username: "clerk-a",
+            tenant_id: null,
+            facility_id: null,
+            role: "clerk",
+            permissions: ["patient_registry.view_patient"],
+            allows_break_glass: false,
+            requires_mfa: false,
+            mfa_verified: true,
+          });
+        }
+        if (url.endsWith("/health/")) return okJson({ status: "ok" });
+        return okJson({});
+      }),
+    );
+
+    renderWithProviders(
+      <>
+        <AppRoutes />
+        <LocationProbe />
+      </>,
+      ["/dashboard"],
+    );
+
+    expect(await screen.findByText(/Welcome back/)).toBeInTheDocument();
+    expect(screen.getByText("Current path: /dashboard")).toBeInTheDocument();
   });
 });

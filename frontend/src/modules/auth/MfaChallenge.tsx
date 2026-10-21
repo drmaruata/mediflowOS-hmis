@@ -85,7 +85,7 @@ export default function MfaChallenge() {
         return;
       }
       await queryClient.invalidateQueries({ queryKey: ["auth", "mfa-devices"] });
-      void navigate("/", { replace: true });
+      void navigate("/dashboard", { replace: true });
     },
   });
 

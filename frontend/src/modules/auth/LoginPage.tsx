@@ -54,7 +54,7 @@ export default function LoginPage() {
     mutationFn: login,
     onSuccess: (data) => {
       setTokens(data.access, data.refresh);
-      void navigate("/", { replace: true });
+      void navigate("/dashboard", { replace: true });
     },
   });
 

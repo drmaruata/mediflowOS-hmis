@@ -1,6 +1,12 @@
 /**
  * App.tsx — root shell and route table for the Vite React SPA (React Router 7).
  *
+ * Route contract: UI_UX_design §4.3/§7/§18.2 — canonical paths /auth/sign-in
+ * and /dashboard, with the pre-contract /login and / kept as redirects so
+ * existing links and tests keep resolving. Each scaffolded R1 module exports
+ * a lazy()-loaded route surface (modules/<name>/__routes.tsx) that later
+ * tasks replace with real screens.
+ *
  * The authenticated shell follows design.md §5: a 64px global top bar, a
  * 240px persistent navigation rail (72px when collapsed) and the page
  * canvas. Navigation content lives in `@/lib/navigation`; this file is the
@@ -14,6 +20,7 @@ import { Suspense, lazy, useEffect, useState } from "react";
 import {
   BrowserRouter,
   Navigate,
+  Outlet,
   Route,
   Routes,
   useLocation,
@@ -29,6 +36,15 @@ import LoginPage from "@/modules/auth/LoginPage";
 
 const DashboardView = lazy(() => import("@/modules/dashboard/DashboardView"));
 const MfaChallenge = lazy(() => import("@/modules/auth/MfaChallenge"));
+const SetupRoutes = lazy(() => import("@/modules/setup/__routes"));
+const PatientRegistryRoutes = lazy(() =>
+  import("@/modules/patient_registry/__routes"),
+);
+const AdminRoutes = lazy(() => import("@/modules/admin/__routes"));
+const KioskRoutes = lazy(() => import("@/modules/kiosk/__routes"));
+const NotificationsRoutes = lazy(() =>
+  import("@/modules/notifications/__routes"),
+);
 
 export const queryClient = new QueryClient({
   defaultOptions: {
@@ -42,8 +58,13 @@ export const queryClient = new QueryClient({
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  // No token yet ⇒ sign-in; authenticated ⇒ requested route.
-  return isAuthenticated ? <>{children}</> : <Navigate to="/login" replace />;
+  // No token yet ⇒ sign-in at the canonical route; authenticated ⇒ requested
+  // route. /login stays as a redirect for pre-contract links.
+  return isAuthenticated ? (
+    <>{children}</>
+  ) : (
+    <Navigate to="/auth/sign-in" replace />
+  );
 }
 
 /**
@@ -121,11 +142,11 @@ function AuthLayout() {
           <Suspense
             fallback={
               <div className="flex min-h-[60vh] items-center justify-center text-muted-foreground">
-                <span>Loading dashboard…</span>
+                <span>Loading…</span>
               </div>
             }
           >
-            <DashboardView />
+            <Outlet />
           </Suspense>
         </main>
       </div>
@@ -133,42 +154,74 @@ function AuthLayout() {
   );
 }
 
+export function AppRoutes() {
+  return (
+    <Routes>
+      {/* Redirects keep the pre-contract paths working (UI_UX §4.3). */}
+      <Route path="/login" element={<Navigate to="/auth/sign-in" replace />} />
+      <Route path="/" element={<Navigate to="/dashboard" replace />} />
+      <Route path="/auth/sign-in" element={<LoginPage />} />
+      <Route
+        path="/mfa"
+        element={
+          <AuthGuard>
+            <Suspense
+              fallback={
+                <div className="flex min-h-svh items-center justify-center text-muted-foreground">
+                  <span>Loading…</span>
+                </div>
+              }
+            >
+              <MfaChallenge />
+            </Suspense>
+          </AuthGuard>
+        }
+      />
+      {/* Kiosk is a standalone wall display — no shell and no login prompt
+          (UI_UX §7 kiosk); its scoped read token lands with Task 35. */}
+      <Route
+        path="/kiosk/tokens/:displayId"
+        element={
+          <Suspense
+            fallback={
+              <div className="flex min-h-svh items-center justify-center text-muted-foreground">
+                <span>Loading…</span>
+              </div>
+            }
+          >
+            <KioskRoutes />
+          </Suspense>
+        }
+      />
+      {/* Authenticated shell: nav-item routes render into AuthLayout's
+          Outlet; MfaGate still sends an unverified privileged user to /mfa. */}
+      <Route
+        element={
+          <AuthGuard>
+            <MfaGate>
+              <AuthLayout />
+            </MfaGate>
+          </AuthGuard>
+        }
+      >
+        <Route path="/dashboard" element={<DashboardView />} />
+        <Route path="/admin/setup" element={<SetupRoutes />} />
+        <Route path="/patients" element={<PatientRegistryRoutes />} />
+        <Route path="/admin/users" element={<AdminRoutes />} />
+        <Route path="/notifications" element={<NotificationsRoutes />} />
+      </Route>
+      {/* Unknown routes land on the nearest safe parent with a stable
+          shell rather than a blank page (UI_UX_design §4.3). */}
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+    </Routes>
+  );
+}
+
 export default function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <Routes>
-          <Route path="/login" element={<LoginPage />} />
-          <Route
-            path="/"
-            element={
-              <AuthGuard>
-                <MfaGate>
-                  <AuthLayout />
-                </MfaGate>
-              </AuthGuard>
-            }
-          />
-          <Route
-            path="/mfa"
-            element={
-              <AuthGuard>
-                <Suspense
-                  fallback={
-                    <div className="flex min-h-svh items-center justify-center text-muted-foreground">
-                      <span>Loading…</span>
-                    </div>
-                  }
-                >
-                  <MfaChallenge />
-                </Suspense>
-              </AuthGuard>
-            }
-          />
-          {/* Unknown routes land on the nearest safe parent with a stable
-              shell rather than a blank page (UI_UX_design §4.3). */}
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <AppRoutes />
       </BrowserRouter>
     </QueryClientProvider>
   );
