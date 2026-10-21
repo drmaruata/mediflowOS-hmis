@@ -87,13 +87,19 @@ export interface NavGroup {
  *
  * The scaffolded R1 module routes (UI_UX_design §18.2) serve placeholder
  * screens from modules/<name>/__routes.tsx until each module's task lands;
- * they are real routes, so their nav items are enabled.
+ * they are real routes, so their nav items are enabled. Task 34 replaced
+ * the /admin/users placeholder with the real screens and routed its
+ * siblings: the admin paths below are rendered, not scaffolded.
  */
 export const IMPLEMENTED_ROUTES: ReadonlySet<string> = new Set([
   "/dashboard",
   "/admin/setup",
   "/patients",
   "/admin/users",
+  "/admin/roles",
+  "/admin/departments",
+  "/admin/wards-beds",
+  "/admin/audit",
   "/kiosk/tokens/:displayId",
   "/notifications",
 ]);

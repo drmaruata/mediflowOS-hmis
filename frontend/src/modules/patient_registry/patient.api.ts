@@ -89,6 +89,14 @@ export interface DepartmentOption {
   readonly name: string;
 }
 
+/**
+ * The patient table's audit entity name: audit rows name the record by its
+ * db_table (patient_registry/models.py Meta, "registry.patient"), so the
+ * profile's access-history link and the break-glass grant both use this —
+ * audit/views.py filters on exactly this string.
+ */
+export const PATIENT_AUDIT_ENTITY_TYPE = "registry.patient";
+
 // --- fetch functions -------------------------------------------------------
 
 export async function searchPatients(term: string): Promise<Patient[]> {

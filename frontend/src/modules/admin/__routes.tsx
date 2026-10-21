@@ -1,35 +1,17 @@
 /**
- * Admin — route surface for /admin/users (UI_UX_design §7 "Users
- * administration", §18.2 R1 inventory; TEN-004).
+ * Admin — route surface for the /admin screens (UI_UX_design §7 "Users
+ * administration", "Roles administration", "Departments administration",
+ * "Wards and beds administration", "Audit log viewer"; TEN-004, TEN-008,
+ * AUD-003).
  *
- * Scaffold placeholder: it holds the route contract until Task 34 lands the
- * users, roles, departments, wards/beds and audit screens. App.tsx
- * lazy-loads this file as the /admin/users element.
+ * Exports lazy elements for the screens; App.tsx keeps the route table
+ * itself. The lazy() calls live here so each screen stays its own chunk —
+ * App.tsx imports only this thin module eagerly.
  */
 
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-} from "@/components/ui/card";
+import { lazy } from "react";
 
-export default function AdminRoutes() {
-  return (
-    <Card className="mx-auto max-w-xl">
-      <CardHeader>
-        <h1 className="text-xl font-bold tracking-tight text-card-foreground">
-          Users & Roles
-        </h1>
-        <CardDescription>Not available yet (R1)</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <p role="status" className="text-sm text-muted-foreground">
-          User and role administration is not built yet — this placeholder
-          holds the /admin/users route until the screen arrives with its
-          release task.
-        </p>
-      </CardContent>
-    </Card>
-  );
-}
+export const AdminUsers = lazy(() => import("./Users"));
+export const AdminRoles = lazy(() => import("./Roles"));
+export const AdminDepartmentsWardsBeds = lazy(() => import("./DepartmentsWardsBeds"));
+export const AdminAuditLog = lazy(() => import("./AuditLog"));

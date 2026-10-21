@@ -8,20 +8,36 @@
  * actually resolve (a foreign or unknown id answers 404, tenant-scoped).
  * The UHID is announced first, before the name (UI_UX accessibility note),
  * and the verification state is always visible text, never colour alone.
+ *
+ * Task 34 additions: the "View access history" action links to the admin
+ * audit screen pre-filtered to this record (AUD-003), and the break-glass
+ * dialog mounts here — emergency access is granted from the record it
+ * opens, rendered only when the session holds the allows_break_glass claim
+ * (TEN-007).
  */
 
-import { useParams } from "react-router-dom";
+import { useState } from "react";
+import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import BreakGlassDialog from "@/modules/admin/BreakGlassDialog";
 import { useSession } from "@/lib/session";
 import { extractServerErrors } from "@/lib/serverErrors";
-import { birthYearFromDemographics, fetchPatient, sameTenant, verificationLabel } from "./patient.api";
+import {
+  birthYearFromDemographics,
+  fetchPatient,
+  PATIENT_AUDIT_ENTITY_TYPE,
+  sameTenant,
+  verificationLabel,
+} from "./patient.api";
 
 export default function PatientDetail() {
   const { id } = useParams<{ id: string }>();
   const session = useSession();
   const tenantId = session.data?.tenant_id ?? null;
+  const [breakGlassOpen, setBreakGlassOpen] = useState(false);
 
   const patient = useQuery({
     queryKey: ["patients", tenantId, id],
@@ -118,6 +134,28 @@ export default function PatientDetail() {
           </dd>
         </div>
       </dl>
+
+      <div className="mt-4 flex flex-wrap items-center gap-2">
+        <Button asChild variant="outline">
+          <Link
+            to={`/admin/audit?entity_type=${PATIENT_AUDIT_ENTITY_TYPE}&entity_id=${data.id}`}
+          >
+            View access history
+          </Link>
+        </Button>
+        {session.data?.allows_break_glass === true && (
+          <Button variant="destructive" onClick={() => setBreakGlassOpen(true)}>
+            Emergency access
+          </Button>
+        )}
+      </div>
+      <BreakGlassDialog
+        open={breakGlassOpen}
+        onOpenChange={setBreakGlassOpen}
+        resourceType={PATIENT_AUDIT_ENTITY_TYPE}
+        resourceId={data.id}
+        resourceLabel={data.uhid}
+      />
     </div>
   );
 }

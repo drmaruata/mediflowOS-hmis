@@ -211,12 +211,20 @@ describe("UI_UX route contract (§18.2 R1 inventory)", () => {
     }
   });
 
+  it("flips admin nav items whose screens landed with Task 34", () => {
+    for (const id of ["departments", "wards-beds", "audit"]) {
+      const entry = NAV_ITEMS.find((i) => i.id === id)!;
+      expect(entry.path).not.toBeNull();
+      expect(isNavItemDisabled(entry)).toBe(false);
+      expect(navItemStateLabel(entry)).toBeNull();
+    }
+  });
+
   it("keeps items disabled whose own path has no route yet", () => {
-    // Availability keys off the item's own path, never its module: with
-    // only /admin/users scaffolded, the sibling admin items stay disabled.
+    // Availability keys off the item's own path, never its module: the
+    // admin items Task 34 did not render (configuration history,
+    // registration config) stay disabled alongside the unbuilt releases.
     for (const id of [
-      "departments",
-      "wards-beds",
       "config-history",
       "registration-config",
       "opd",

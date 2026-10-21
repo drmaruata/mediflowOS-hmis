@@ -39,11 +39,16 @@ import PatientRegistryRoutes, {
   PatientRegistration,
   VerificationQueue,
 } from "@/modules/patient_registry/__routes";
+import {
+  AdminAuditLog,
+  AdminDepartmentsWardsBeds,
+  AdminRoles,
+  AdminUsers,
+} from "@/modules/admin/__routes";
 
 const DashboardView = lazy(() => import("@/modules/dashboard/DashboardView"));
 const MfaChallenge = lazy(() => import("@/modules/auth/MfaChallenge"));
 const SetupRoutes = lazy(() => import("@/modules/setup/__routes"));
-const AdminRoutes = lazy(() => import("@/modules/admin/__routes"));
 const KioskRoutes = lazy(() => import("@/modules/kiosk/__routes"));
 const NotificationsRoutes = lazy(() =>
   import("@/modules/notifications/__routes"),
@@ -219,7 +224,21 @@ export function AppRoutes() {
           <Route path="verification-queue" element={<VerificationQueue />} />
           <Route path=":id" element={<PatientDetail />} />
         </Route>
-        <Route path="/admin/users" element={<AdminRoutes />} />
+        {/* Admin screens (UI_UX §7): users/roles/configuration are flat
+            routes under /admin; the departments and wards-beds paths share
+            the one configuration edit surface, which renders the sections
+            each nav item names. */}
+        <Route path="/admin/users" element={<AdminUsers />} />
+        <Route path="/admin/roles" element={<AdminRoles />} />
+        <Route
+          path="/admin/departments"
+          element={<AdminDepartmentsWardsBeds section="departments" />}
+        />
+        <Route
+          path="/admin/wards-beds"
+          element={<AdminDepartmentsWardsBeds section="wards-beds" />}
+        />
+        <Route path="/admin/audit" element={<AdminAuditLog />} />
         <Route path="/notifications" element={<NotificationsRoutes />} />
       </Route>
       {/* Unknown routes land on the nearest safe parent with a stable
