@@ -480,6 +480,30 @@ describe("Roles", () => {
     expect(within(matrix).getByLabelText("platform.tenants.manage")).toBeDisabled();
     expect(within(matrix).getByText(/platform-scope/i)).toBeInTheDocument();
   });
+
+  it("offers the quality catalogue code as a grantable toggle (ninth backend-enforced code)", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/auth/me/")) return ok(session());
+      if (url.split("?")[0].endsWith("/api/v1/roles/")) return ok(ROLE_PAGE);
+      return ok(EMPTY_PAGE);
+    });
+
+    renderAt("/admin/roles");
+    const row = await screen
+      .findByRole("cell", { name: "Tenant admin" })
+      .then((cell) => cell.closest("tr"));
+    if (row === null) throw new Error("role row not found");
+    await userEvent.click(within(row).getByRole("button", { name: "Edit" }));
+
+    const matrix = await screen.findByRole("region", { name: "Permission matrix" });
+    // quality.catalogue.manage (quality_os/views.py:28, :35, :42, :49) is
+    // enforced and — unlike platform.* — accepted on tenant roles, so the
+    // matrix must recommend it as a live toggle; the fixture role carries
+    // no extra codes, so a rendered toggle can only come from the
+    // recommended vocabulary.
+    const toggle = within(matrix).getByLabelText("quality.catalogue.manage");
+    expect(toggle).toBeEnabled();
+  });
 });
 
 describe("DepartmentsWardsBeds", () => {
@@ -681,6 +705,51 @@ describe("AuditLog", () => {
       }),
     ).not.toBeInTheDocument();
   });
+
+  it("carries the entity filters into the page-2 request (pagination composes with filters)", async () => {
+    const calls = stubFetch((url) => {
+      if (url.endsWith("/api/v1/auth/me/")) return ok(session());
+      if (url.split("?")[0].endsWith("/api/v1/audit-log/")) {
+        const params = new URLSearchParams(url.split("?")[1] ?? "");
+        const filtered =
+          params.get("entity_type") === "registry.patient" &&
+          params.get("entity_id") === PATIENT_ID;
+        return ok({
+          count: 51,
+          // Only page 1 of the filtered view offers a next page — the Pager
+          // button must be enabled by data, not assumption.
+          next:
+            filtered && params.get("page") === "1"
+              ? "http://localhost/api/v1/audit-log/?page=2"
+              : null,
+          previous: null,
+          results: [auditEvent()],
+        });
+      }
+      return ok(EMPTY_PAGE);
+    });
+
+    renderAt(`/admin/audit?entity_type=registry.patient&entity_id=${PATIENT_ID}`);
+    expect(
+      await screen.findByRole("cell", { name: `registry.patient ${PATIENT_ID}` }),
+    ).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Next page" }));
+
+    const page2 = await vi.waitUntil(() =>
+      calls.find(
+        (c) =>
+          c.method === "GET" &&
+          c.url.split("?")[0].endsWith("/api/v1/audit-log/") &&
+          c.url.includes("page=2"),
+      ),
+    );
+    if (page2 === undefined) throw new Error("no page-2 audit request");
+    // Dropping the filters on page 2 would silently widen the view from one
+    // entity to every row of every entity the tenant ever audited.
+    expect(page2.url).toContain("entity_type=registry.patient");
+    expect(page2.url).toContain(`entity_id=${PATIENT_ID}`);
+  });
 });
 
 describe("PatientDetail audit entry point (AUD-003)", () => {
@@ -749,7 +818,7 @@ describe("BreakGlassDialog", () => {
     expect(within(status).getByText("2026-10-21T06:00:00Z")).toBeInTheDocument();
   });
 
-  it("renders the server's refusal detail (403 without the claim, 400 without a reason)", async () => {
+  it("renders the server's refusal detail when the role holds no break-glass claim (403)", async () => {
     stubFetch((url, method) => {
       if (url.endsWith("/api/v1/auth/me/")) return ok(session());
       if (url.endsWith("/api/v1/auth/break-glass/") && method === "POST") {

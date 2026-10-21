@@ -138,7 +138,7 @@ export default function PatientDetail() {
       <div className="mt-4 flex flex-wrap items-center gap-2">
         <Button asChild variant="outline">
           <Link
-            to={`/admin/audit?entity_type=${PATIENT_AUDIT_ENTITY_TYPE}&entity_id=${data.id}`}
+            to={`/admin/audit?entity_type=${encodeURIComponent(PATIENT_AUDIT_ENTITY_TYPE)}&entity_id=${encodeURIComponent(data.id)}`}
           >
             View access history
           </Link>

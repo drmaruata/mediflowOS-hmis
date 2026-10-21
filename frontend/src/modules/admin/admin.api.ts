@@ -21,10 +21,13 @@ export interface Page<T> {
 }
 
 /**
- * The backend-enforced permission vocabulary: every code the server's
- * RequirePermission / WritePermissionMixin gates are grep'd from
- * backend/apps/identity_tenancy (views.py:72, :414, :427, :447, :547, :604,
- * :719, :811). The matrix presents these as the recommended toggles; the
+ * Every permission code the backend enforces today — the grantable set,
+ * grep-verified against every `write_permission = ` / `RequirePermission(`
+ * string under backend/apps: identity_tenancy/views.py:72, :414, :427, :447,
+ * :547, :604, :719, :811 and quality_os/views.py:28, :35, :42, :49
+ * (`quality.catalogue.manage` gates the four global quality catalogue
+ * viewsets and, unlike platform.*, RoleSerializer accepts it on tenant
+ * roles). The matrix presents these as the recommended toggles; the
  * `permissions` claim is a free-text list server-side, so a role may also
  * carry custom codes the UI keeps visible and editable.
  *
@@ -40,6 +43,7 @@ export const BACKEND_PERMISSION_CODES = [
   "identity.reference_data.write",
   "identity.baseline_input.write",
   "identity.break_glass.revoke",
+  "quality.catalogue.manage",
   "platform.tenants.manage",
 ] as const;
 
