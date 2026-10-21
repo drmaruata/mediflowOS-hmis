@@ -33,13 +33,16 @@ import { useSession } from "@/lib/session";
 import { AppHeader } from "@/components/AppHeader";
 import { AppSidebar, AppSidebarDrawer } from "@/components/AppSidebar";
 import LoginPage from "@/modules/auth/LoginPage";
+import PatientRegistryRoutes, {
+  PatientDetail,
+  PatientList,
+  PatientRegistration,
+  VerificationQueue,
+} from "@/modules/patient_registry/__routes";
 
 const DashboardView = lazy(() => import("@/modules/dashboard/DashboardView"));
 const MfaChallenge = lazy(() => import("@/modules/auth/MfaChallenge"));
 const SetupRoutes = lazy(() => import("@/modules/setup/__routes"));
-const PatientRegistryRoutes = lazy(() =>
-  import("@/modules/patient_registry/__routes"),
-);
 const AdminRoutes = lazy(() => import("@/modules/admin/__routes"));
 const KioskRoutes = lazy(() => import("@/modules/kiosk/__routes"));
 const NotificationsRoutes = lazy(() =>
@@ -206,7 +209,16 @@ export function AppRoutes() {
       >
         <Route path="/dashboard" element={<DashboardView />} />
         <Route path="/admin/setup" element={<SetupRoutes />} />
-        <Route path="/patients" element={<PatientRegistryRoutes />} />
+        {/* The patient registry nests its screens under /patients; the
+            module's __routes.tsx owns the lazy screen elements, this table
+            owns the paths (UI_UX §7; detail is keyed by the record id the
+            backend retrieves by, not the UHID). */}
+        <Route path="/patients" element={<PatientRegistryRoutes />}>
+          <Route index element={<PatientList />} />
+          <Route path="register" element={<PatientRegistration />} />
+          <Route path="verification-queue" element={<VerificationQueue />} />
+          <Route path=":id" element={<PatientDetail />} />
+        </Route>
         <Route path="/admin/users" element={<AdminRoutes />} />
         <Route path="/notifications" element={<NotificationsRoutes />} />
       </Route>

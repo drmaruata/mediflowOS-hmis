@@ -1,9 +1,10 @@
 /**
  * ResourceSection — the shared read-only table shell the wizard's CRUD steps
  * (departments/wards/beds, service units, staff positions, reference data,
- * baseline inputs) compose around. Rows live in their own tables behind
- * their own endpoints, so the section only renders what a query already
- * fetched; the add-form slot is the step's own controlled form.
+ * baseline inputs) and the patient registry's list surfaces compose around.
+ * Rows live behind their own endpoints, so the section only renders what a
+ * query already fetched; the children slot holds a screen's own form or
+ * notes.
  *
  * A plain semantic <table> (the doc's Table component is not vendored):
  * caption names the table for role-based queries, th scope=col, and the
@@ -30,7 +31,7 @@ interface ResourceSectionProps<T> {
   emptyText: string;
   /** Tenant-wide total from the paginated `count`; the caption renders only when it exceeds the rows shown. */
   totalCount?: number | null;
-  /** The step's add-form (fields + its own submit button + error alert). */
+  /** The owning screen's add-form (fields + its own submit button + error alert) or notes. */
   children?: ReactNode;
 }
 
