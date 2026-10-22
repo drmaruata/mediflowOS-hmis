@@ -8,23 +8,19 @@ same functions, so the ciphertext they produce and accept is interchangeable.
 Design points, each pinned by tests/unit/test_crypto.py:
 
 - Tokens are self-contained ``v1:<iv>:<ciphertext>`` strings (base64). The IV
-  travels inside the token, so nothing outside the stored value is needed to
-  open it, and authentication is real: a wrong key or any tampering raises
+  travels inside the token, so nothing outside the stored value is needed to open
+  it, and authentication is real: a wrong key or any tampering raises
   ``InvalidTag`` loudly rather than returning garbage.
-- ``derive_keys`` expands the master passphrase with PBKDF2-HMAC-SHA256 into
-  two independent 32-byte keys (AES + HMAC), domain-separated by salt suffix.
-  The salt is a fixed application constant: the derived keys must be stable
-  across restarts so an already-encrypted database keeps decrypting. The salt
-  is public — it only separates this application's key stream from other
-  PBKDF2 users, it is not a secret.
+- ``derive_keys`` expands the master passphrase with PBKDF2-HMAC-SHA256 into two
+  independent 32-byte keys (AES + HMAC), domain-separated by salt suffix. The salt
+  is a fixed application constant — public, not secret; it only separates this
+  application's key stream from other PBKDF2 users — because the derived keys must
+  be stable across restarts so an already-encrypted database keeps decrypting.
 - ``search_index`` is a keyed HMAC-SHA256 digest, not a bare hash. Mobiles and
-  ABHA numbers are low-entropy; an unkeyed hash in the index column would turn
-  it into an offline dictionary-attack oracle for anyone with a copy of the
-  table. The key is what makes the column usable for exact lookup but useless
-  to an attacker.
+  ABHA numbers are low-entropy; an unkeyed hash in the index column would turn it
+  into an offline dictionary-attack oracle for anyone holding a copy of the table.
 
-Key material (both derived keys and the master passphrase) must never be
-logged.
+Key material (both derived keys and the master passphrase) must never be logged.
 """
 import base64
 import binascii
@@ -36,20 +32,19 @@ from functools import lru_cache
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 #: Every stored token starts with this literal; it doubles as the "already
-#: encrypted" marker that the model's write path checks to avoid re-encrypting
-#: a value it just read back.
+#: encrypted" marker the model's write path checks to avoid re-encrypting a value
+#: it just read back.
 TOKEN_PREFIX = "v1:"
 
-#: Salt prefixes for the two PBKDF2 derivations. Distinct suffixes give the
-#: AES and HMAC keys independent key streams (domain separation): recovering
-#: the AES key must not also unlock the search-index oracle, and vice versa.
+#: Salt prefixes for the two PBKDF2 derivations. Distinct suffixes give the AES
+#: and HMAC keys independent key streams (domain separation): recovering the AES
+#: key must not also unlock the search-index oracle, and vice versa.
 _SALT = b"mediflowOS-hmis:REG-008:field-encryption:v1"
 _AES_SALT = _SALT + b":aes"
 _HMAC_SALT = _SALT + b":hmac"
 
-#: OWASP's 2023 recommendation for PBKDF2-HMAC-SHA256. The derivation is
-#: memoised per passphrase, so this cost is paid once per process, not once per
-#: field write.
+#: OWASP's 2023 recommendation for PBKDF2-HMAC-SHA256. Memoised per passphrase, so
+#: this cost is paid once per process, not once per field write.
 _PBKDF2_ITERATIONS = 600_000
 
 
@@ -84,9 +79,9 @@ def derive_keys(passphrase: str) -> tuple[bytes, bytes]:
 def encrypt(plaintext: str, *, key: bytes) -> str:
     """Seal ``plaintext`` into a self-contained ``v1:<iv>:<ciphertext>`` token.
 
-    A fresh 12-byte random IV is generated per call — reusing a nonce under
-    the same key is catastrophically fatal for AES-GCM, so the IV is never
-    derived from the plaintext (same plaintext must produce different tokens).
+    A fresh 12-byte random IV per call — reusing a nonce under the same key is
+    catastrophically fatal for AES-GCM, so the IV is never derived from the
+    plaintext (same plaintext must produce different tokens).
     """
     nonce = os.urandom(12)
     ciphertext = AESGCM(key).encrypt(nonce, plaintext.encode("utf-8"), None)

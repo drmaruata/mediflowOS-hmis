@@ -18,6 +18,7 @@ import uuid
 import pytest
 from django.contrib.auth import get_user_model
 from django.db import connection
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.identity_tenancy.models import (
@@ -269,7 +270,9 @@ class TestDuplicateCheckThroughIndex:
 class TestAbdmCallbackRematchesEncryptedPatient:
     """A returning ABDM scan matches the encrypted row via the index (ABD-008)."""
 
-    def test_second_scan_returns_same_patient_no_duplicate_row(self):
+    def test_second_scan_returns_same_patient_no_duplicate_row(
+        self, post_signed_callback
+    ):
         tenant = Tenant.objects.create(
             name="ABDM Enc", slug=f"abdm-enc-{uuid.uuid4().hex[:8]}"
         )
@@ -282,8 +285,6 @@ class TestAbdmCallbackRematchesEncryptedPatient:
         )
 
         gateway = APIClient()
-        auth = {"HTTP_X_AUTHORIZATION": "gateway-shared-secret"}
-        from django.utils import timezone
 
         payload = {
             "requestId": "req-enc-1",
@@ -292,10 +293,10 @@ class TestAbdmCallbackRematchesEncryptedPatient:
             "profile": {"abhaNumber": "123456789012"},
         }
 
-        first = gateway.post("/api/v1/abdm-callbacks/", payload, format="json", **auth)
+        first = post_signed_callback(gateway, payload)
         assert first.status_code == 200, first.content
         patient_id = first.json()["patient_id"]
-        second = gateway.post("/api/v1/abdm-callbacks/", payload, format="json", **auth)
+        second = post_signed_callback(gateway, payload)
 
         assert second.status_code == 200, second.content
         assert second.json()["patient_id"] == patient_id

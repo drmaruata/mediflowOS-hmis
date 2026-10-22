@@ -3,6 +3,7 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+from celery.schedules import crontab
 from django.core.exceptions import ImproperlyConfigured
 
 from apps.abdm_gateway.client import require_sandbox_base_url
@@ -39,6 +40,104 @@ _abdm_sandbox_url = os.getenv("ABDM_SANDBX_BASE_URL", "")
 ABDM_SANDBX_BASE_URL = (
     require_sandbox_base_url(_abdm_sandbox_url) if _abdm_sandbox_url else ""
 )
+
+# ABD-005: shared secret the ABDM gateway signs Scan and Share callbacks with
+# — HMAC-SHA256 over the raw request body, hex digest sent in
+# ``X-ABDM-Signature``. There is deliberately **no default**: a published empty
+# secret would reduce the check to the presence test the requirement forbids.
+# The sandbox issues no shared secret yet, so the callback reads this at request
+# time and fails closed when it is empty, except under DEBUG, where a local
+# developer has no way to obtain one (dev.py documents that asymmetry).
+# test.py supplies a fixed literal so the suite is deterministic.
+ABDM_CLIENT_SECRET = os.getenv("ABDM_CLIENT_SECRET", "")
+
+# ABD-007: tolerance for the gateway's callback timestamp, 5 minutes per the
+# ABDM specification. A misconfigured window must not silently disable the
+# replay check it guards, so a non-numeric or non-positive value falls back to
+# the default rather than widening the window.
+_abdm_max_skew = os.getenv("ABDM_MAX_SKEW_SECONDS", "")
+ABDM_MAX_SKEW_SECONDS = 300
+if _abdm_max_skew.isdigit() and int(_abdm_max_skew) > 0:
+    ABDM_MAX_SKEW_SECONDS = int(_abdm_max_skew)
+
+# AUD-002: HMAC-SHA256 key the audit hash chain is computed under. There is
+# deliberately **no default**: an unkeyed HMAC is just a hash, so anyone who
+# can read ``audit.event`` could recompute and forge the chain, and
+# tamper-evidence would be a claim rather than a control. A non-DEBUG settings
+# import therefore refuses to start without one, mirroring the
+# PATIENT_FIELDS_KEY guard above. dev.py and test.py supply deterministic
+# values *before* they ``from .base import *`` — a local database must keep
+# verifying across restarts, and a random key would make every restart a key
+# rotation; production must set AUDIT_HMAC_KEY in the environment.
+AUDIT_HMAC_KEY = os.getenv("AUDIT_HMAC_KEY", "")
+if not DEBUG and not AUDIT_HMAC_KEY:
+    raise ImproperlyConfigured(
+        "AUDIT_HMAC_KEY must be set when DEBUG is off: the audit trail is a "
+        "tamper-evident HMAC chain (AUD-002) computed under this key, and an "
+        "unkeyed chain can be recomputed - and therefore forged - by anyone "
+        "who can read the table. dev.py/test.py set a value; production must "
+        "export one."
+    )
+
+# AUD-004: audit retention window in days, consumed by ``purge_expired``
+# (Task 23 schedules the beat entry). The SRS states the requirement —
+# "retain audit records per a configurable retention policy" — but names no
+# period, and the architecture doc leaves long-term audit retention as an
+# open question with the customer (OQ-08), so 365 is a documented
+# placeholder, not a compliance claim: it is the value an operator overrides
+# per deployment. A non-numeric or non-positive value falls back to the
+# default rather than disabling the purge, the same guard
+# ABDM_MAX_SKEW_SECONDS uses, so a mis-typed setting cannot silently widen or
+# shrink the window.
+_audit_retention_days = os.getenv("AUDIT_RETENTION_DAYS", "")
+AUDIT_RETENTION_DAYS = 365
+if _audit_retention_days.isdigit() and int(_audit_retention_days) > 0:
+    AUDIT_RETENTION_DAYS = int(_audit_retention_days)
+
+# PLT-005: file storage for documents and evidence, with access control.
+#
+# MAX_UPLOAD_MB caps the decoded size of a single upload. The clinical
+# artefacts the requirement names - scanned reports, lab result CSVs, the
+# occasional photograph - are documents, not media streams, so 10 MB is a
+# working default rather than a tuned one. A non-numeric or non-positive value
+# falls back to the default instead of disabling the cap, mirroring the
+# ABDM_MAX_SKEW_SECONDS guard above: a mistyped setting must not silently
+# become "no limit", and must not become zero either, which would refuse
+# every upload including an empty one.
+_max_upload_mb = os.getenv("MAX_UPLOAD_MB", "")
+MAX_UPLOAD_MB = 10
+if _max_upload_mb.isdigit() and int(_max_upload_mb) > 0:
+    MAX_UPLOAD_MB = int(_max_upload_mb)
+
+# MEDIA_ROOT is where the uploaded bytes live. It is an absolute path so that a
+# change of working directory cannot move the storage out from under the rows
+# that reference it - the download view resolves ``file_url`` against it, and a
+# relative value would make the same row point somewhere else depending on who
+# started the process. The default keeps uploads inside the backend directory;
+# a deployment is expected to mount a volume and override it.
+MEDIA_ROOT = os.getenv("MEDIA_ROOT", str(BASE_DIR / "media"))
+
+# Django caps a request body at 2.5 MB by default (DATA_UPLOAD_MAX_MEMORY_SIZE)
+# and raises SuspiciousOperation - surfaced as a 400 - when it is exceeded.
+# That ceiling sits *below* the legal upload size above, so without this a
+# compliant 10 MB document would be refused before the view, the serializer or
+# the allow-list ever ran, and the refusal would have nothing to do with any
+# rule the caller can see. It is raised to the cap plus a megabyte of headroom
+# for the multipart envelope (field names, boundaries, headers), which the
+# file bytes themselves do not count against but the surrounding request does.
+#
+# FILE_UPLOAD_MAX_MEMORY_SIZE is deliberately left alone: it is the threshold
+# at which Django stops buffering an upload in memory and streams it to a
+# temporary file, so its 2.5 MB default is the behaviour wanted here - a
+# 10 MB document is spooled to disk, not held in RAM.
+#
+# Blast radius, stated because it is not upload-scoped: this is a project-wide
+# request-body ceiling, so raising it means every endpoint - not only the
+# uploads route - tolerates an 11 MB body before Django refuses it. The cost is
+# request-handling memory on every route; the endpoint-level caps below are
+# still what refuse an oversize document, and no other endpoint accepts a body
+# this large, so the wider ceiling is headroom rather than a new limit.
+DATA_UPLOAD_MAX_MEMORY_SIZE = MAX_UPLOAD_MB * 1024 * 1024 + 1024 * 1024
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -178,12 +277,24 @@ REST_FRAMEWORK = {
     },
 }
 
-SPECTACULAR = {
+# drf-spectacular reads this dict from the ``SPECTACULAR_SETTINGS`` setting and
+# from no other name, so the key is load-bearing rather than cosmetic: declared
+# under a different name, every value here is silently ignored and the library's
+# own defaults apply. That is not visible at boot, at import, or in a request
+# log - the published schema just comes out as ``title: ""`` / ``version:
+# "0.0.0"``, which still validates as valid OpenAPI. See
+# tests/integration/test_openapi_schema.py, which asserts the values reach the
+# document rather than trusting the declaration.
+SPECTACULAR_SETTINGS = {
     "TITLE": "Mediflow OS HMIS",
     "VERSION": "0.1.0",
     # Keep the schema and Swagger UI readable while every data endpoint
     # stays authenticated. Without this, requiring authentication would
-    # make the API documentation itself unreachable.
+    # make the API documentation itself unreachable. Both values below are
+    # currently identical to drf-spectacular's own defaults, so this
+    # declaration is what keeps them that way rather than a no-op that happens
+    # to agree - asserted by
+    # test_the_documentation_is_publicly_readable.test_it_answers_200_without_credentials.
     "SERVE_PERMISSIONS": ["rest_framework.permissions.AllowAny"],
     "SERVE_AUTHENTICATION": None,
 }
@@ -208,13 +319,72 @@ SIMPLE_JWT = {
     "UPDATE_LAST_LOGIN": True,
 }
 
+# INT-009: OIDC single sign-on. The IdP's signature is the root of trust —
+# apps/identity_tenancy/oidc.py verifies issuer, audience, signature and
+# expiry against the IdP's published JWKS before any local effect. The three
+# required values default to empty strings rather than half-working
+# placeholders, so an unconfigured deployment answers 501 with a structured
+# body before the request body is even parsed — never a fake 200.
+OIDC_ISSUER = os.getenv("OIDC_ISSUER", "").strip()
+OIDC_AUDIENCE = os.getenv("OIDC_AUDIENCE", "").strip()
+OIDC_JWKS_URI = os.getenv("OIDC_JWKS_URI", "").strip()
+# The ID-token claim carrying the tenant slug the exchange binds. A blank or
+# whitespace-only value falls back to the documented default rather than
+# disabling tenant binding: an empty claim name would make every configured
+# login unresolvable, which would read as breakage, not as configuration.
+OIDC_TENANT_CLAIM = os.getenv("OIDC_TENANT_CLAIM", "").strip() or "tenant"
+# Just-in-time account creation on first sign-on. Off by default: an unknown
+# identity is refused (403) until the operator opts in, mirroring the house
+# "true"/"false" env-flag shape (see DEBUG above).
+OIDC_JIT_PROVISION = os.getenv("OIDC_JIT_PROVISION", "false") == "true"
+
 CHANNEL_LAYERS = {
     "default": {"BACKEND": "channels_redis.core.RedisChannelLayer", "CONFIG": {"hosts": [os.getenv("REDIS_URL", "redis://redis:6379/0")]}},
 }
 
 CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://redis:6379/0")
 CELERY_RESULT_BACKEND = CELERY_BROKER_URL
+# PLT-004/INT-014: beat drives the schedulers through the DatabaseScheduler,
+# which seeds these static entries into periodic-task rows on startup, so an
+# operator can also add or disable one from the admin without a deploy.
 CELERY_BEAT_SCHEDULER = "django_celery_beat.schedulers:DatabaseScheduler"
+
+# PLT-004/INT-014: the scheduled background work. INT-014 is explicit that
+# delivery and execution must not depend on Django Channels, which is why these
+# live here and not in a consumer.
+#
+# Every entry points at a zero-argument *dispatcher* in
+# ``apps/workers/tasks.py`` rather than at the per-tenant task. A static
+# schedule dict is evaluated once, when the settings module is imported, while
+# tenants are created at runtime — so a schedule cannot name a tenant, and a
+# beat entry that tried to pass a tenant id would be pinned to whichever tenant
+# happened to exist at deploy time. Each dispatcher enumerates the tenants and
+# enqueues the tenant-scoped task over them, which also puts each tenant's work
+# in its own bound session (``platform.notification`` and ``audit.event`` are
+# RLS-protected and read nothing at all without one).
+#
+# The intervals: a daily window for the retention purge (AUD-004, off-peak), an
+# hourly cadence matching the ABD-014 failure window, a five-minute sweep of
+# due job rows (a job carries its own ``scheduled_at``), and a one-minute sweep
+# of undelivered notifications (PLT-001, clinical alerts someone is waiting on).
+CELERY_BEAT_SCHEDULE = {
+    "purge-expired-audit-events": {
+        "task": "apps.workers.tasks.dispatch_audit_retention_purge",
+        "schedule": crontab(hour=2, minute=0),
+    },
+    "scan-abdm-callback-failures": {
+        "task": "apps.workers.tasks.dispatch_abdm_callback_failure_scan",
+        "schedule": crontab(minute=0),
+    },
+    "run-due-scheduled-jobs": {
+        "task": "apps.workers.tasks.dispatch_due_scheduled_jobs",
+        "schedule": crontab(minute="*/5"),
+    },
+    "dispatch-pending-notifications": {
+        "task": "apps.workers.tasks.dispatch_pending_notifications",
+        "schedule": crontab(minute="*"),
+    },
+}
 
 SESSION_ENGINE = "django.contrib.sessions.backends.cache"
 SESSION_CACHE_ALIAS = "default"

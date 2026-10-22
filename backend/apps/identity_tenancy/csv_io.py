@@ -248,11 +248,21 @@ def _write_audit_event(tenant_id, instance, action, user) -> None:
     mixin also records: those live on the request, which the bulk file layer
     does not carry. The import passes the acting ``request.user``, so the
     event is attributed to the same account the mixin would have used.
+
+    The write goes through ``append_event`` (AUD-002) rather than a direct
+    ``AuditEvent.objects.create``, so the imported row joins the tenant's
+    chain: an unchained row carries the column's empty hash default, which
+    ``verify_chain`` reads as a pre-chain row and skips — leaving a bulk
+    import both invisible to the chain and silently editable afterwards.
+    The stored values are byte-for-byte what the direct write stored; the
+    digest is the only addition. The service is imported inside the function
+    for the same cycle-avoidance reason ``common.tenant`` uses — the bulk
+    layer already imports audit models locally.
     """
-    from apps.audit.models import AuditEvent
+    from apps.audit.services import append_event
 
     user_id = user.pk if getattr(user, "is_authenticated", False) else None
-    AuditEvent.objects.create(
+    append_event(
         tenant_id=tenant_id,
         user_id=user_id,
         action=action,

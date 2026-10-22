@@ -12,12 +12,24 @@
  * inside an avatar only.
  */
 
-import { Activity, Bell, Menu, PanelLeftClose, PanelLeftOpen, Search } from "lucide-react";
+import { Activity, Bell, LogOut, Menu, PanelLeftClose, PanelLeftOpen, Search } from "lucide-react";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { ThemeToggle } from "@/components/ThemeToggle";
+import { useSession } from "@/lib/session";
+import { useAuthStore } from "@/stores/authStore";
+import { logout } from "@/modules/auth/auth.api";
 
 export interface AppHeaderProps {
   /** Live-data indicator state (design.md §8.14). */
@@ -37,6 +49,29 @@ export function AppHeader({
   onOpenNav,
   onToggleCollapsed,
 }: AppHeaderProps) {
+  const queryClient = useQueryClient();
+  const session = useSession();
+  const username = session.data?.username;
+  const initial = username ? username.charAt(0).toUpperCase() : null;
+
+  // Contractual order (UI-001): blacklist first, clear second — a network
+  // failure must not trap a leaving user in the app, but is never silent.
+  const handleSignOut = async () => {
+    const { refreshToken, clearTokens } = useAuthStore.getState();
+    try {
+      if (refreshToken) {
+        await logout(refreshToken);
+      }
+    } catch (err) {
+      console.warn(
+        "mediflow: token blacklisting failed during sign-out; clearing the local session anyway",
+        err,
+      );
+    }
+    clearTokens();
+    queryClient.removeQueries({ queryKey: ["auth"] });
+  };
+
   return (
     <header className="sticky top-0 z-40 flex h-16 items-center gap-3 bg-shell-topbar px-4 text-white md:px-6">
       {/* Compact-viewport nav trigger */}
@@ -159,21 +194,43 @@ export function AppHeader({
         {/* Theme control (design.md §16) */}
         <ThemeToggle onDarkSurface />
 
-        {/* User menu placeholder — identity disclosure belongs here once the
-            auth store exposes the signed-in user (UI-003). */}
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="User menu"
-          className="text-white hover:bg-white/10 hover:text-white"
-        >
-          <span
-            aria-hidden="true"
-            className="flex size-7 items-center justify-center rounded-full bg-white/15 text-xs font-semibold"
-          >
-            —
-          </span>
-        </Button>
+        {/* User menu — session identity disclosure and sign-out (UI-001);
+            the full profile card stays scoped to UI-003. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              variant="ghost"
+              size="icon"
+              aria-label="User menu"
+              className="text-white hover:bg-white/10 hover:text-white"
+            >
+              <span
+                aria-hidden="true"
+                className="flex size-7 items-center justify-center rounded-full bg-white/15 text-xs font-semibold"
+              >
+                {initial ?? "—"}
+              </span>
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuLabel className="flex flex-col gap-0.5">
+              <span className="font-medium">{username ?? "Signed in"}</span>
+              {session.data?.role && (
+                <span className="text-xs font-normal text-muted-foreground">
+                  {session.data.role}
+                </span>
+              )}
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem
+              aria-label="Sign out"
+              onSelect={() => void handleSignOut()}
+            >
+              <LogOut className="size-4" aria-hidden="true" />
+              Sign out
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </header>
   );

@@ -319,18 +319,24 @@ means table `patient` in schema `registry`.
 - Only two endpoints may opt out: the health probe
   (`apps/common/urls.py`) and the ABDM callback, which carries no user JWT.
 - The ABDM callback (`ABHACallbackViewSet` in `apps/abdm_gateway/views.py`)
-  is **implemented** — it authenticates presence, validates timestamps, binds
-  the tenant from `Facility.abdm_hip_id`, is idempotent on the gateway
-  request ID, matches patients by ABHA then demographics, issues an OPD
-  token, and returns an acknowledgement carrying the consent event. There is
-  no `501` anywhere under `backend/apps/`.
-  Residual §8.4 gaps that must not be papered over (and must not be reported
-  as done): signature verification is **presence-only** (any
-  `X-ABDM-Signature`/`Bearer` header passes — ABD-005), the consent event is
-  built but **not persisted** (ABD-011), and the link token is
-  `secrets.token_urlsafe(32)` with no encryption (ABD-012 placeholder).
-  Do not regress the endpoint to 501, and do not claim these three are
-  finished until the code says so.
+  is **implemented** — it authenticates the call, validates timestamps and the
+  payload schema, binds the tenant from `Facility.abdm_hip_id`, is idempotent
+  on the gateway request ID, matches patients by ABHA then demographics,
+  issues an OPD token, records the consent event to `abdm.consent_event`
+  (ABD-011) and stores the link token sealed (`link_token_enc`, ABD-012), then
+  returns an acknowledgement carrying the consent event. All seven of the
+  architecture doc §8.4 requirements are implemented, and there is no `501`
+  anywhere under `backend/apps/`.
+  Authentication (ABD-005) is a real HMAC-SHA256 over the **raw** request body
+  compared with `hmac.compare_digest` against the `X-ABDM-Signature` header
+  and `settings.ABDM_CLIENT_SECRET`; presence-only headers authenticate
+  nothing. Because the ABDM sandbox issues no shared secret yet, an unset
+  secret fails closed outside `DEBUG` and fails open **with a warning** under
+  it (the documented local-dev mode) — both halves are pinned by tests.
+  The consent record holds no profile data by design (data minimisation,
+  §8.4): provenance plus a one-way `raw_profile_hash`, and no name, ABHA or
+  demographic column. The link token is sealed under the REG-008 key stream
+  and is never returned in the acknowledgement.
 - `tests/integration/test_api_authentication.py` enforces this. Keep it passing.
 
 ### Serializers

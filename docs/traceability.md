@@ -27,8 +27,8 @@ the frontend, so Modelled/API/RLS read `no` for them by construction.
 
 | Reqs | App | Phase | Count | Modelled | API | Routes | RLS |
 | ---: | --- | --- | ---: | --- | --- | ---: | --- |
-| ABD | patient_registry | R1 | `17` | yes | yes | `29` | yes |
-| AUD | audit | R1 | `4` | yes | yes | `6` | yes |
+| ABD | patient_registry | R1 | `17` | yes | yes | `31` | yes |
+| AUD | audit | R1 | `4` | yes | yes | `8` | yes |
 | BBK | blood_bank | R4 | `8` | yes | yes | `1` | yes |
 | BIL | billing_insurance | R2 | `6` | yes | yes | `21` | yes |
 | EMG | emergency | R5 | `3` | yes | yes | `9` | yes |
@@ -41,12 +41,12 @@ the frontend, so Modelled/API/RLS read `no` for them by construction.
 | OPD | opd | R2 | `8` | yes | yes | `16` | yes |
 | OT | ot | R5 | `4` | yes | yes | `13` | yes |
 | PHM | pharmacy | R4 | `6` | yes | yes | `1` | yes |
-| PLT | platform | R1 | `8` | yes | yes | `18` | yes |
+| PLT | platform | R1 | `8` | yes | yes | `24` | yes |
 | QOS | quality_os | R3 | `48` | yes | yes | `35` | yes |
-| REG | patient_registry | R1 | `13` | yes | yes | `29` | yes |
+| REG | patient_registry | R1 | `13` | yes | yes | `31` | yes |
 | RIS | ris | R4 | `4` | yes | yes | `6` | yes |
-| SET | identity_tenancy | R1 | `13` | yes | yes | `82` | yes |
-| TEN | identity_tenancy | R1 | `11` | yes | yes | `82` | yes |
+| SET | identity_tenancy | R1 | `13` | yes | yes | `84` | yes |
+| TEN | identity_tenancy | R1 | `11` | yes | yes | `84` | yes |
 | UI | - | - | `7` | no | no | `0` | no |
 
 ### What these numbers do and do not mean
@@ -63,16 +63,10 @@ Requirements that exist in the SRS but are deliberately not
 claimed as delivered (re-verified against the code each time
 this file is regenerated):
 
-- **ABD-002** (partial) - QR regenerate is implemented (`qr-codes/{id}/regenerate/`); the revoke half of the requirement has no endpoint
-- **ABD-005** (not implemented) - `ABHACallbackViewSet` accepts any non-empty X-ABDM-Signature or Bearer header — presence-only, no secret comparison (verified backend/apps/abdm_gateway/views.py `_authenticate`)
-- **ABD-011** (not implemented) - the consent event is built and returned in the acknowledgement but never written to any table
-- **ABD-012** (not implemented) - the link token is `secrets.token_urlsafe(32)` and discarded — no encryption, no storage (placeholder comment for KMS)
-- **AUD-002** (partial) - AuditEvent.hash_chain exists but is never computed — the log is append-only in practice, not tamper-evident
-- **PLT-004** (not implemented) - every Celery task body is `pass` and there is no CELERY_BEAT_SCHEDULE — no background job can run
+- **ABD-017** (deferred) - sandbox profile-share replay test is gated on `ABDM_SANDBOX_RUN` with real credentials; no recorded run in this environment — see `docs/abdm-sandbox-runbook.md`
 - **QOS-001** (not implemented) - indicator catalogue exists in docs/ but no loader has been written; the 406 records are not in the database
 - **REG-009** (deferred) - the outbound ABDM sandbox ABHA adapter shipped (create/verify actions on the patient endpoint, `apps/abdm_gateway/client.py`, 503 `ABDM_SANDBOX_UNCONFIGURED` fail-closed path, env + IntegrationAdapter base-URL resolution) but the official sandbox create/verify spec (endpoint paths, payloads, OTP flow) is unresolved — the enrollment paths are patterned on the community-mirrored sandbox v1 spec and must be re-verified before production
 - **TEN-004** (partial) - RequirePermission reads the token's `permissions` claim and gates the role/membership writes, tenant CRUD and the quality catalogue, RoleSerializer rejects `platform.` codes on tenant-scoped roles at the write path (platform scope = Role.tenant is None; token-level scope binding deferred), and role/membership/scheduled-job querysets are tenant-scoped — but most endpoints still authorise by authentication alone, and facility/department-scoped permissions (TEN-005) are unimplemented
-- **TEN-006** (partial) - TOTP enrol/confirm works and MFARequiredIfConfigured is installed after IsAuthenticated in DEFAULT_PERMISSION_CLASSES, with the token carrying `requires_mfa`/`mfa_verified` claims — but no POST /auth/mfa/verify endpoint exists, so mfa_verified can never become True after login and require_mfa roles are denied every default-permission endpoint (fail-closed)
 
 ## Per-requirement detail
 
@@ -84,19 +78,19 @@ this file is regenerated):
 | ABD-002 | The system shall let administrators regenerate or revoke a QR code | M | R1 | partial |
 | ABD-003 | The system shall accept ABDM profile-share callbacks on an authenticated, rate-limited endpoint | M | R1 | partial |
 | ABD-004 | The system shall resolve the tenant and facility from the callback's facility identifier and shall set tenant context before any data access | M | R1 | partial |
-| ABD-005 | The system shall verify the authenticity of every gateway call per the ABDM specification and reject unauthenticated calls | M | R1 | **not implemented** |
+| ABD-005 | The system shall verify the authenticity of every gateway call per the ABDM specification and reject unauthenticated calls | M | R1 | partial |
 | ABD-006 | The system shall process each gateway request identifier at most once (idempotency) and return the original outcome on retry | M | R1 | partial |
 | ABD-007 | The system shall validate timestamps and payload fields and respond with a well-formed acknowledgement including the issued token | M | R1 | partial |
 | ABD-008 | The system shall match a shared profile first by ABHA number within the tenant, then by demographic candidate search | M | R1 | partial |
 | ABD-009 | If exactly one strong match exists the system shall link to it; if multiple candidates exist it shall create a verification-queue entry; if none exist it shall create a provisional patient | M | R1 | partial |
 | ABD-010 | The system shall issue a token for the intake point and shall make it available to the counter display and the patient's app via the acknowledgement | M | R1 | partial |
-| ABD-011 | The system shall record the profile share as a consent event with timestamp, source, purpose and facility | M | R1 | **not implemented** |
-| ABD-012 | The system shall store ABDM link tokens encrypted and use them only for care-context linking | M | R1 | **not implemented** |
+| ABD-011 | The system shall record the profile share as a consent event with timestamp, source, purpose and facility | M | R1 | partial |
+| ABD-012 | The system shall store ABDM link tokens encrypted and use them only for care-context linking | M | R1 | partial |
 | ABD-013 | The system shall remain fully usable through the counter channel if the ABDM gateway is unavailable | M | R1 | partial |
 | ABD-014 | The system shall alert administrators on abnormal callback failure or volume | S | R1 | partial |
 | ABD-015 | The system shall model intake points by type (OPD, pharmacy, lab, billing) so Scan and Share can extend beyond OPD | S | R4 | partial |
 | ABD-016 | The system shall support linking care contexts and sharing health records with consent via ABDM | S | R6 | partial |
-| ABD-017 | The system shall pass the ABDM profile-share test case in sandbox for each supported API version | M | R1 | partial |
+| ABD-017 | The system shall pass the ABDM profile-share test case in sandbox for each supported API version | M | R1 | deferred |
 
 ### AUD - `audit` (module completion phase R1)
 
@@ -255,7 +249,7 @@ this file is regenerated):
 | PLT-001 | The system shall provide the real-time notification engine for authorised in-app notifications and clinically relevant alerts, with notification state persisted before realtime delivery | M | R1 | partial |
 | PLT-002 | The system shall provide a live vitals dashboard for authorised ICU/ward users using Django Channels when connected, with REST fallback when the WebSocket is unavailable | M | R5 | partial |
 | PLT-003 | The system shall provide REST polling/refetching for non-vitals operational displays including bed status, OPD queues/token displays and emergency boards | M | R1 | partial |
-| PLT-004 | The system shall run background jobs reliably with retry, back-off and visibility using Celery/Celery Beat | M | R1 | **not implemented** |
+| PLT-004 | The system shall run background jobs reliably with retry, back-off and visibility using Celery/Celery Beat | M | R1 | partial |
 | PLT-005 | The system shall provide file storage for documents and evidence with access control | M | R1 | partial |
 | PLT-006 | The system shall support feature flags per tenant | S | R1 | partial |
 | PLT-007 | The system shall provide in-app and external notifications with user preferences | S | R2 | partial |

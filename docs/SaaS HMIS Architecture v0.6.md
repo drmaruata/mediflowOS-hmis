@@ -220,6 +220,39 @@ The ABDM developer forum shows the technical shape: the facility QR carries the 
 
 > **Version caution.** The forum shows v1.0 and v3 API paths coexisting (the ABHA app was still calling the older flow while v3 existed). The `abdm-gateway` module must therefore sit behind an **adapter that supports both**, and the exact current spec must be confirmed against ABDM's sandbox documentation at build time.
 
+**How that maps in the code (INT-002).** The adapter is
+`IntegrationAdapter.api_version`, and the versions this repository serves are
+`v2` and `v3` — our labels for the older and the newer contract, held in one
+registry (`apps/abdm_gateway/client.py`: `SUPPORTED_API_VERSIONS`) that resolves
+them, shapes the outbound profile-share body and shapes the callback's
+acknowledgement. `v2` is the single unversioned shape the callback already
+returned, which is why it is the field default and why adding it changes no
+existing tenant's bytes. **The labels, and `v3`'s payload and acknowledgement
+shapes, are provisional** until the spec above is confirmed — nothing here is a
+statement about the real ABDM API, and the enrollment API the ABHA client speaks
+is separately unresolved (REG-009).
+
+**`v1.0` is an accepted alias of the `v2` shape.** The caution above records
+`v1.0` as the label the gateway used for the older flow, so it is served
+deliberately rather than by accident — `API_VERSION_ALIASES` in
+`apps/abdm_gateway/client.py` maps `v1.0` and `1.0` onto `v2`. An alias says
+"this peer is served, in this shape"; a fallback (below) says "this label is not
+recognised, and here is what it gets".
+
+**A version *label* is never refused; a malformed declaration is.** The callback
+resolves a declared version by taking an exact label first, then an alias, then
+the default `v2` — and logs a warning naming the label and the tenant when it
+falls back. That fallback is a deliberate trade-off: the sandbox spec is still
+unresolved, so no label a gateway can send can be proven unsupported, and
+refusing an unrecognised one would take a fully-implemented intake channel down
+over a wording difference — including, as it did before this rule, the `v1.0`
+label this document itself uses. INT-002 asks for two versions to be **served**,
+not for unknown ones to be rejected. Only a declaration that is not a version at
+all (a list, an object or a number) is refused `422`, with the supported set
+named, after authentication and the payload checks and before any write; the same
+fallback applies to a mistyped `IntegrationAdapter.api_version`, so one bad row
+cannot take a tenant's whole scan-and-share channel down.
+
 ### 8.3 Sequence
 
 ```mermaid
@@ -547,7 +580,7 @@ The 406-indicator baseline makes the source-to-data mapping a first-class archit
 
 | Integration | Protocol | Notes |
 | --- | --- | --- |
-| ABDM gateway | REST / FHIR | ABHA, **profile share callbacks (v1.0 and v3 adapters)**, consent, record sharing |
+| ABDM gateway | REST / FHIR | ABHA, **profile share callbacks (older and newer API versions behind one adapter — see 8.2)**, consent, record sharing |
 | Lab analyzers | HL7 v2 (via MLLP bridge) | Bridge agent on hospital LAN; results flow to `lis` |
 | Imaging modalities / PACS | DICOM | Orthanc per region; metadata in `ris` |
 | Payers / TPAs / PM-JAY | REST / vendor APIs | Adapter per payer behind a common interface |
@@ -618,7 +651,7 @@ The frontend UI layer was migrated from **Ant Design 5 + ProComponents** to **Sh
 
 **CI/CD**
 
-- Trunk-based development; pipeline runs Python linting/format checks, Django checks, unit/integration tests, RLS isolation tests, **indicator golden tests** (known inputs produce known BOR/ALOS/LAMA values), Channels/WebSocket authorization tests, SAST and dependency scanning.
+- Trunk-based development; pipeline runs Python linting/format checks, Django checks, unit/integration tests, RLS isolation tests, **indicator golden tests** (known inputs produce known BOR/ALOS/LAMA values), Channels/WebSocket authorization tests, OpenAPI schema generation (must be diagnostic-free), SAST and dependency scanning.
 - Container images signed and scanned; progressive rollout (canary/blue-green).
 - Database migrations are backward-compatible (expand, then contract).
 

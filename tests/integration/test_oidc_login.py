@@ -1,0 +1,579 @@
+"""The OIDC ID-token exchange (INT-009).
+
+The exchange's root of trust is the IdP's signature, so every test here runs
+against real signature verification: a local RSA key stands in for the IdP's
+signing key and its JWKS is served from a stubbed fetcher, which pins the
+endpoint's behaviour with no network and no IdP. The stub replaces
+``apps.identity_tenancy.oidc.fetch_jwks`` — the one seam the module exposes for
+exactly this purpose — so the key selection, signature, issuer, audience and
+expiry checks all run for real on every request below.
+
+What each refusal family pins:
+
+* **501 before any work** — an unconfigured deployment answers 501 with a
+  structured body before the request body is parsed, so no garbage token can
+  make it do cryptographic work or touch a row.
+* **401** — anything about the token itself: foreign signature, wrong
+  audience, expired, carrying no ``exp`` at all (a token with no expiry
+  would otherwise verify forever), ``alg: none``, a ``kid`` the JWKS does
+  not publish, or a signature the published key does not verify.
+* **503** — the IdP's own failure: a JWKS that cannot be reached, or one whose
+  key material cannot be built. An integration failure, never a verdict on
+  the caller's token.
+* **403 with one stable message** — a *verified* identity that may not log in
+  to the bound tenant, including one whose ``email`` the IdP did not attest
+  verified, which must never map a local account. Every condition below reads
+  identically to the caller, so the endpoint cannot be used to enumerate
+  accounts or probe which tenants exist.
+* **The decode pin** — the returned access token carries the bound tenant in
+  its signed claims, exactly as the password flow's does, because the same
+  serializer issued it.
+"""
+import base64
+import time
+import uuid
+
+import httpx
+import jwt
+import pytest
+from cryptography.hazmat.primitives.asymmetric import rsa
+from django.contrib.auth import get_user_model
+from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import AccessToken
+
+from apps.identity_tenancy.oidc import (
+    IDP_UNAVAILABLE_MESSAGE,
+    NO_ACCOUNT_MESSAGE,
+    NO_TENANT_MESSAGE,
+)
+
+pytestmark = [pytest.mark.integration, pytest.mark.django_db]
+
+EXCHANGE_URL = "/api/v1/auth/oidc/"
+ISSUER = "https://idp.example.test"
+AUDIENCE = "mediflow-hmis"
+JWKS_URI = "https://idp.example.test/.well-known/jwks.json"
+KID = "integration-test-key"
+
+# Fixed ids, not random ones: `active_membership` orders by role-tenant id, so
+# a deterministic "the account's active membership sits on the other tenant"
+# (TENANT_OTHER sorts above TENANT_BOUND descending) needs comparable values.
+TENANT_BOUND = uuid.UUID("aaaaaaaa-0000-0000-0000-0000000000a1")
+TENANT_OTHER = uuid.UUID("bbbbbbbb-0000-0000-0000-0000000000b2")
+
+
+def _b64url_uint(value):
+    """A JWK ``n``/``e`` integer as the base64url string a JWKS carries."""
+    length = (value.bit_length() + 7) // 8
+    return base64.urlsafe_b64encode(value.to_bytes(length, "big")).decode().rstrip("=")
+
+
+@pytest.fixture(scope="module")
+def signing_key():
+    """The IdP's signing key, generated in-process so the suite needs no IdP."""
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture(scope="module")
+def foreign_key():
+    """A key the JWKS never publishes: a token it signs must fail verification."""
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture
+def jwks(signing_key):
+    """The IdP's published key set, served from the stub fetcher."""
+    numbers = signing_key.public_key().public_numbers()
+    return {"keys": [{
+        "kty": "RSA", "alg": "RS256", "use": "sig", "kid": KID,
+        "n": _b64url_uint(numbers.n), "e": _b64url_uint(numbers.e),
+    }]}
+
+
+@pytest.fixture
+def foreign_jwks(foreign_key):
+    """A key set that publishes the foreign key under the token's ``kid``: a
+    matching ``kid`` names a key, it does not vouch for the signature, so the
+    stub cannot be a rubber stamp.
+    """
+    numbers = foreign_key.public_key().public_numbers()
+    return {"keys": [{
+        "kty": "RSA", "alg": "RS256", "use": "sig", "kid": KID,
+        "n": _b64url_uint(numbers.n), "e": _b64url_uint(numbers.e),
+    }]}
+
+
+@pytest.fixture
+def configured(settings, monkeypatch, jwks):
+    """The deployment's OIDC settings, with the JWKS served from the stub."""
+    from apps.identity_tenancy import oidc
+
+    settings.OIDC_ISSUER = ISSUER
+    settings.OIDC_AUDIENCE = AUDIENCE
+    settings.OIDC_JWKS_URI = JWKS_URI
+    settings.OIDC_JIT_PROVISION = False
+    monkeypatch.setattr(oidc, "fetch_jwks", lambda uri: jwks)
+    return settings
+
+
+@pytest.fixture
+def tenant():
+    """The tenant the ID token's slug claim names."""
+    from apps.identity_tenancy.models import Tenant
+
+    return Tenant.objects.get_or_create(
+        id=TENANT_BOUND, defaults={"name": "Hospital SSO", "slug": "hospital-sso"}
+    )[0]
+
+
+@pytest.fixture
+def other_tenant():
+    from apps.identity_tenancy.models import Tenant
+
+    return Tenant.objects.get_or_create(
+        id=TENANT_OTHER, defaults={"name": "Hospital B", "slug": "hospital-b"}
+    )[0]
+
+
+@pytest.fixture
+def clerk(tenant):
+    """A staff account with one active membership on the bound tenant."""
+    from apps.identity_tenancy.models import Role, UserMembership
+
+    user = get_user_model().objects.create_user(
+        username="idp-sub-1", password="pw-for-tests-only", email="clerk@hospital.test"
+    )
+    role = Role.objects.create(
+        tenant=tenant, name="reception", permissions=["patient_registry.view_patient"]
+    )
+    UserMembership.objects.create(user=user, tenant=tenant, role=role, active=True)
+    return user
+
+
+def _claims(overrides=None):
+    """The valid ID-token payload; ``overrides`` merge over it (None drops one)."""
+    now = int(time.time())
+    payload = {
+        "iss": ISSUER,
+        "aud": AUDIENCE,
+        "sub": "idp-sub-1",
+        "email": "clerk@hospital.test",
+        "iat": now,
+        "exp": now + 300,
+        "tenant": "hospital-sso",
+    }
+    for claim, value in (overrides or {}).items():
+        if value is None:
+            payload.pop(claim, None)
+        else:
+            payload[claim] = value
+    return payload
+
+
+def _id_token(key, claims=None, headers=None):
+    """A signed ID token; ``headers`` override the published-``kid`` default."""
+    return jwt.encode(
+        _claims(claims), key, algorithm="RS256", headers=headers or {"kid": KID}
+    )
+
+
+def _post(id_token):
+    return APIClient().post(EXCHANGE_URL, {"id_token": id_token}, format="json")
+
+
+class TestUnconfiguredDeployment:
+    def test_answers_501_with_a_structured_body(self):
+        response = _post("header.payload.signature")
+
+        assert response.status_code == 501
+        body = response.json()
+        assert body["status"] == "not_configured"
+        assert "OIDC_ISSUER" in body["detail"]
+
+    def test_the_501_precedes_any_work(self):
+        """No parse, no crypto, no rows: a body with no id_token at all is
+        answered by the configuration check, not by validation."""
+        response = APIClient().post(EXCHANGE_URL, {}, format="json")
+
+        assert response.status_code == 501
+
+
+class TestTheExchange:
+    def test_a_valid_token_returns_the_pair_and_binds_the_named_tenant(
+        self, configured, signing_key, tenant, clerk
+    ):
+        response = _post(_id_token(signing_key))
+
+        assert response.status_code == 200, response.content
+        body = response.json()
+        assert body["refresh"]
+        assert body["access"]
+        assert body["tenant_id"] == str(tenant.id)
+        assert body["role"] == "reception"
+        # The decode pin: the issued access token carries the bound tenant in
+        # its signed claims, exactly as the password flow's does.
+        claims = AccessToken(body["access"]).payload
+        assert claims["tenant_id"] == str(tenant.id)
+        assert "patient_registry.view_patient" in claims["permissions"]
+
+    def test_wrong_audience_is_refused(self, configured, signing_key, tenant, clerk):
+        response = _post(_id_token(signing_key, {"aud": "some-other-client"}))
+
+        assert response.status_code == 401
+
+    def test_expired_token_is_refused(self, configured, signing_key, tenant, clerk):
+        response = _post(_id_token(signing_key, {"exp": int(time.time()) - 3600}))
+
+        assert response.status_code == 401
+
+    def test_a_token_without_expiry_is_refused(self, configured, signing_key, tenant, clerk):
+        """Expiry is verified before any local effect: a token carrying no
+        ``exp`` would otherwise verify forever."""
+        response = _post(_id_token(signing_key, {"exp": None}))
+
+        assert response.status_code == 401
+
+    def test_a_signature_from_an_unpublished_key_is_refused(
+        self, configured, foreign_key, tenant, clerk
+    ):
+        response = _post(_id_token(foreign_key))
+
+        assert response.status_code == 401
+
+    def test_a_token_without_a_tenant_claim_is_refused(
+        self, configured, signing_key, tenant, clerk
+    ):
+        response = _post(_id_token(signing_key, {"tenant": None}))
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == NO_TENANT_MESSAGE
+
+    def test_an_unresolvable_tenant_claim_is_refused(
+        self, configured, signing_key, tenant, clerk
+    ):
+        response = _post(_id_token(signing_key, {"tenant": "no-such-hospital"}))
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == NO_TENANT_MESSAGE
+
+    def test_a_custom_tenant_claim_name_is_honoured(
+        self, configured, signing_key, tenant, clerk
+    ):
+        """The slug is read from wherever the deployment moved the claim; the
+        default name is dropped from the token to prove it is not consulted."""
+        configured.OIDC_TENANT_CLAIM = "hospital"
+
+        response = _post(_id_token(signing_key, {
+            "tenant": None, "hospital": "hospital-sso",
+        }))
+
+        assert response.status_code == 200, response.content
+        assert response.json()["tenant_id"] == str(tenant.id)
+
+    def test_an_unknown_identity_is_refused_while_jit_is_off(
+        self, configured, signing_key, tenant, clerk
+    ):
+        claims = {"sub": "idp-sub-2", "email": "stranger@hospital.test"}
+        response = _post(_id_token(signing_key, claims))
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == NO_ACCOUNT_MESSAGE
+        assert not get_user_model().objects.filter(email="stranger@hospital.test").exists()
+
+    def test_a_member_of_another_tenant_is_refused(
+        self, configured, signing_key, tenant, other_tenant, clerk
+    ):
+        """A login is not a role-granting event: an account holding no
+        membership on the bound tenant gets nothing, and no row is created."""
+        from apps.identity_tenancy.models import Role, UserMembership
+
+        outsider = get_user_model().objects.create_user(
+            username="idp-sub-outsider", password="pw-for-tests-only",
+            email="elsewhere@hospital.test",
+        )
+        UserMembership.objects.create(
+            user=outsider, tenant=other_tenant,
+            role=Role.objects.create(tenant=other_tenant, name="clerk-b"),
+            active=True,
+        )
+
+        response = _post(_id_token(signing_key, {
+            "sub": "idp-sub-outsider", "email": "elsewhere@hospital.test",
+        }))
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == NO_ACCOUNT_MESSAGE
+        assert not UserMembership.objects.filter(user=outsider, tenant=tenant).exists()
+
+    def test_an_account_whose_active_membership_is_elsewhere_is_refused(
+        self, configured, signing_key, tenant, other_tenant, clerk
+    ):
+        """The pair binds exactly the tenant the sign-on named: this account
+        holds active memberships on the bound tenant and on another, and its
+        password-flow token would bind the other — so the exchange refuses
+        rather than issue a token for a tenant the token did not name."""
+        from apps.identity_tenancy.models import Role, UserMembership
+
+        UserMembership.objects.create(
+            user=clerk, tenant=other_tenant,
+            role=Role.objects.create(tenant=other_tenant, name="clerk-b"),
+            active=True,
+        )
+
+        response = _post(_id_token(signing_key))
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == NO_ACCOUNT_MESSAGE
+
+
+class TestEmailVerifiedMapping:
+    """The ``email`` claim maps an account only while the IdP attests it.
+
+    Anyone can register ``victim@hospital.test`` at a self-service IdP and
+    present a perfectly valid signed token for it, so an unverified email
+    must never reference a local account; IdPs that do not emit the claim
+    lose email-matching rather than grant that path.
+    """
+
+    @pytest.fixture
+    def victim(self, tenant):
+        """The account an unverified IdP email must never reach: no ``sub``
+        in these tokens names it, so ``email`` is its only mapping leg.
+        """
+        from apps.identity_tenancy.models import Role, UserMembership
+
+        user = get_user_model().objects.create_user(
+            username="records-victim", password="pw-for-tests-only",
+            email="victim@hospital.test",
+        )
+        role = Role.objects.create(tenant=tenant, name="records")
+        UserMembership.objects.create(user=user, tenant=tenant, role=role, active=True)
+        return user
+
+    def test_a_verified_email_maps_the_existing_account(
+        self, configured, signing_key, tenant, victim
+    ):
+        response = _post(_id_token(signing_key, {
+            "sub": "idp-stranger", "email": "victim@hospital.test",
+            "email_verified": True,
+        }))
+
+        assert response.status_code == 200, response.content
+        assert response.json()["tenant_id"] == str(tenant.id)
+        assert response.json()["role"] == "records"
+
+    def test_an_unverified_email_does_not_map_the_account(
+        self, configured, signing_key, victim
+    ):
+        response = _post(_id_token(signing_key, {
+            "sub": "idp-stranger", "email": "victim@hospital.test",
+            "email_verified": False,
+        }))
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == NO_ACCOUNT_MESSAGE
+
+    def test_an_absent_email_verified_claim_does_not_map_the_account(
+        self, configured, signing_key, victim
+    ):
+        response = _post(_id_token(signing_key, {
+            "sub": "idp-stranger", "email": "victim@hospital.test",
+        }))
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == NO_ACCOUNT_MESSAGE
+
+
+class TestJustInTimeProvisioning:
+    def test_first_sign_on_provisions_a_least_privilege_account(
+        self, configured, signing_key, tenant
+    ):
+        configured.OIDC_JIT_PROVISION = True
+        claims = {
+            "sub": "idp-newcomer", "email": "newcomer@hospital.test",
+            "email_verified": True,
+        }
+
+        first = _post(_id_token(signing_key, claims))
+
+        assert first.status_code == 200, first.content
+        user = get_user_model().objects.get(email="newcomer@hospital.test")
+        # An OIDC identity must never be replayable as a password login.
+        assert user.has_usable_password() is False
+        membership = user.memberships.get(tenant=tenant)
+        assert membership.active is True
+        assert membership.role.name == "SSO User"
+        assert membership.role.permissions == []
+        # The provisioned account's pair binds the named tenant too.
+        assert AccessToken(first.json()["access"]).payload["tenant_id"] == str(tenant.id)
+
+        second = _post(_id_token(signing_key, claims))
+        assert second.status_code == 200, second.content
+        assert get_user_model().objects.filter(email="newcomer@hospital.test").count() == 1
+
+    def test_an_unverified_email_is_not_stored_on_the_provisioned_account(
+        self, configured, signing_key, tenant
+    ):
+        """The claimed address is stored only once the IdP attests it: an
+        unverified email belongs to whoever registered it at the IdP, and
+        storing it would squat an address this account does not own.
+        """
+        configured.OIDC_JIT_PROVISION = True
+
+        response = _post(_id_token(signing_key, {
+            "sub": "idp-squatter", "email": "victim@hospital.test",
+            "email_verified": False,
+        }))
+
+        assert response.status_code == 200, response.content
+        account = get_user_model().objects.get(username="idp-squatter")
+        assert account.email == ""
+
+    def test_an_unverified_squat_does_not_poison_the_owners_later_login(
+        self, configured, signing_key, tenant
+    ):
+        """The failure the empty store prevents: the squatted address is the
+        only mapping leg the real owner's later verified login has, so it
+        must resolve to the owner's own account — not find two matches and
+        refuse them both.
+        """
+        from apps.identity_tenancy.models import Role, UserMembership
+
+        configured.OIDC_JIT_PROVISION = True
+        owner = get_user_model().objects.create_user(
+            username="records-owner", password="pw-for-tests-only",
+            email="victim@hospital.test",
+        )
+        UserMembership.objects.create(
+            user=owner, tenant=tenant,
+            role=Role.objects.create(tenant=tenant, name="records"),
+            active=True,
+        )
+
+        squat = _post(_id_token(signing_key, {
+            "sub": "idp-squatter", "email": "victim@hospital.test",
+            "email_verified": False,
+        }))
+        assert squat.status_code == 200, squat.content
+
+        owner_login = _post(_id_token(signing_key, {
+            "sub": "idp-owner-sub", "email": "victim@hospital.test",
+            "email_verified": True,
+        }))
+
+        assert owner_login.status_code == 200, owner_login.content
+        assert owner_login.json()["role"] == "records"
+
+    def test_a_privileged_role_named_for_sso_is_not_adopted(
+        self, configured, signing_key, tenant
+    ):
+        """A tenant-authored "SSO User" role holding permissions would make
+        every login a role grant; the exchange refuses instead, and the
+        rollback leaves no half-provisioned account behind."""
+        from apps.identity_tenancy.models import Role
+
+        configured.OIDC_JIT_PROVISION = True
+        Role.objects.create(
+            tenant=tenant, name="SSO User", permissions=["identity.view_user"]
+        )
+
+        response = _post(_id_token(signing_key, {
+            "sub": "idp-newcomer", "email": "newcomer@hospital.test",
+        }))
+
+        assert response.status_code == 403
+        assert not get_user_model().objects.filter(email="newcomer@hospital.test").exists()
+
+
+class TestHostileTokensAndKeySets:
+    """The verification step's attack surface, pinned so the stub is never a
+    rubber stamp — the alg, the ``kid`` and the served key material must all
+    matter — and so an unreachable or unusable JWKS is a 503 integration
+    failure, never a verdict on the caller's token and never a crash.
+    """
+
+    def test_an_alg_none_token_is_refused(self, configured, signing_key, tenant, clerk):
+        token = jwt.encode(_claims(), None, algorithm="none")
+
+        assert _post(token).status_code == 401
+
+    def test_a_kid_absent_from_the_jwks_is_refused(
+        self, configured, signing_key, tenant, clerk
+    ):
+        response = _post(_id_token(signing_key, headers={"kid": "absent-from-jwks"}))
+
+        assert response.status_code == 401
+
+    def test_a_jwks_serving_the_wrong_key_under_a_matching_kid_is_refused(
+        self, configured, foreign_jwks, monkeypatch, signing_key, tenant, clerk
+    ):
+        from apps.identity_tenancy import oidc
+
+        monkeypatch.setattr(oidc, "fetch_jwks", lambda uri: foreign_jwks)
+
+        assert _post(_id_token(signing_key)).status_code == 401
+
+    def test_an_unreachable_jwks_is_the_idps_failure_not_the_callers(
+        self, configured, monkeypatch, signing_key, tenant, clerk
+    ):
+        from apps.identity_tenancy import oidc
+
+        def _unreachable(uri):
+            raise httpx.ConnectError("the IdP is down")
+
+        monkeypatch.setattr(oidc, "fetch_jwks", _unreachable)
+        response = _post(_id_token(signing_key))
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == IDP_UNAVAILABLE_MESSAGE
+
+    def test_an_oct_jwk_with_no_key_material_is_the_idps_failure(
+        self, configured, monkeypatch, signing_key, tenant, clerk
+    ):
+        from apps.identity_tenancy import oidc
+
+        monkeypatch.setattr(
+            oidc, "fetch_jwks", lambda uri: {"keys": [{"kty": "oct", "kid": KID}]}
+        )
+        response = _post(_id_token(signing_key))
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == IDP_UNAVAILABLE_MESSAGE
+
+    def test_an_rsa_jwk_missing_its_modulus_is_the_idps_failure(
+        self, configured, monkeypatch, signing_key, tenant, clerk
+    ):
+        from apps.identity_tenancy import oidc
+
+        monkeypatch.setattr(
+            oidc, "fetch_jwks",
+            lambda uri: {"keys": [{"kty": "RSA", "kid": KID, "alg": "RS256",
+                                   "e": "AQAB"}]},
+        )
+        response = _post(_id_token(signing_key))
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == IDP_UNAVAILABLE_MESSAGE
+
+    def test_an_rsa_jwk_with_an_unknown_alg_is_the_idps_failure(
+        self, configured, monkeypatch, signing_key, tenant, clerk
+    ):
+        """``PyJWK.__init__`` raises ``PyJWKError`` — a ``PyJWTError``
+        sibling — for an ``alg`` it has no key implementation for, and that
+        sibling must not escape the conversion: the view would read the
+        IdP's broken key set as the caller's bad token (401).
+        """
+        from apps.identity_tenancy import oidc
+
+        numbers = signing_key.public_key().public_numbers()
+        monkeypatch.setattr(
+            oidc, "fetch_jwks",
+            lambda uri: {"keys": [{
+                "kty": "RSA", "kid": KID, "alg": "not-a-real-alg",
+                "n": _b64url_uint(numbers.n), "e": _b64url_uint(numbers.e),
+            }]},
+        )
+        response = _post(_id_token(signing_key))
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == IDP_UNAVAILABLE_MESSAGE

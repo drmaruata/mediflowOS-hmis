@@ -1,0 +1,166 @@
+/**
+ * Print CSS for OP slip (UI-006, HW-001).
+ *
+ * @media print rules for:
+ * - 80mm thermal receipt printers (width: 80mm, no margins)
+ * - A4 paper (standard page size, no margins)
+ *
+ * The root element gets `data-print` class when the OpSlip component mounts.
+ * This CSS hides all browser chrome (headers, footers, URLs) in print output.
+ * Hospital name/address/logo slot from facility data.
+ */
+
+@media print {
+  /* Root print context */
+  html[data-print="true"] {
+    /* Hide everything by default, only show the slip sheet */
+    visibility: hidden;
+  }
+
+  html[data-print="true"] .op-slip-page,
+  html[data-print="true"] .op-slip-sheet,
+  html[data-print="true"] .op-slip-sheet * {
+    visibility: visible;
+  }
+
+  /* Position the slip sheet at top-left for thermal, centered for A4 */
+  html[data-print="true"] .op-slip-page {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: auto;
+    margin: 0;
+    padding: 0;
+  }
+
+  html[data-print="true"] .op-slip-sheet {
+    box-shadow: none;
+    border: none;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* Hide the print button and any no-print elements */
+  html[data-print="true"] .no-print {
+    display: none !important;
+  }
+
+  /* 80mm thermal printer — continuous paper, no page breaks */
+  @page {
+    size: 80mm auto;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* A4 fallback — when printed to A4 */
+  @media (min-width: 210mm) {
+    @page {
+      size: A4;
+      margin: 0;
+    }
+
+    html[data-print="true"] .op-slip-sheet {
+      width: 210mm;
+      max-width: 210mm;
+      margin: 0 auto;
+      padding: 16mm;
+    }
+  }
+
+  /* Thermal-specific: 80mm width, minimal padding */
+  html[data-print="true"] .op-slip-sheet {
+    width: 80mm;
+    max-width: 80mm;
+    padding: 4mm 3mm;
+    font-size: 10pt;
+    line-height: 1.3;
+    background: white;
+    color: black;
+  }
+
+  html[data-print="true"] .op-slip-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    margin-bottom: 3mm;
+    padding-bottom: 2mm;
+    border-bottom: 1px solid #000;
+  }
+
+  html[data-print="true"] .op-slip-facility-name {
+    font-size: 12pt;
+    font-weight: 700;
+    margin: 0;
+    line-height: 1.2;
+  }
+
+  html[data-print="true"] .op-slip-facility-subtitle {
+    font-size: 8pt;
+    margin: 0;
+    color: #333;
+  }
+
+  html[data-print="true"] .op-slip-qr {
+    width: 22mm;
+    height: 22mm;
+    flex-shrink: 0;
+  }
+
+  html[data-print="true"] .op-slip-section {
+    margin-bottom: 2mm;
+  }
+
+  html[data-print="true"] .op-slip-section-title {
+    font-size: 8pt;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin: 0 0 1mm;
+    color: #333;
+    border-bottom: 1px solid #ccc;
+    padding-bottom: 0.5mm;
+  }
+
+  html[data-print="true"] .op-slip-fields {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.5mm 2mm;
+    margin: 0;
+    font-size: 9pt;
+  }
+
+  html[data-print="true"] .op-slip-field dt {
+    font-weight: 600;
+    color: #333;
+    white-space: nowrap;
+  }
+
+  html[data-print="true"] .op-slip-field dd {
+    margin: 0;
+    color: #000;
+    word-break: break-word;
+  }
+
+  html[data-print="true"] .op-slip-uhid {
+    font-family: monospace;
+    font-size: 11pt;
+    font-weight: 700;
+    letter-spacing: 0.5px;
+  }
+
+  html[data-print="true"] .op-slip-token {
+    font-family: monospace;
+    font-size: 11pt;
+    font-weight: 700;
+  }
+
+  html[data-print="true"] .op-slip-footer {
+    margin-top: 3mm;
+    padding-top: 2mm;
+    border-top: 1px dashed #999;
+    font-size: 7pt;
+    color: #666;
+    text-align: center;
+  }
+}

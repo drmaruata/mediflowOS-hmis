@@ -37,6 +37,15 @@ from .validation import normalise_mobile
 
 logger = logging.getLogger(__name__)
 
+#: Refusal text for a regenerate on a withdrawn QR code (ABD-002). A constant
+#: so the 409 response and any test or client that matches on it cannot drift
+#: apart, and because the wording has to name *which* state was hit — a bare
+#: "not allowed" leaves the caller guessing between revoked, unknown tenant
+#: and a missing field.
+REVOKED_REGENERATE_DETAIL = (
+    "This QR code has been revoked; a revoked code cannot be regenerated."
+)
+
 
 class AbdmErrorResponseSerializer(serializers.Serializer):
     """Structured error body the ABDM ABHA actions answer (REG-009).
@@ -180,6 +189,41 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
             )
         return predicate
 
+    def retrieve(self, request, *args, **kwargs):
+        """Patient detail read — writes an AUD-001 read event.
+
+        Recorded synchronously inside the request transaction: a patient record
+        is PHI, and who opened it has to be traceable before the response
+        returns. ``get_object`` is the mixin's tenant-scoped lookup, so a
+        foreign patient id answers 404 and logs nothing.
+        """
+        from apps.audit.services import audit_read
+
+        patient = self.get_object()
+        audit_read(patient, request)
+        return Response(self.get_serializer(patient).data)
+
+    def list(self, request, *args, **kwargs):
+        """Bulk patient list — every returned row is a PHI read (AUD-001).
+
+        The default paginated response shape is untouched: this is the
+        standard list with one read event per returned row added before
+        serialisation.
+        """
+        from apps.audit.services import audit_read
+
+        queryset = self.filter_queryset(self.get_queryset())
+        page = self.paginate_queryset(queryset)
+        rows = list(page) if page is not None else list(queryset)
+        # Volume bounded by the page size, mirroring ``search``.
+        for patient in rows:
+            audit_read(patient, request)
+        if page is not None:
+            return self.get_paginated_response(
+                self.get_serializer(rows, many=True).data
+            )
+        return Response(self.get_serializer(rows, many=True).data)
+
     @action(detail=False, methods=["get"])
     def search(self, request):
         """UHID / name / mobile / ABHA / age lookup for the counter (REG-002).
@@ -248,7 +292,16 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
                 self._birth_year_q([target - 1, target, target + 1])
             )
 
-        return Response(PatientSerializer(queryset[:20], many=True).data)
+        from apps.audit.services import audit_read
+
+        # Materialise the page once: it is serialised for the response *and*
+        # iterated to log a read for each returned patient (AUD-001). The page
+        # size — the fixed 20-row slice below — bounds the write volume, so a
+        # busy counter logs reads in lockstep with the rows it actually shows.
+        page = list(queryset[:20])
+        for patient in page:
+            audit_read(patient, request)
+        return Response(PatientSerializer(page, many=True).data)
 
     @staticmethod
     def _duplicate_candidate(patient):
@@ -336,9 +389,28 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"])
     def verification_queue(self, request):
-        """List patients pending identity verification (P-REG-6)."""
-        queryset = self.get_queryset().filter(verification_status="pending")
-        return Response(PatientSerializer(queryset, many=True).data)
+        """List patients pending identity verification (P-REG-6).
+
+        ``ambiguous`` rows are ABDM multi-candidate queue entries (ABD-009): a
+        scan matched several registrations, none was linked, and a human must
+        pick the right one (the candidates are named on the callback's log
+        row). They share this queue with ``pending`` registrations because the
+        work is the same — confirm identity — and a clerk resolving that scan
+        must see it next to every other record awaiting verification.
+
+        Every queued row returned is a PHI read, so each lands an AUD-001 read
+        event; the volume is bounded by the queue length (a work queue,
+        expected small).
+        """
+        from apps.audit.services import audit_read
+
+        queryset = self.get_queryset().filter(
+            verification_status__in=["pending", "ambiguous"]
+        )
+        rows = list(queryset)
+        for patient in rows:
+            audit_read(patient, request)
+        return Response(PatientSerializer(rows, many=True).data)
 
     # --- ABDM outbound ABHA actions (REG-009) ---------------------------
 
@@ -586,15 +658,33 @@ class QRCodeViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         be traceable. The audit row is written directly to ``audit.event`` with
         the ``source`` marker because the mixin's write path cannot express a
         machine-initiated event.
+
+        A revoked code is refused (ABD-002): see ``REVOKED_REGENERATE_DETAIL``.
         """
         qr = self.get_object()
+        if qr.revoked_at is not None:
+            # Refuse before touching the row: a rebuild would mint a working
+            # routing string out of a code that was withdrawn, while the audit
+            # trail says it was revoked — the poster is printed, the department
+            # may have been reassigned, and the queue would keep accepting its
+            # scans. ``revoked_at`` and ``active`` are left as they are and no
+            # audit row is written, so a refused call leaves no trace of a
+            # change that never happened.
+            return Response(
+                {"detail": REVOKED_REGENERATE_DETAIL},
+                status=status.HTTP_409_CONFLICT,
+            )
         qr.encode_data = self._encode_data(qr.facility, qr.intake_point, qr.department)
         qr.regenerated_at = timezone.now()
         qr.save(update_fields=["encode_data", "regenerated_at"])
 
-        from apps.audit.models import AuditEvent
+        # AUD-002: written through append_event so the row joins the tenant's
+        # chain; a direct AuditEvent.objects.create would leave a hole no
+        # verify pass could explain. ``source`` passes through **fields and
+        # stays part of the chained field set.
+        from apps.audit.services import append_event
 
-        AuditEvent.objects.create(
+        append_event(
             tenant_id=self.get_tenant_id(),
             user_id=(
                 request.user.pk if request.user.is_authenticated else None
@@ -605,6 +695,51 @@ class QRCodeViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
             source="qr.regenerate",
         )
         return Response(QRCodeSerializer(qr).data)
+
+    @extend_schema(
+        request=None,
+        responses={
+            200: QRCodeSerializer,
+            201: QRCodeSerializer,
+            404: OpenApiResponse(description="No such QR code in this tenant."),
+        },
+        description=(
+            "Revoke this facility, counter or department QR code (ABD-002). "
+            "The row keeps its history — a printed poster is not un-printed by "
+            "a delete — but ``active`` goes false, ``revoked_at`` is stamped "
+            "server-side and an AUD-001 audit row is written; the "
+            "``regenerate`` action then answers 409 so a withdrawn string "
+            "cannot be rebuilt. The first call answers 201; a repeat call is "
+            "the same end state, answers 200 and writes nothing more. "
+            "Tenant-scoped: a QR code of another tenant answers 404."
+        ),
+    )
+    @action(detail=True, methods=["post"], url_path="revoke")
+    def revoke(self, request, pk=None):
+        """Withdraw a QR code from service, recording who withdrew it.
+
+        Both fields are written in one ``save(update_fields=...)`` so the
+        stamp and the flag cannot land apart: ``active=False`` with no
+        ``revoked_at`` would make the row look deactivated-but-alive to any
+        consumer reading one column.
+
+        The audit row comes from ``TenantScopedQuerysetMixin._write_audit_log``
+        rather than a direct ``AuditEvent`` write, because a revocation is an
+        authenticated user's update of a row — the same event class the
+        mixin already records for every other write — and not a
+        machine-initiated one like ``regenerate``.
+        """
+        qr = self.get_object()  # tenant-scoped: a foreign id 404s here
+        if qr.revoked_at is not None:
+            # Already withdrawn: the repeat is the same end state, so it is a
+            # no-op that echoes the row. A second stamp or audit row would make
+            # the trail claim two withdrawals of one code.
+            return Response(QRCodeSerializer(qr).data)
+        qr.revoked_at = timezone.now()
+        qr.active = False
+        qr.save(update_fields=["revoked_at", "active"])
+        self._write_audit_log(qr, "update")
+        return Response(QRCodeSerializer(qr).data, status=status.HTTP_201_CREATED)
 
 
 class OpSlipView(APIView):
@@ -670,6 +805,12 @@ class OpSlipView(APIView):
             .order_by("-issued_at")
             .first()
         )
+
+        # AUD-001: log the patient, not the encounter — every other patient read
+        # lands under "registry.patient", so the audit screen filters one type.
+        from apps.audit.services import audit_read
+
+        audit_read(patient, request)
 
         demographics = patient.demographics or {}
         payload = {

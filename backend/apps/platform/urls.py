@@ -9,5 +9,6 @@ router = DefaultRouter()
 router.register(r"notifications", views.NotificationViewSet, basename="notification")
 router.register(r"files", views.PlatformFileViewSet, basename="platformfile")
 router.register(r"scheduled-jobs", views.ScheduledJobViewSet, basename="scheduledjob")
+router.register(r"feature-flags", views.FeatureFlagViewSet, basename="featureflag")
 
 urlpatterns = [*router.urls]

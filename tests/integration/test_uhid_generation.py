@@ -395,21 +395,18 @@ class TestTokenSeriesService:
 class TestABDMTokenUsesSharedSeries:
     """The callback issues series/numbers from TokenSeries, not inline logic (ABD-010)."""
 
-    def _scan(self, facility, request_id, abha="555555555555"):
-        client = APIClient()
-        return client.post(
-            "/api/v1/abdm-callbacks/",
+    def _scan(self, post_signed_callback, facility, request_id, abha="555555555555"):
+        return post_signed_callback(
+            APIClient(),
             {
                 "requestId": request_id,
                 "facilityId": facility.abdm_hip_id,
                 "timestamp": dj_timezone.now().isoformat(),
                 "profile": {"abhaNumber": abha},
             },
-            format="json",
-            HTTP_X_AUTHORIZATION="gateway-shared-secret",
         )
 
-    def test_abdm_token_uses_shared_series_service(self):
+    def test_abdm_token_uses_shared_series_service(self, post_signed_callback):
         """A pre-configured series wins over the old QR-<uuid> scheme."""
         tenant, facility, department = _make_context()
         TokenSeries.objects.create(
@@ -420,7 +417,7 @@ class TestABDMTokenUsesSharedSeries:
             next_number=7,
         )
 
-        response = self._scan(facility, "req-series-1")
+        response = self._scan(post_signed_callback, facility, "req-series-1")
         assert response.status_code == status.HTTP_200_OK
 
         token = Token.objects.get(id=response.json()["token"])
@@ -432,11 +429,11 @@ class TestABDMTokenUsesSharedSeries:
         )
         assert series.next_number == 8
 
-    def test_abdm_series_increments_across_calls(self):
+    def test_abdm_series_increments_across_calls(self, post_signed_callback):
         """Two scans for one department take consecutive numbers."""
         tenant, facility, department = _make_context()
-        first = self._scan(facility, "req-incr-1", abha="666666666666")
-        second = self._scan(facility, "req-incr-2", abha="777777777777")
+        first = self._scan(post_signed_callback, facility, "req-incr-1", abha="666666666666")
+        second = self._scan(post_signed_callback, facility, "req-incr-2", abha="777777777777")
 
         assert first.status_code == status.HTTP_200_OK
         assert second.status_code == status.HTTP_200_OK

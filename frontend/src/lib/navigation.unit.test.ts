@@ -14,6 +14,7 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  IMPLEMENTED_ROUTES,
   NAV_GROUPS,
   NAV_ITEMS,
   countEnabled,
@@ -159,7 +160,7 @@ describe("entry availability", () => {
 
   it("keeps Dashboard enabled because the route exists", () => {
     const dashboard = NAV_ITEMS.find((i) => i.id === "dashboard");
-    expect(dashboard?.path).toBe("/");
+    expect(dashboard?.path).toBe("/dashboard");
     expect(isNavItemDisabled(dashboard!)).toBe(false);
     expect(navItemStateLabel(dashboard!)).toBeNull();
   });
@@ -173,6 +174,64 @@ describe("entry availability", () => {
   it("labels every disabled entry with explicit text (design.md §23)", () => {
     for (const entry of NAV_ITEMS.filter(isNavItemDisabled)) {
       expect(navItemStateLabel(entry)).toMatch(/Not enabled|Not available/);
+    }
+  });
+});
+
+describe("UI_UX route contract (§18.2 R1 inventory)", () => {
+  // Canonical R1 paths extracted from the UI_UX screen inventory; the
+  // router serves each of these once the route-contract task lands.
+  const SCAFFOLDED_ROUTES = [
+    "/dashboard",
+    "/admin/setup",
+    "/patients",
+    "/admin/users",
+    "/kiosk/tokens/:displayId",
+    "/notifications",
+  ] as const;
+
+  it("resolves the spec paths for the scaffolded R1 screens", () => {
+    for (const path of SCAFFOLDED_ROUTES) {
+      expect(IMPLEMENTED_ROUTES.has(path)).toBe(true);
+    }
+  });
+
+  it("flips scaffolded nav items from disabled to routed placeholders", () => {
+    for (const id of [
+      "dashboard",
+      "patients",
+      "facility-setup",
+      "users",
+      "notifications",
+    ]) {
+      const entry = NAV_ITEMS.find((i) => i.id === id)!;
+      expect(entry.path).not.toBeNull();
+      expect(isNavItemDisabled(entry)).toBe(false);
+      expect(navItemStateLabel(entry)).toBeNull();
+    }
+  });
+
+  it("flips admin nav items whose screens landed with Task 34", () => {
+    for (const id of ["departments", "wards-beds", "audit"]) {
+      const entry = NAV_ITEMS.find((i) => i.id === id)!;
+      expect(entry.path).not.toBeNull();
+      expect(isNavItemDisabled(entry)).toBe(false);
+      expect(navItemStateLabel(entry)).toBeNull();
+    }
+  });
+
+  it("keeps items disabled whose own path has no route yet", () => {
+    // Availability keys off the item's own path, never its module: the
+    // admin items Task 34 did not render (configuration history,
+    // registration config) stay disabled alongside the unbuilt releases.
+    for (const id of [
+      "config-history",
+      "registration-config",
+      "opd",
+    ]) {
+      const entry = NAV_ITEMS.find((i) => i.id === id)!;
+      expect(isNavItemDisabled(entry)).toBe(true);
+      expect(navItemStateLabel(entry)).not.toBeNull();
     }
   });
 });

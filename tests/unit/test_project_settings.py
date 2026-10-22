@@ -92,6 +92,97 @@ def test_patient_fields_key_may_be_absent_in_debug(monkeypatch):
     assert module.PATIENT_FIELDS_KEY == ""
 
 
+def test_missing_audit_hmac_key_fails_closed_outside_debug(monkeypatch):
+    """AUD-002: an unverifiable chain must not start in production.
+
+    The audit trail is an HMAC-SHA256 chain under ``AUDIT_HMAC_KEY``. An
+    unkeyed HMAC is just a hash, so anyone who can read ``audit.event`` could
+    recompute and forge the chain — tamper-evidence would be a claim rather
+    than a control. ``chain_digest`` refuses an empty key on its own; this
+    pins the settings guard that makes that unreachable, so the failure is a
+    refusal to start rather than a silently unverifiable log.
+    """
+    import importlib
+    import sys
+
+    import django.core.exceptions as exc
+
+    # base.py's PATIENT_FIELDS_KEY guard is declared first and would raise its
+    # own message before the AUD-002 one was reached.
+    monkeypatch.setenv("PATIENT_FIELDS_KEY", "supplied-for-this-test")
+    monkeypatch.delenv("AUDIT_HMAC_KEY", raising=False)
+    monkeypatch.delenv("DJANGO_DEBUG", raising=False)
+    sys.modules.pop("config.settings.base", None)
+
+    with pytest.raises(exc.ImproperlyConfigured, match="AUDIT_HMAC_KEY"):
+        importlib.import_module("config.settings.base")
+
+
+def test_audit_hmac_key_may_be_absent_in_debug(monkeypatch):
+    """DEBUG=True is the local escape hatch, mirroring REG-008 (AUD-002).
+
+    dev.py supplies a deterministic value so a local database keeps verifying
+    across restarts; this only checks that the *guard* is debug aware, and
+    that an unkeyed chain is a deliberately-taken dev state rather than a
+    production default. The pin must not be misread as "an empty key works":
+    in the state it asserts, ``AUDIT_HMAC_KEY == ""``, ``_hmac_key`` (and so
+    every append and verify) raises — the developer mode runs only because
+    ``config.settings.dev`` supplies a value of its own, and exporting an
+    empty one by hand leaves an unrunnable server, exactly as the
+    PATIENT_FIELDS_KEY pin above.
+    """
+    import importlib
+    import sys
+
+    monkeypatch.setenv("DJANGO_DEBUG", "true")
+    monkeypatch.delenv("AUDIT_HMAC_KEY", raising=False)
+    sys.modules.pop("config.settings.base", None)
+
+    module = importlib.import_module("config.settings.base")
+    assert module.AUDIT_HMAC_KEY == ""
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("not-a-number", 365),
+        ("", 365),
+        ("0", 365),
+        ("-5", 365),
+        ("90", 90),
+    ],
+)
+def test_audit_retention_days_guards_garbage(monkeypatch, value, expected):
+    """AUD-004: a mis-typed retention window must not silently disable it.
+
+    ``.isdigit()`` rejects non-numerics and negatives alike, so neither a typo
+    nor a mistaken minus sign can shrink the effective window to "purge
+    everything" — a retention setting that fails open would delete evidence
+    an operator believed was being kept. 90 proves the override is honoured;
+    everything else falls back to the documented 365-day default.
+    """
+    import importlib
+    import sys
+
+    monkeypatch.setenv("PATIENT_FIELDS_KEY", "supplied-for-this-test")
+    monkeypatch.delenv("DJANGO_DEBUG", raising=False)
+    monkeypatch.setenv("AUDIT_RETENTION_DAYS", value)
+    sys.modules.pop("config.settings.base", None)
+
+    module = importlib.import_module("config.settings.base")
+    assert module.AUDIT_RETENTION_DAYS == expected
+
+
+def test_audit_retention_days_is_usable_without_further_configuration():
+    """AUD-004: the threshold the suite runs against is a positive int.
+
+    Task 23 schedules ``purge_expired`` against this value, so it has to be
+    present and sane on the settings object with nothing exported.
+    """
+    assert isinstance(settings.AUDIT_RETENTION_DAYS, int)
+    assert settings.AUDIT_RETENTION_DAYS > 0
+
+
 def test_mfa_permission_is_installed(settings):
     """TEN-006 enforcement must be a default permission, not a per-view opt-in.
 

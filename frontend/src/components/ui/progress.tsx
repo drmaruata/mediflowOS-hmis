@@ -8,6 +8,10 @@ const Progress = React.forwardRef<
 >(({ className, value, ...props }, ref) => (
   <ProgressPrimitive.Root
     ref={ref}
+    // `value` is consumed below for the indicator's transform, but Radix
+    // only sets aria-valuenow on the Root when it receives it — without
+    // this the progressbar role announces no value to assistive tech.
+    value={value}
     className={cn(
       "relative h-4 w-full overflow-hidden rounded-full bg-secondary",
       className

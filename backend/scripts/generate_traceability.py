@@ -54,27 +54,17 @@ MODULES = {
 #: per-requirement table prints, the note is appended to the Known gaps list.
 #: Every entry was re-verified against the code on 2026-10-07 — when a gap is
 #: closed, delete the entry so regeneration reflects reality.
+#: Task 18 deleted ABD-002 (QR regeneration *and* revocation both exist now:
+#: `qr-codes/{id}/regenerate/` and `qr-codes/{id}/revoke/`).
+#: Task 19 added ABD-017 (the profile-share replay ships and passes
+#: hermetically against our own callback, but no recorded real-sandbox run
+#: exists — a skip, or a hermetic replay, is not a verification).
 KNOWN_GAPS = {
-    "ABD-002": (
-        "partial",
-        "QR regenerate is implemented (`qr-codes/{id}/regenerate/`); the revoke "
-        "half of the requirement has no endpoint",
-    ),
-    "ABD-005": (
-        "**not implemented**",
-        "`ABHACallbackViewSet` accepts any non-empty X-ABDM-Signature or "
-        "Bearer header — presence-only, no secret comparison (verified "
-        "backend/apps/abdm_gateway/views.py `_authenticate`)",
-    ),
-    "ABD-011": (
-        "**not implemented**",
-        "the consent event is built and returned in the acknowledgement but "
-        "never written to any table",
-    ),
-    "ABD-012": (
-        "**not implemented**",
-        "the link token is `secrets.token_urlsafe(32)` and discarded — "
-        "no encryption, no storage (placeholder comment for KMS)",
+    "ABD-017": (
+        "deferred",
+        "sandbox profile-share replay test is gated on `ABDM_SANDBOX_RUN` "
+        "with real credentials; no recorded run in this environment — see "
+        "`docs/abdm-sandbox-runbook.md`",
     ),
     "REG-009": (
         "deferred",
@@ -97,25 +87,24 @@ KNOWN_GAPS = {
         "by authentication alone, and facility/department-scoped "
         "permissions (TEN-005) are unimplemented",
     ),
-    "TEN-006": (
-        "partial",
-        "TOTP enrol/confirm works and MFARequiredIfConfigured is installed "
-        "after IsAuthenticated in DEFAULT_PERMISSION_CLASSES, with the token "
-        "carrying `requires_mfa`/`mfa_verified` claims — but no POST "
-        "/auth/mfa/verify endpoint exists, so mfa_verified can never become "
-        "True after login and require_mfa roles are denied every "
-        "default-permission endpoint (fail-closed)",
-    ),
-    "AUD-002": (
-        "partial",
-        "AuditEvent.hash_chain exists but is never computed — the log is "
-        "append-only in practice, not tamper-evident",
-    ),
-    "PLT-004": (
-        "**not implemented**",
-        "every Celery task body is `pass` and there is no "
-        "CELERY_BEAT_SCHEDULE — no background job can run",
-    ),
+    # Task 21 deleted AUD-002: the chain is now real — every writer routes
+    # through `apps/audit/services.append_event`, `hash_chain` is an
+    # HMAC-SHA256 over the tenant's previous hash and the canonical field set,
+    # and `GET /api/v1/audit-log/verify/` recomputes it and names the first
+    # row that fails to match.
+    # Task 23 deleted PLT-004: the four Celery tasks are real bodies in
+    # `apps/workers/tasks.py` (`dispatch_notification`,
+    # `purge_expired_audit_events`, `run_scheduled_job`,
+    # `scan_abdm_callback_failures`), each with retry, exponential back-off and
+    # an idempotency guard, and `CELERY_BEAT_SCHEDULE` carries four entries
+    # seeded through django_celery-beat's DatabaseScheduler. What PLT-004 does
+    # not yet cover is the *engines* behind the job types — the indicator and
+    # report generators are post-R1 — which is a different requirement (QOS)
+    # than running background jobs reliably.
+    # Task 30 deleted TEN-006: POST /auth/mfa/verify/ exists and TOTP
+    # confirm completes the session, so mfa_verified becomes true after
+    # login and persists across refresh rotations — require_mfa roles
+    # reach default-permission endpoints with a verified pair.
     "QOS-001": (
         "**not implemented**",
         "indicator catalogue exists in docs/ but no loader has been written; "

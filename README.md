@@ -333,6 +333,88 @@ $env:CELERY_BROKER_URL = "redis://localhost:6379/0"
 > $env:PATIENT_FIELDS_KEY = "a-long-random-passphrase-only-the-hospital-knows"
 > ```
 
+> **AUDIT_HMAC_KEY (AUD-002):** the audit trail is a tamper-evident
+> HMAC-SHA256 hash chain — every row's `hash_chain` is `HMAC(key, prev_hash +
+> canonical(fields))`, recomputed by `GET /api/v1/audit-log/verify/` — so this
+> key is what makes the chain unspoofable: an unkeyed HMAC is just a hash, and
+> without a real key anyone who can read `audit.event` could recompute, and
+> therefore forge, the chain. It must be explicitly exported in any non-DEBUG
+> environment: `base.py` refuses to start without it (`ImproperlyConfigured`),
+> mirroring the `PATIENT_FIELDS_KEY` guard above, so the failure is a
+> refusal to start rather than a silently unverifiable log.
+> `config.settings.dev` and `config.settings.test` supply deterministic
+> values, so a local database keeps verifying across restarts (a random key
+> per boot would be a silent rotation every start). A note on DEBUG: with
+> `DEBUG=true` the variable is *tolerated* at settings import, but an empty
+> value leaves the chain unrunnable — `_hmac_key` raises on every append and
+> verify — so the practical dev state is the deterministic value
+> `config.settings.dev` installs, not a hand-exported empty one. Example:
+>
+> ```powershell
+> $env:AUDIT_HMAC_KEY = "$([Guid]::NewGuid().ToString('N') * 2)"
+> ```
+>
+> **AUDIT_RETENTION_DAYS (AUD-004):** how many days of audit history the
+> retention purge keeps (`purge_expired`), defaulting to **365** when unset
+> and overridable per deployment. The SRS requires "a configurable retention
+> policy" without naming a period, and the architecture doc leaves long-term
+> audit retention open with the customer (OQ-08), so 365 is a documented
+> placeholder, not a compliance claim. A non-numeric or non-positive value
+> falls back to the default rather than silently disabling or widening the
+> purge. Example:
+>
+> ```powershell
+> $env:AUDIT_RETENTION_DAYS = "2555"  # seven years, a common statutory floor
+> ```
+>
+> **MAX_UPLOAD_MB (PLT-005):** the size cap, in megabytes, for a single
+> document uploaded to `POST /api/v1/files/`, defaulting to **10** when unset.
+> The API also rejects extensions outside an allow-list (pdf, png, jpg, csv,
+> json), so this is the cap on a *documented-type* upload rather than the
+> first check to fire. A hostile **filename** is not rejected: it is renamed
+> into one safe path component under a server-generated per-upload directory,
+> because refusing it would tell the sender their name was interesting, and the
+> stored path is inside the tenant's own directory either way. The **download**
+> route is the one that refuses a stored path — with a 404 — when it does not
+> resolve under `MEDIA_ROOT`, or when its first component is not the tenant that
+> owns the row. A non-numeric or non-positive value falls back
+> to the default rather than silently disabling the cap. Example:
+>
+> ```powershell
+> $env:MAX_UPLOAD_MB = "25"  # a facility scanning large multi-page reports
+> ```
+>
+> **MEDIA_ROOT (PLT-005):** the absolute filesystem directory that uploaded
+> documents live in, defaulting to `<repo>/backend/media`. Each document is
+> stored under `<tenant_id>/<upload-uuid>/<sanitised filename>` there, so the
+> tenant partition is part of the path and two same-named uploads from one
+> hospital never collide. `config.settings.test` overrides this to a per-run
+> temporary directory so the suite never writes into the working tree. Example:
+>
+> ```powershell
+> $env:MEDIA_ROOT = "D:\mediflow\uploads"  # a mounted volume in production
+> ```
+>
+> **OIDC_ISSUER / OIDC_AUDIENCE / OIDC_JWKS_URI / OIDC_TENANT_CLAIM /
+> OIDC_JIT_PROVISION (INT-009):** single sign-on via `POST /api/v1/auth/oidc/`,
+> which exchanges an OIDC ID token — issuer, audience, signature and expiry
+> all verified against the IdP's published JWKS — for the same token pair
+> `auth/token/` issues. The first three are required: with any of them unset
+> the endpoint answers **501** with a structured body before any verification
+> work, never a fake 200. `OIDC_TENANT_CLAIM` names the ID-token claim carrying
+> the tenant **slug** to bind (default `tenant`); an absent or unresolvable
+> claim is refused with 403, and there is no default-tenant fallback.
+> `OIDC_JIT_PROVISION` (`true`/`false`, default **false**) opts in to
+> just-in-time account creation on first sign-on: while it is off an unknown
+> identity is refused with 403. Example:
+>
+> ```powershell
+> $env:OIDC_ISSUER = "https://sso.hospital.example"
+> $env:OIDC_AUDIENCE = "mediflow-hmis"
+> $env:OIDC_JWKS_URI = "https://sso.hospital.example/.well-known/jwks.json"
+> $env:OIDC_JIT_PROVISION = "true"   # create accounts on first sign-on
+> ```
+
 > The project defaults to PostgreSQL on `localhost` and Redis at `redis://redis:6379/0` in many settings. If you are using local services instead of containers, update these values accordingly.
 
 ### 4. Run database migrations
@@ -366,8 +448,8 @@ daphne -b 0.0.0.0 -p 8000 config.asgi:application
 The API should be available at:
 
 - http://localhost:8000/admin/
-- http://localhost:8000/api/schema/
-- http://localhost:8000/api/docs/
+- http://localhost:8000/api/schema/ — the published OpenAPI document, anonymous
+- http://localhost:8000/api/docs/ — Swagger UI, anonymous
 - http://localhost:8000/api/v1/health/ — liveness, anonymous, no database needed
 - http://localhost:8000/api/v1/health/ready/ — readiness, `503` if the database
   is unreachable

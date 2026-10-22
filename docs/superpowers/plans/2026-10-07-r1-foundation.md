@@ -648,7 +648,7 @@ def test_mfa_permission_is_installed(settings):
 - Modify (only if a pin fails): `config/asgi.py`, board endpoints
 
 **Interfaces:**
-- Consumes: existing `tokens/queue`, `bed-status/board`, `triages/tracking-board` endpoints and `apps/realtime/routing.py`.
+- Consumes: existing `tokens/queue`, `bed-status/board` + `board`, `triages/tracking_board` + `tracking-board` endpoints and `apps/realtime/routing.py` — two boards answer at two paths each (the router's action route and an explicit top-level alias, still duplicated) and the hyphenated `triages/tracking-board` is the detail route, which 404s.
 
 - [ ] **Step 1: write the pins** — `test_operational_boards_are_rest_not_websocket` (the three board endpoints return 200 JSON without any WS involvement); `test_websocket_routes_are_only_notifications_and_vitals` (walk `get_resolver`/`websocket_urlpatterns` and assert the route set is exactly `ws/notifications/`, `ws/vitals/` — INT-012/PLT-008); `test_board_endpoints_are_tenant_scoped` (tenant B sees no rows of tenant A for queue/board/tracking-board); `test_emergency_tracking_board_filters` — **also covers the latent `FieldError`**: `?status=` on the emergency board currently 500s because `Triage` has no `status` field; fix the filter (use the model's real severity/triage field) in this task.
 - [ ] **Step 2: run → FAIL** (emergency filter test fails with `FieldError`).

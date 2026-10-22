@@ -429,6 +429,46 @@ class TestBedCsv:
         assert not AuditEvent.objects.filter(tenant_id=TENANT_B).exists()
         assert not ConfigRevision.objects.filter(tenant_id=TENANT_B).exists()
 
+    def test_import_audit_rows_join_the_hash_chain(self, config_client, facility):
+        """Import-written rows must chain like PATCH-written ones (AUD-002).
+
+        ``_write_audit_event`` wrote straight to ``AuditEvent.objects.create``,
+        so every CSV-import row carried the empty hash default. Verify reads
+        an empty hash as a pre-chain row and skips it, which made a bulk import
+        both invisible to the chain and safe to edit afterwards — the same hole
+        the endpoint writers had. Both written rows must carry digests and the
+        tenant's chain must verify across them.
+        """
+        from apps.audit.models import AuditEvent
+        from apps.audit.services import verify_chain
+
+        ward_a = _seed_ward(TENANT_A, facility.id, "Ward A")
+        _seed_bed(TENANT_A, ward_a, "A1", functional=False, active=True)
+
+        imported = _upload_csv(
+            config_client,
+            "/api/v1/beds/import/",
+            "ward,bed_number,functional,active\n"
+            "Ward A,A1,true,true\n"
+            "Ward A,A9,false,true\n",
+        )
+        assert imported.status_code == 200, imported.content
+        assert imported.json() == {"created": 1, "updated": 1, "errors": []}
+
+        events = list(
+            AuditEvent.objects.filter(tenant_id=TENANT_A, entity_type="identity.bed")
+        )
+        assert len(events) == 2
+        for event in events:
+            assert event.hash_chain, (
+                "import-written audit rows must carry a chain digest (AUD-002)"
+            )
+        assert verify_chain(tenant_id=TENANT_A) == {
+            "valid": True,
+            "checked": 2,
+            "first_bad": None,
+        }
+
     def test_sequential_imports_close_prior_revision_per_row(
         self, config_client, facility
     ):

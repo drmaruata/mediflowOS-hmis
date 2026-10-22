@@ -84,8 +84,25 @@ export interface NavGroup {
 /**
  * Routes that actually exist in the router today. Kept as an explicit set
  * rather than read from React Router so this module stays pure.
+ *
+ * The scaffolded R1 module routes (UI_UX_design §18.2) serve placeholder
+ * screens from modules/<name>/__routes.tsx until each module's task lands;
+ * they are real routes, so their nav items are enabled. Task 34 replaced
+ * the /admin/users placeholder with the real screens and routed its
+ * siblings: the admin paths below are rendered, not scaffolded.
  */
-export const IMPLEMENTED_ROUTES: ReadonlySet<string> = new Set(["/"]);
+export const IMPLEMENTED_ROUTES: ReadonlySet<string> = new Set([
+  "/dashboard",
+  "/admin/setup",
+  "/patients",
+  "/admin/users",
+  "/admin/roles",
+  "/admin/departments",
+  "/admin/wards-beds",
+  "/admin/audit",
+  "/kiosk/tokens/:displayId",
+  "/notifications",
+]);
 
 /**
  * Tenant-enabled module ids. Absent module ⇒ `notEnabled` (R4-R7 gating,
@@ -137,7 +154,7 @@ function item(
  * user needs on arrival. Ordered roughly by daily touch frequency.
  */
 const MAIN_ITEMS: NavItem[] = [
-  item("dashboard", "Dashboard", "/", LayoutDashboard, "R1", "dashboard"),
+  item("dashboard", "Dashboard", "/dashboard", LayoutDashboard, "R1", "dashboard"),
   item(
     "patients",
     "Patient Registration",
@@ -261,6 +278,7 @@ export function navItemTitle(entry: NavItem): string {
 /** True when `path` is the active route (ignores query/hash). */
 export function isNavItemActive(entry: NavItem, currentPath: string): boolean {
   if (entry.path === null) return false;
-  if (entry.path === "/") return currentPath === "/";
+  // No "/" exact-match special case: equality covers it and the prefix
+  // branch cannot over-match, since no path starts with "//".
   return currentPath === entry.path || currentPath.startsWith(`${entry.path}/`);
 }

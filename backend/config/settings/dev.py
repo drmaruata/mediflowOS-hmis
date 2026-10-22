@@ -10,6 +10,17 @@ os.environ.setdefault(
     "PATIENT_FIELDS_KEY", "mediflow-dev-patient-fields-key-reg-008"
 )
 
+# ABD-005: deliberately left unset. The ABDM sandbox hands out no shared
+# secret, so a local developer cannot sign a callback; DEBUG=True below is the
+# documented fail-open mode (the endpoint logs a warning and accepts). Export
+# ABDM_CLIENT_SECRET to exercise the real HMAC path locally.
+
+# AUD-002: a deterministic dev key so a local audit database keeps verifying
+# across restarts (a random value would make every restart a key rotation and
+# every stored chain unverifiable). setdefault keeps a developer's own
+# exported AUDIT_HMAC_KEY. Mirrors the PATIENT_FIELDS_KEY treatment above.
+os.environ.setdefault("AUDIT_HMAC_KEY", "mediflow-dev-audit-hmac-key-aud-002")
+
 from .base import *  # noqa: E402,F401,F403
 
 DEBUG = True

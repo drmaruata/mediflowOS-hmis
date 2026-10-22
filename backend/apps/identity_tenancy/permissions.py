@@ -4,27 +4,18 @@
 token's ``permissions`` claim at issuance. Until this module nothing read it
 back: authentication plus the MFA gate were the only server-side authorisation,
 so any authenticated user could write roles, memberships and tenancy roots.
-This module closes that gap.
 
-Declaration note
-----------------
-DRF instantiates ``permission_classes`` entries with no arguments
-(``APIView.get_permissions`` literally does ``permission()``), so a class whose
-``__init__`` requires the permission code cannot be listed there directly —
-``RequirePermission("some.code")`` would be re-called as an instance and raise
-"object is not callable" on every request. Viewsets therefore return the
-constructed instance from ``get_permissions()`` instead; ``WritePermissionMixin``
-does that in one place, and ``TenantViewSet`` appends the instance itself.
+**Declaration note.** DRF instantiates ``permission_classes`` entries with no
+arguments (``APIView.get_permissions`` literally does ``permission()``), so a
+class whose ``__init__`` requires the permission code cannot be listed there
+directly — ``RequirePermission("some.code")`` would be re-called as an instance
+and raise "object is not callable" on every request. Viewsets therefore return
+the constructed instance from ``get_permissions()`` instead.
 
-Fail closed
------------
-The check reads ``request.auth.payload`` through
-``common.authentication.claims_from``, which documents why the payload
-attribute and not mapping access (SimpleJWT 5.x tokens are no longer dicts). A
-request without a validated token, or whose claim is missing or malformed, has
-no proof of the permission and is denied. Session-authenticated requests
-(browsable API) consequently cannot write gated resources — they carry no
-signed claims to read, which is the safe direction to fail.
+**Fail closed.** A request without a validated token, or whose claim is missing
+or malformed, has no proof of the permission and is denied. Session-authenticated
+requests (browsable API) consequently cannot write gated resources — they carry
+no signed claims to read, which is the safe direction to fail.
 """
 from rest_framework.permissions import SAFE_METHODS, BasePermission
 
@@ -58,13 +49,13 @@ class WritePermissionMixin:
 
     Appended to whatever ``super().get_permissions()`` returns — for a viewset
     that does not declare ``permission_classes`` that is the project-wide
-    deny-by-default list (``IsAuthenticated`` + ``MFARequiredIfConfigured``),
-    so the MFA gate stays in force on both paths even though this viewset
-    overrides ``get_permissions``.
+    deny-by-default list (``IsAuthenticated`` + ``MFARequiredIfConfigured``), so
+    the MFA gate stays in force on both paths even though this viewset overrides
+    ``get_permissions``.
 
-    Reads are deliberately ungated beyond authentication: listing a resource
-    is authorised by the authenticated principal plus tenant scoping
-    (TEN-002); changing it requires the claim (TEN-004).
+    Reads are ungated beyond authentication: listing a resource is authorised by
+    the authenticated principal plus tenant scoping (TEN-002); changing it
+    requires the claim (TEN-004).
     """
 
     #: Permission code required for POST/PUT/PATCH/DELETE.

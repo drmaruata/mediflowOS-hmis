@@ -5,19 +5,39 @@ Architecture doc section 8.4 requires:
 2. Resolve tenant from HIP ID, then set RLS context
 3. Idempotency on gateway request ID
 4. Strict timestamp and payload validation
-5. Match by ABHA number, then demographics
+5. Match by ABHA number, then demographics — a multi-candidate match queues
+   for human verification instead of guessing (ABD-009)
 6. Issue OPD token; heavy work async
 7. Record consent event; store link token encrypted
 
 This endpoint is intentionally anonymous (gateway carries no user JWT).
+
+INT-002 adds a versioned adapter on top of that flow. The acknowledgement is
+shaped by the API version the gateway speaks, resolved in this order: the version
+the **request declares**, else the tenant's **active ``abdm`` adapter's**
+version, else ``"v2"``. The declaration is *checked* after authentication, the
+mandatory-key check and the timestamp check, and before any write — an
+unauthenticated caller must not learn which versions exist (the 422 body names
+the supported set), and a refused call must leave no row behind.
+
+**A version label is never refused; only a malformed declaration is.** An
+unrecognised label falls back to ``"v2"`` — the shape this endpoint returned
+before version support existed — with a warning naming the label and the tenant.
+A declaration that is not a string at all (a list, an object, a number) has no
+honest fallback and is answered 422. The rationale for that trade-off is recorded
+once, on ``client.resolve_api_version``.
 """
+import hashlib
+import hmac
 import json
 import logging
 import secrets
 import uuid
 from datetime import datetime, timezone as dt_tz
 
+from django.conf import settings
 from django.db import transaction
+from django.http.request import RawPostDataException
 from django.utils import timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import action
@@ -26,14 +46,33 @@ from rest_framework.response import Response
 
 from common.tenant import bind_tenant_session
 from common.throttling import AbdmHipThrottle
+from .client import (
+    ABDMUnsupportedVersionError,
+    DEFAULT_API_VERSION,
+    SUPPORTED_API_VERSIONS,
+    build_callback_ack,
+    declared_api_version,
+    resolve_api_version,
+)
+from .consent import hash_profile, record_consent_event, store_link_token
 from .models import ABHACallbackLog
 from .serializers import ABHACallbackAckSerializer, ABHACallbackSerializer
+from .services import resolve_profile
 
 logger = logging.getLogger(__name__)
 
 
 class _NoOpdDepartment(Exception):
     """Raised when the tenant has no department able to hold an OPD token."""
+
+
+class _ForeignDepartment(Exception):
+    """Raised when the gateway supplies a department that is not ours.
+
+    Kept distinct from ``_NoOpdDepartment`` so the view can answer a foreign
+    id with 404 (the named department does not exist *for this tenant*) rather
+    than 409 (this tenant has no OPD department at all).
+    """
 
 
 class ABHACallbackViewSet(viewsets.ViewSet):
@@ -60,7 +99,26 @@ class ABHACallbackViewSet(viewsets.ViewSet):
             return False
         now = timezone.now()
         delta = abs((now - callback_dt).total_seconds())
-        return delta <= 300  # 5-minute window per ABDM spec
+        # Window per the ABDM spec, configurable because a gateway whose clock
+        # drifts would otherwise have every callback refused. Read through
+        # settings so a test can narrow it.
+        return delta <= settings.ABDM_MAX_SKEW_SECONDS
+
+    def _validate_payload_schema(self, payload: dict) -> str | None:
+        """Check the mandatory callback keys, naming the first one missing.
+
+        Returns ``None`` when the payload is well formed, otherwise the field
+        name that is absent or empty. A malformed callback used to be patched
+        over — a fabricated ``requestId`` defeated idempotency (ABD-006) and
+        ``profile or payload`` registered patients from transport fields
+        (ABD-007) — so the key that is missing is reported instead.
+        """
+        if not isinstance(payload, dict):
+            return "payload"
+        for key in ("requestId", "timestamp", "profile"):
+            if not payload.get(key):
+                return key
+        return None
 
     def _resolve_tenant_from_hip(self, hip_id: str):
         """Resolve tenant from the facility's ABDM HIP ID (ABD-004)."""
@@ -72,23 +130,65 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         return str(facility.tenant_id), str(facility.id)
 
     def _authenticate_call(self, request) -> bool:
-        """Authenticate the gateway call per ABDM specification (ABD-005).
+        """Verify the gateway's HMAC-SHA256 signature over the raw body (ABD-005).
 
-        The exact mechanism depends on the ABDM sandbox version in use.
-        This implementation accepts either a shared secret header or a
-        JWT-style bearer token — both are valid per the adapter pattern
-        documented in architecture doc section 8.2.
+        The gateway signs the exact bytes it posts with
+        ``HMAC-SHA256(ABDM_CLIENT_SECRET)`` and sends the hex digest in
+        ``X-ABDM-Signature``; this recomputes the digest over the bytes
+        actually received and compares with :func:`hmac.compare_digest`. The
+        raw body is what gets signed, never a re-serialization of the parsed
+        payload: key order and separators are the client's choice, so parsing
+        and dumping again would break the digest of a legitimate call.
+
+        Presence-only headers used to authenticate here — any non-empty
+        ``X-ABDM-Signature``, ``X-Authorization`` or ``Bearer`` token was
+        accepted, which proved nothing and let any caller write into a
+        tenant. Only a matching digest does now.
+
+        The ABDM sandbox issues no shared secret yet, so an empty
+        ``ABDM_CLIENT_SECRET`` is the local-development case: under ``DEBUG``
+        the call is accepted with a warning (there is no secret to verify
+        against), and outside it the call is refused. Read through ``settings``
+        rather than at import time so tests can flip both values.
+
+        The secret and the signature are never logged.
         """
-        # Check for ABDM-supplied signature header
-        sig = request.headers.get("X-ABDM-Signature") or request.headers.get("X-Authorization")
-        if sig:
+        signature = request.headers.get("X-ABDM-Signature") or ""
+        if not signature:
+            # DEBUG only excuses an *unverifiable* signature, never a missing
+            # one: a caller that sends no credential at all is refused
+            # regardless of environment.
+            return False
+
+        secret = settings.ABDM_CLIENT_SECRET
+        if not secret:
+            if not settings.DEBUG:
+                logger.warning(
+                    "ABDM callback refused: ABDM_CLIENT_SECRET is unset and "
+                    "DEBUG is off, so no signature can be verified"
+                )
+                return False
+            logger.warning(
+                "ABDM callback: ABDM_CLIENT_SECRET is unset, so the "
+                "X-ABDM-Signature cannot be verified — accepting because "
+                "DEBUG is on"
+            )
             return True
-        # Check for a bearer token
-        auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer "):
-            return True
-        # No credential — reject (the gateway callback is not anonymous)
-        return False
+
+        try:
+            body = request.body
+        except RawPostDataException:
+            # Something upstream already consumed the stream (Django raises
+            # this rather than returning a truncated body), so there is
+            # nothing to verify against. Refuse rather than guess.
+            logger.warning("ABDM callback refused: request body is unreadable")
+            return False
+
+        expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+        # Compared as bytes, not str: the header value is attacker-controlled
+        # and a non-ASCII one makes hmac.compare_digest raise TypeError
+        # (a 500) instead of simply failing to match.
+        return hmac.compare_digest(expected.encode("ascii"), signature.encode("utf-8"))
 
     def _idempotent_check(self, request_id: str, tenant_id: str):
         """Check for a duplicate request ID (ABD-006)."""
@@ -97,49 +197,100 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         except ABHACallbackLog.DoesNotExist:
             return None
 
-    def _match_patient(self, profile: dict, tenant_id: str):
-        """Match by ABHA number, then demographics (ABD-008, ABD-009).
+    def _malformed_version_response(self, error):
+        """422 for a declaration that is not a version label at all (INT-002).
 
-        The ABHA probe crosses the REG-008 ``abha_number_idx`` digest via
-        ``filter_by_abha`` — the gateway carries the plaintext number (the
-        person scanned it), so exact-digest matching finds the encrypted row
-        and never falls back to a ciphertext scan.
+        The only refusal the version contract makes; see
+        ``client.resolve_api_version`` for why an unrecognised *label* is served
+        instead.
+
+        422 rather than DRF's default 400 because the request is otherwise *well
+        formed* — it authenticated, carried every mandatory key and a fresh
+        timestamp — and 400 would say "malformed payload", sitting
+        inconsistently beside the 400 this endpoint already returns for a
+        genuinely malformed callback. The body names the supported set, which is
+        safe because the caller is authenticated by this point (the check runs
+        after ABD-005) and useless without that.
         """
-        from apps.patient_registry.models import Patient
-        abha_number = profile.get("abhaNumber") or profile.get("healthId")
-        if abha_number:
-            try:
-                return Patient.objects.filter_by_abha(
-                    tenant_id, abha_number
-                ).get()
-            except Patient.DoesNotExist:
-                pass
+        logger.warning("ABDM callback refused: %s", error)
+        return Response(
+            {
+                "status": "rejected",
+                "detail": str(error),
+                "supported_versions": list(SUPPORTED_API_VERSIONS),
+            },
+            status=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        )
 
-        # Candidate search by name + year of birth + gender
-        demographics = profile.get("demographics") or {}
-        name = demographics.get("name") or profile.get("name", "")
-        year = demographics.get("yearOfBirth") or profile.get("yearOfBirth")
-        gender = demographics.get("gender") or profile.get("gender")
-        if name and year:
-            candidates = Patient.objects.filter(
-                tenant_id=tenant_id,
-                demographics__name__icontains=name,
-                demographics__year_of_birth=year,
+    def _adapter_api_version(self, tenant_id: str):
+        """The tenant's active ``abdm`` adapter's version, or ``None`` (INT-002).
+
+        Explicitly filtered by ``tenant_id``, never by RLS alone: this lookup is
+        what decides which vocabulary an acknowledgement uses, so it must not
+        depend on a session binding being right. Ordered newest-first, matching
+        ``client.resolve_sandbox_base_url``, so both reads of the same row set
+        agree on which row is in force.
+
+        Must be called with the tenant session bound, like every other
+        tenant-scoped read in this view.
+        """
+        from apps.integration.models import IntegrationAdapter
+
+        adapter = (
+            IntegrationAdapter.objects.filter(
+                tenant_id=tenant_id, name="abdm", active=True
             )
-            if gender:
-                candidates = candidates.filter(demographics__gender=gender)
-            if candidates.count() == 1:
-                return candidates.first()
-        return None  # Will create provisional
+            .order_by("-created_at")
+            .first()
+        )
+        return adapter.api_version if adapter is not None else None
+
+    def _declared_or_default_version(self, declared, tenant_id: str) -> str:
+        """The shape a **declared** version resolves to, or the default (INT-002).
+
+        Used on the replay path, which deliberately does not consult the tenant's
+        adapter (see the note at the early return in :meth:`create`). Cannot raise:
+        the declaration's type was validated before the tenant was resolved, so by
+        this point it is a string or absent.
+        """
+        return resolve_api_version(
+            declared or DEFAULT_API_VERSION, tenant_id=tenant_id
+        )
+
+    def _resolve_api_version(self, declared, tenant_id: str) -> str:
+        """The version this callback is answered in (INT-002).
+
+        Precedence: what the **request declares**, else the tenant's active
+        ``abdm`` adapter's version, else the default — which is the shape this
+        endpoint returned before version support existed.
+
+        Returns the version string and lets
+        ``client.ABDMUnsupportedVersionError`` propagate rather than returning a
+        ``Response``: a resolver that can return two types makes every caller
+        re-check what it got back, and one forgotten check would feed a
+        ``Response`` into ``build_callback_ack``. The call site converts it to the
+        422 in one ``except``.
+        """
+        candidate = declared or self._adapter_api_version(tenant_id)
+        return resolve_api_version(candidate, tenant_id=tenant_id)
 
     def _resolve_department(self, raw_department_id):
         """Resolve a department the gateway supplied to a real, local department.
 
         The gateway is not trusted to name our departments: it sends whatever
-        the scanning facility had configured, which may be absent, may not be a
-        UUID, or may be a UUID from an entirely different tenant. Falling back
-        to the facility's first OPD-enabled department keeps a scan working
-        instead of writing a row keyed on garbage.
+        the scanning facility had configured. An id that is absent, blank or
+        not a UUID is unusable rather than hostile, so it falls back to the
+        facility's first OPD-enabled department with a warning — a scan for a
+        real patient should not be lost to a QR code minted without one.
+
+        An id that *is* a well-formed UUID but resolves to no department of this
+        tenant is a different case: it names a department that exists, just not
+        here. Silently rerouting that scan to an unrelated department would
+        queue the patient for the wrong service and put the resulting token in
+        the wrong series, so it raises instead.
+
+        Must be called with the tenant session bound: the fallback lookup is
+        row-level-security scoped and returns nothing without it.
         """
         from apps.identity_tenancy.models import Department
 
@@ -157,12 +308,29 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 ).first()
                 if department is not None:
                     return department
+                raise _ForeignDepartment(str(candidate))
 
         return (
             Department.objects.filter(tenant_id=self._tenant_id, opd_enabled=True)
             .order_by("name")
             .first()
         )
+
+    def _generate_abdm_uhid(self) -> str:
+        """Mint an ``ABDM``-prefixed UHID that is free in this tenant.
+
+        Shared by the provisional and the ambiguous queue entry because the
+        UHID must exist before the row does (it is NOT NULL) and a repeat would
+        violate ``(tenant_id, uhid)``. The ``ABDM`` prefix keeps gateway-minted
+        rows visibly distinct from the counter's ``UHID-`` series, which is what
+        a clerk sees when a queue entry has to be resolved by hand.
+        """
+        from apps.patient_registry.models import Patient
+
+        while True:
+            uhid = f"ABDM{uuid.uuid4().hex[:12].upper()}"
+            if not Patient.objects.filter(tenant_id=self._tenant_id, uhid=uhid).exists():
+                return uhid
 
     def _create_provisional_patient(self, profile: dict):
         """Create a pending patient record for an unmatched ABDM profile (REG-004).
@@ -177,16 +345,43 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         demographics = profile.get("demographics") or {}
         abha_number = profile.get("abhaNumber") or profile.get("healthId")
 
-        while True:
-            uhid = f"ABDM{uuid.uuid4().hex[:12].upper()}"
-            if not Patient.objects.filter(tenant_id=self._tenant_id, uhid=uhid).exists():
-                break
+        return Patient.objects.create(
+            tenant_id=self._tenant_id,
+            uhid=self._generate_abdm_uhid(),
+            abha_number=abha_number or None,
+            verification_status="pending",
+            demographics={
+                "name": demographics.get("name") or profile.get("name", ""),
+                "gender": demographics.get("gender") or profile.get("gender"),
+                "yearOfBirth": demographics.get("yearOfBirth") or profile.get("yearOfBirth"),
+            },
+            consent_flags={"abdm_scan_and_share": True},
+        )
+
+    def _create_ambiguous_queue_entry(self, profile: dict):
+        """Register a multi-candidate scan as one ambiguous queue entry (ABD-009).
+
+        Several registrations fit the scan equally well, and linking any one is a
+        coin toss between real patients — so nothing is linked. One row is written
+        with ``verification_status="ambiguous"``: the front desk gets a queue
+        entry to resolve, and the acknowledgement still carries its id so the
+        gateway can tell the scanning patient what happened. The candidates live
+        on the log row (``match_candidates``), not here: this patient table must
+        not become a place where one patient's scan points at other patients
+        beyond the ids needed to resolve it.
+
+        Same shape as the provisional patient (REG-004) apart from the status.
+        """
+        from apps.patient_registry.models import Patient
+
+        demographics = profile.get("demographics") or {}
+        abha_number = profile.get("abhaNumber") or profile.get("healthId")
 
         return Patient.objects.create(
             tenant_id=self._tenant_id,
-            uhid=uhid,
+            uhid=self._generate_abdm_uhid(),
             abha_number=abha_number or None,
-            verification_status="pending",
+            verification_status="ambiguous",
             demographics={
                 "name": demographics.get("name") or profile.get("name", ""),
                 "gender": demographics.get("gender") or profile.get("gender"),
@@ -241,6 +436,17 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 status=status.HTTP_401_UNAUTHORIZED,
             )
 
+        # ABD-007: required keys, before any of them is used or defaulted
+        missing_key = self._validate_payload_schema(payload)
+        if missing_key is not None:
+            return Response(
+                {
+                    "status": "rejected",
+                    "detail": f"Missing required callback field: {missing_key}",
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         # ABD-007: validate timestamp
         if not self._validate_timestamp(payload):
             return Response(
@@ -248,31 +454,75 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        # Extract key fields
-        request_id = payload.get("requestId") or payload.get("id") or secrets.token_uuid4().hex
+        # INT-002: the version the gateway declares, checked for *malformedness*
+        # only — an unrecognised label is served in the default shape below.
+        # The check sits after authentication and both payload checks and before
+        # any write, so an unauthenticated caller cannot use this endpoint to
+        # enumerate the supported versions (the 422 body names them), a refused
+        # call leaves no row behind, and a malformed declaration cannot ride a
+        # replayed acknowledgement through the idempotency early-return below.
+        declared_version = declared_api_version(payload)
+        if declared_version is not None and not isinstance(declared_version, str):
+            return self._malformed_version_response(
+                ABDMUnsupportedVersionError(declared_version)
+            )
+
+        # Extract key fields. The schema check above guarantees requestId and
+        # profile exist; neither is defaulted any further.
+        request_id = payload["requestId"]
         hip_id = payload.get("facilityId") or payload.get("hipId") or ""
-        profile = payload.get("profile") or payload
+        profile = payload["profile"]
 
         # ABD-004: resolve tenant from HIP ID
         tenant_facility = self._resolve_tenant_from_hip(hip_id)
         if not tenant_facility:
+            # Not found rather than malformed: the gateway named a facility
+            # this installation does not host, so there is nothing to route
+            # the callback to. 400 implied the request itself was wrong.
             return Response(
                 {"status": "rejected", "detail": "Unknown facility HIP ID"},
-                status=status.HTTP_400_BAD_REQUEST,
+                status=status.HTTP_404_NOT_FOUND,
             )
         tenant_id, facility_id = tenant_facility
 
         # ABD-006: idempotency check
         existing = self._idempotent_check(request_id, tenant_id)
         if existing:
+            # A replay is answered in the version *this* request declared, or the
+            # default when it declared none (INT-002).
+            #
+            # The decision, with its alternative. The stored outcome — request id,
+            # token, patient id, status — is version-*independent*; only its
+            # vocabulary is not. The obvious alternative is to refuse a replay
+            # declaring a different version from the original, on the reasoning
+            # that it was already processed under another contract. That is not
+            # implementable here: the ledger row records no version (adding a
+            # column is not this task's migration, which is the adapter field and
+            # nothing else), so a cross-version replay is indistinguishable from a
+            # same-version one and refusing would refuse honest gateway retries.
+            # Answering in the declared version is honest: the flow is never
+            # re-run and nothing is written either way (ABD-006), so the worst a
+            # confused gateway gets is vocabulary it cannot parse, not a second
+            # token or a second patient.
+            #
+            # The tenant's adapter is deliberately not consulted: this early
+            # return precedes the tenant-session binding every tenant-scoped read
+            # in this view requires, and guessing a version from a row that
+            # cannot be read would answer a v3 gateway in v2 vocabulary.
+            # Precedence here is therefore the declared version then the default
+            # — deliberately narrower than the first-request path.
+            replay_fields = {
+                "status": "duplicate",
+                "detail": "This request was already processed",
+                "request_id": request_id,
+                "token": existing.token_issued,
+                "patient_id": str(existing.matched_patient_id) if existing.matched_patient_id else None,
+            }
             return Response(
-                {
-                    "status": "duplicate",
-                    "detail": "This request was already processed",
-                    "request_id": request_id,
-                    "token": existing.token_issued,
-                    "patient_id": str(existing.matched_patient_id) if existing.matched_patient_id else None,
-                },
+                build_callback_ack(
+                    self._declared_or_default_version(declared_version, tenant_id),
+                    replay_fields,
+                ),
                 status=status.HTTP_200_OK,
             )
 
@@ -283,15 +533,119 @@ class ABHACallbackViewSet(viewsets.ViewSet):
         with transaction.atomic():
             bind_tenant_session(tenant_id, facility_id)
 
-            # ABD-008/009: match patient, registering one when nothing matches
-            patient = self._match_patient(profile, tenant_id)
-            if patient is None:
+            # INT-002: resolve the version now the tenant session is bound — the adapter
+            # lookup is tenant-scoped and must not rely on RLS alone, and the
+            # fallback warning can only name the tenant once it is known. The
+            # ``except`` is unreachable today (``IntegrationAdapter.api_version``
+            # is a ``CharField``, so a saved row can only hold a string) and is
+            # here as the single conversion point, so a row that somehow carried
+            # a list or an object would be refused rather than served.
+            try:
+                api_version = self._resolve_api_version(declared_version, tenant_id)
+            except ABDMUnsupportedVersionError as exc:
+                return self._malformed_version_response(exc)
+
+            # ABD-010: resolve the department the gateway named *before* the
+            # patient is matched or registered. A refusal from here returns a
+            # response, and returning from inside atomic() commits the block,
+            # so nothing may have been written yet for the commit to keep.
+            try:
+                department = self._resolve_department(
+                    payload.get("departmentId") or payload.get("intakePointId")
+                )
+            except _ForeignDepartment:
+                logger.warning(
+                    "ABDM callback: supplied department is not part of tenant %s",
+                    tenant_id,
+                )
+                return Response(
+                    {
+                        "status": "rejected",
+                        "detail": "Supplied department is not part of this facility",
+                    },
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            # ABD-008/009: resolve the shared profile — an exact ABHA match, a
+            # single demographic candidate, several (ambiguous) or none.
+            resolution = resolve_profile(profile=profile, tenant_id=tenant_id)
+
+            if resolution.kind == "candidates":
+                # ABD-009: several registrations fit this scan, so none of them
+                # is linked. Exactly one queue entry is created, the consent is
+                # still recorded, and the callback is acknowledged 200 with a
+                # null token — the scan was received and the consent honoured,
+                # but identity resolution is now queued work for the front desk.
+                patient = self._create_ambiguous_queue_entry(profile)
+
+                # ABD-011: the consent still happened — the patient scanned and
+                # shared at the counter — so it is still recorded, naming the
+                # queue entry this scan produced. Deferring the record would
+                # leave a real grant unlogged because identity work was
+                # outstanding; only the identity resolution is queued.
+                consent_event = record_consent_event(
+                    tenant_id=tenant_id,
+                    patient_id=patient.id,
+                    request_id=request_id,
+                    source_app=payload.get("sourceApp") or "ABDM",
+                    purpose="registration",
+                    facility_id=facility_id,
+                    raw_profile_hash=hash_profile(profile),
+                )
+
+                log = ABHACallbackLog.objects.create(
+                    tenant_id=tenant_id,
+                    request_id=request_id,
+                    facility_abdm_id=hip_id,
+                    ip=request.META.get("REMOTE_ADDR"),
+                    profile=json.dumps(profile)[:4000],  # truncate large payloads
+                    matched_patient_id=patient.id,
+                    token_issued=None,
+                    status="ambiguous",
+                    match_candidates=[
+                        {"patient_id": str(candidate.id), "reason": "demographic"}
+                        for candidate in resolution.candidates
+                    ],
+                )
+                # store_link_token is deliberately not called here: the token
+                # exists to complete care-context linking against a *resolved*
+                # patient, and until a human picks the right candidate there is
+                # nothing to link it to. ``link_token_enc`` stays NULL.
+
+                # The ledger row above is what makes the replay early-return work
+                # for this branch too; returning from inside atomic() commits the
+                # queue entry, consent and log together.
+                ack = build_callback_ack(
+                    api_version,
+                    ABHACallbackAckSerializer({
+                        "status": "ambiguous",
+                        "token": None,
+                        "request_id": request_id,
+                        "patient_id": str(patient.id),
+                        "consent_event": consent_event,
+                    }).data,
+                )
+                return Response(ack, status=status.HTTP_200_OK)
+
+            if resolution.kind == "matched":
+                patient = resolution.patient
+                # A demographic match is weak evidence: name, birth year and
+                # gender agree, but nobody confirmed them, so the record goes
+                # back into the verification queue. A record the front desk
+                # already verified is never demoted by a gateway guess —
+                # ``pending`` written over ``verified`` would queue a confirmed
+                # patient. An exact ABHA match skips this write entirely: it is
+                # the strong identifier and changes nothing about the status.
+                if (
+                    resolution.matched_by == "demographic"
+                    and patient.verification_status != "verified"
+                ):
+                    patient.verification_status = "pending"
+                    patient.save(update_fields=["verification_status"])
+            else:
                 patient = self._create_provisional_patient(profile)
 
             # ABD-010: issue token
-            department = self._resolve_department(
-                payload.get("departmentId") or payload.get("intakePointId")
-            )
             try:
                 token = self._issue_token(department, patient.id)
             except _NoOpdDepartment:
@@ -306,19 +660,31 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                     status=status.HTTP_409_CONFLICT,
                 )
 
-            # ABD-011: record consent event
-            consent_event = {
-                "timestamp": timezone.now().isoformat(),
-                "source_app": payload.get("sourceApp") or "ABDM",
-                "purpose": "registration",
-                "facility_id": facility_id,
-            }
+            # ABD-011: record the consent event, and ABD-012: store the link
+            # token encrypted. Both writes sit inside the request transaction
+            # alongside the patient registration and the token, so the consent
+            # record and the patient it names cannot come apart: a rollback of
+            # one is a rollback of all of them, and a dangling consent row
+            # pointing at a patient that no longer exists is worse than no
+            # consent row at all.
+            consent_event = record_consent_event(
+                tenant_id=tenant_id,
+                patient_id=patient.id,
+                request_id=request_id,
+                source_app=payload.get("sourceApp") or "ABDM",
+                purpose="registration",
+                facility_id=facility_id,
+                raw_profile_hash=hash_profile(profile),
+            )
 
-            # ABD-012: store link token encrypted (placeholder for KMS integration)
+            # ABD-012: the link token exists only for care-context linking. It
+            # is sealed into the log row and never echoed in the
+            # acknowledgement — the gateway does not need the value, and an
+            # ack is the one part of this flow that logs and proxies see.
             link_token = secrets.token_urlsafe(32)
 
             # Log the callback
-            ABHACallbackLog.objects.create(
+            log = ABHACallbackLog.objects.create(
                 tenant_id=tenant_id,
                 request_id=request_id,
                 facility_abdm_id=hip_id,
@@ -328,16 +694,19 @@ class ABHACallbackViewSet(viewsets.ViewSet):
                 token_issued=token,
                 status="ok",
             )
+            store_link_token(log_id=log.id, token=link_token)
 
-        ack = ABHACallbackAckSerializer({
-            "status": "ok",
-            "token": token,
-            "request_id": request_id,
-            "patient_id": str(patient.id),
-            "consent_event": consent_event,
-            "link_token": link_token,
-        })
-        return Response(ack.data, status=status.HTTP_200_OK)
+        ack = build_callback_ack(
+            api_version,
+            ABHACallbackAckSerializer({
+                "status": "ok",
+                "token": token,
+                "request_id": request_id,
+                "patient_id": str(patient.id),
+                "consent_event": consent_event,
+            }).data,
+        )
+        return Response(ack, status=status.HTTP_200_OK)
 
     @action(detail=False, methods=["get"])
     def health(self, request):

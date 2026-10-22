@@ -1,17 +1,16 @@
 """Shared validation primitives for the patient registry.
 
 The registration serializer (REG-007) and the duplicate detector (REG-003) must
-agree on what a mobile number *is*: the serializer validates and canonicalises
-the stored value, and the detector's database prefilter compares against that
-same stored form. Keeping one implementation here is what stops the two from
-drifting — they previously differed for a leading-zero 10-digit input.
+agree on what a mobile number *is*: one validates and canonicalises the stored
+value, the other compares against that same stored form. Keeping one
+implementation here is what stops the two drifting — they previously differed for
+a leading-zero 10-digit input.
 """
 import re
 
 #: Canonical stored mobile: 10-digit Indian national number, first digit 6-9.
-#: Deliberately *not* ``+91``-anchored because the stored form is the bare
-#: national number; a leading ``+91``/``91``/``0`` is stripped by
-#: :func:`normalise_mobile` before the match.
+#: Not ``+91``-anchored because the stored form is the bare national number; a
+#: leading ``+91``/``91``/``0`` is stripped by :func:`normalise_mobile` first.
 MOBILE_RE = re.compile(r"^[6-9]\d{9}$")
 
 
