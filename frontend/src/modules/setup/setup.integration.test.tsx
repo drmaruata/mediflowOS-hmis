@@ -276,7 +276,9 @@ describe("SetupWizard", () => {
 
     renderWizard();
 
-    expect(await screen.findByRole("heading", { level: 1, name: /facility setup/i }));
+    // The screen heading demoted to h2 in the Medicore sweep: PageHeading
+    // owns the route's h1, so in that composition this is level 2.
+    expect(await screen.findByRole("heading", { level: 2, name: /facility setup/i }));
     expect(screen.getAllByRole("listitem")).toHaveLength(10);
     expect(screen.getByText("20% complete")).toBeInTheDocument();
     expect(screen.getByRole("progressbar")).toHaveAttribute("aria-valuenow", "20");

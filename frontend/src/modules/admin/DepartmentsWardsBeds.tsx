@@ -63,9 +63,9 @@ const selectClass =
 export default function DepartmentsWardsBeds({ section }: { section: ConfigSection }) {
   return (
     <div>
-      <h1 className="text-xl font-bold tracking-tight text-card-foreground">
+      <h2 className="text-xl font-bold tracking-tight text-card-foreground">
         {section === "departments" ? "Departments" : "Wards & beds"}
-      </h1>
+      </h2>
       {section === "departments" ? (
         <DepartmentsSection />
       ) : (

@@ -62,7 +62,7 @@ export default function AuditLog() {
 
   return (
     <div>
-      <h1 className="text-xl font-bold tracking-tight text-card-foreground">Audit log</h1>
+      <h2 className="text-xl font-bold tracking-tight text-card-foreground">Audit log</h2>
       <p className="mt-1 text-sm text-muted-foreground">
         Immutable record of access and change events. Filter by entity type (a
         table name, e.g. registry.patient) and entity id to answer “who opened

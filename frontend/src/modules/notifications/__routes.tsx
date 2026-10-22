@@ -17,9 +17,9 @@ export default function NotificationsRoutes() {
   return (
     <Card className="mx-auto max-w-xl">
       <CardHeader>
-        <h1 className="text-xl font-bold tracking-tight text-card-foreground">
+        <h2 className="text-xl font-bold tracking-tight text-card-foreground">
           Notifications
-        </h1>
+        </h2>
         <CardDescription>Not available yet (R1)</CardDescription>
       </CardHeader>
       <CardContent>

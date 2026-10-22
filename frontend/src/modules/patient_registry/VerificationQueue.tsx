@@ -65,9 +65,9 @@ export default function VerificationQueue() {
   return (
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-bold tracking-tight text-card-foreground">
+        <h2 className="text-xl font-bold tracking-tight text-card-foreground">
           Verification queue
-        </h1>
+        </h2>
         <div className="flex items-center gap-3">
           {queue.dataUpdatedAt > 0 && (
             <p className="text-sm text-muted-foreground">

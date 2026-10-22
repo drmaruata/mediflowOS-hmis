@@ -57,9 +57,9 @@ export default function PatientList() {
   return (
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-bold tracking-tight text-card-foreground">
+        <h2 className="text-xl font-bold tracking-tight text-card-foreground">
           Patients
-        </h1>
+        </h2>
         <div className="flex flex-wrap gap-2">
           <Button asChild>
             <Link to="/patients/register">New patient</Link>

@@ -63,7 +63,7 @@ export default function Roles() {
   return (
     <div>
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-xl font-bold tracking-tight text-card-foreground">Roles</h1>
+        <h2 className="text-xl font-bold tracking-tight text-card-foreground">Roles</h2>
         <Button asChild variant="outline">
           <Link to="/admin/users">Users</Link>
         </Button>

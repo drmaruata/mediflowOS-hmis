@@ -198,9 +198,9 @@ export default function SetupWizard() {
     <div className="mx-auto max-w-4xl">
       <header className="flex flex-col gap-2">
         <div className="flex items-baseline justify-between gap-4">
-          <h1 className="text-xl font-bold tracking-tight text-foreground">
+          <h2 className="text-xl font-bold tracking-tight text-foreground">
             Facility setup
-          </h1>
+          </h2>
           <p role="status" className="text-sm font-medium text-foreground">
             {percent}% complete
           </p>

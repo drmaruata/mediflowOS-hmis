@@ -82,9 +82,9 @@ export default function PatientDetail() {
   const year = birthYearFromDemographics(data.demographics);
   return (
     <div>
-      <h1 className="font-mono text-xl font-bold tracking-tight text-card-foreground">
+      <h2 className="font-mono text-xl font-bold tracking-tight text-card-foreground">
         {data.uhid}
-      </h1>
+      </h2>
       <div className="mt-2 flex flex-wrap items-center gap-2">
         <Badge
           variant={data.verification_status === "verified" ? "secondary" : "outline"}

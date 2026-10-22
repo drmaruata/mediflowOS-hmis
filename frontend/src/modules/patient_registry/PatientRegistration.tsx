@@ -238,9 +238,9 @@ export default function PatientRegistration() {
     const patient = create.data;
     return (
       <div>
-        <h1 className="text-xl font-bold tracking-tight text-card-foreground">
+        <h2 className="text-xl font-bold tracking-tight text-card-foreground">
           Patient registered
-        </h1>
+        </h2>
         <div
           ref={successRef}
           role="status"
@@ -297,9 +297,9 @@ export default function PatientRegistration() {
 
   return (
     <div>
-      <h1 className="text-xl font-bold tracking-tight text-card-foreground">
+      <h2 className="text-xl font-bold tracking-tight text-card-foreground">
         New patient
-      </h1>
+      </h2>
       <p className="mt-1 text-sm text-muted-foreground">
         The registry issues the UHID when the patient is saved — this form
         never asks for one (REG-001).
