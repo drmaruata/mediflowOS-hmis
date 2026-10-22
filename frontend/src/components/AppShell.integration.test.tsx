@@ -359,12 +359,13 @@ describe("route contract (UI_UX §4.3/§18.2)", () => {
     expect(screen.getByText("Current path: /dashboard")).toBeInTheDocument();
   });
 
-  it("grows the Medicore frame with content — one page scroll, no internal wrappers", async () => {
-    // The mock (.app-frame) sizes the frame with min-height and lets the
-    // page scroll; a fixed svh-height frame with an internal scrolling
-    // column and a viewport-capped rail manufactured three scrollbars at
-    // once. jsdom cannot compute layout, so the invariant is pinned at the
-    // class strings that produce it.
+  it("runs the shell full-bleed — no framed chrome, one page scroll", async () => {
+    // Design decision 2026-10-22: the desktop frame (rounded bordered
+    // min(1500px,100%) workspace on the pale canvas — spec §4.10) was
+    // dropped; the shell owns the viewport at every width. jsdom cannot
+    // compute layout, so the invariant is pinned at the class strings:
+    // no frame chrome anywhere, no internal scroll wrappers, rail a plain
+    // flow child.
     useAuthStore.setState({
       accessToken: "access-1",
       refreshToken: "refresh-1",
@@ -405,27 +406,17 @@ describe("route contract (UI_UX §4.3/§18.2)", () => {
     );
     await screen.findByText(/Welcome back/);
 
-    const frame = [...container.querySelectorAll("div")].find((el) =>
-      (el as HTMLElement).className.includes("rounded-[20px]"),
+    const framed = [...container.querySelectorAll("div")].filter((el) =>
+      /rounded-\[20px\]|max-w-\[1500px\]|shadow-shell|lg:px-\[clamp|lg:min-h-\[calc/.test(
+        (el as HTMLElement).className,
+      ),
     );
-    expect(frame).toBeDefined();
-    // The frame is a minimum that grows with the route's content, and the
-    // page is its only scroll context (mock index.css .app-frame).
-    expect(frame?.className).toContain("lg:min-h-[calc(100svh");
-    expect(frame?.className).not.toContain("lg:h-[calc(100svh");
-    expect(frame?.className).toContain("lg:flex-col");
-    expect(frame?.className).toMatch(/\blg:flex\b/);
+    expect(framed).toEqual([]);
 
-    // The content column is a flow child, never its own scroll container.
+    // One page scroll — the content column is never its own scroller.
     expect(screen.getByRole("main").className).not.toContain(
       "overflow-y-auto",
     );
-
-    // The body row stretches inside the flex frame instead of pinning a
-    // percentage of a fixed height.
-    const row = frame?.lastElementChild as HTMLElement | undefined;
-    expect(row?.className).toContain("lg:flex-1");
-    expect(row?.className).not.toContain("lg:h-[calc(100%");
 
     // The rail is a plain flow child at lg (its md sticky cap stays below).
     const aside = screen.getByRole("complementary");

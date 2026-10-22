@@ -137,17 +137,15 @@ function AuthLayout() {
   }, [location.pathname]);
 
   return (
-    <div className="min-h-svh bg-canvas-dashboard text-foreground lg:px-[clamp(0px,4vw,44px)] lg:py-[clamp(0px,2vw,22px)]">
+    <div className="min-h-svh bg-shell-sidebar text-foreground">
       {/*
-        Framed workspace (spec §4.10; modelled on the mock's .app-frame).
-        Below `lg` the shell runs full-bleed exactly as before — hospital
-        wall screens are often small. At `lg`+ a rounded, bordered frame
-        floats on the canvas with a MINIMUM height (100svh - 2 * py) and
-        grows with the route's content: the page is the shell's only scroll
-        context (rail and content column are plain flow children), matching
-        the mock and keeping nested scroll wrappers out.
+        Full-bleed shell at every width (design decision 2026-10-22: the
+        desktop frame from spec §4.10 / the mock was dropped by user
+        direction). The page is the shell's only scroll context — rail and
+        content column are plain flow children — and the sticky topbar
+        keeps controls reachable on tall routes.
       */}
-      <div className="lg:mx-auto lg:flex lg:min-h-[calc(100svh-2*clamp(0px,2vw,22px))] lg:flex-col lg:max-w-[1500px] lg:overflow-hidden lg:rounded-[20px] lg:border lg:border-border lg:bg-shell-sidebar lg:shadow-[var(--shadow-shell)]">
+      <div>
         <AppHeader
           isLive={false}
           isCompact={false}
@@ -155,14 +153,11 @@ function AuthLayout() {
           onOpenNav={() => setDrawerOpen(true)}
           onToggleCollapsed={() => setCollapsed((prev) => !prev)}
         />
-        {/* flex-1 stretches the row down to the frame's minimum height on
-            short pages, so rail and content reach the frame's bottom edge. */}
-        <div className="flex lg:flex-1">
+        <div className="flex">
           <AppSidebar
             collapsed={collapsed}
             /* At lg the rail is an in-flow stretch child (scrolls with the
-               page, like the mock); the root's sticky viewport cap stays
-               for the full-bleed md range. */
+               page once); the root's sticky viewport cap stays for md. */
             className="lg:static lg:h-auto"
           />
           <AppSidebarDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
