@@ -209,86 +209,90 @@ export function AppHeader({
           </div>
         )}
 
-        {/* Real connection state — a word carries meaning; colour only decorates
-            it (design.md §23). The mock's hardcoded chip is replaced by query
-            state (Medicore spec §4.6). */}
-        <p
-          role="status"
-          aria-live="polite"
-          className="hidden items-center gap-1.5 rounded-lg border border-border bg-shell-sidebar-hover px-2.5 py-1.5 text-xs text-shell-sidebar-subtle sm:flex"
-        >
-          <span
-            aria-hidden="true"
-            className={cn("size-2 shrink-0 rounded-full", healthDotClass)}
-          />
-          <span className="font-medium text-shell-topbar-foreground">{healthWord}</span>
-        </p>
+        {/* Right-side cluster (mock .topbar-actions): ml-auto pins it to the
+            header's far edge so the bar spans the full shell width. */}
+        <div className="ml-auto flex shrink-0 items-center gap-2">
+          {/* Real connection state — a word carries meaning; colour only decorates
+              it (design.md §23). The mock's hardcoded chip is replaced by query
+              state (Medicore spec §4.6). */}
+          <p
+            role="status"
+            aria-live="polite"
+            className="hidden items-center gap-1.5 rounded-lg border border-border bg-shell-sidebar-hover px-2.5 py-1.5 text-xs text-shell-sidebar-subtle sm:flex"
+          >
+            <span
+              aria-hidden="true"
+              className={cn("size-2 shrink-0 rounded-full", healthDotClass)}
+            />
+            <span className="font-medium text-shell-topbar-foreground">{healthWord}</span>
+          </p>
 
-        {/*
-          Live/Demo badge as a soft accent fill: brand-accent-soft +
-          brand-accent-ink composites on both topbars (dark green-on-bright
-          text would fail AA against the dark-theme bright green).
-        */}
-        <Badge
-          variant="outline"
-          className={
-            isLive
-              ? "shrink-0 border-ring bg-brand-accent-soft text-brand-accent-ink hover:bg-brand-accent-soft"
-              : "shrink-0 border-border bg-shell-sidebar-hover text-shell-sidebar-subtle hover:bg-shell-sidebar-hover"
-          }
-        >
-          {isLive ? "Live Data" : "Demo data"}
-        </Badge>
+          {/*
+            Live/Demo badge as a soft accent fill: brand-accent-soft +
+            brand-accent-ink composites on both topbars (dark green-on-bright
+            text would fail AA against the dark-theme bright green).
+          */}
+          <Badge
+            variant="outline"
+            className={
+              isLive
+                ? "shrink-0 border-ring bg-brand-accent-soft text-brand-accent-ink hover:bg-brand-accent-soft"
+                : "shrink-0 border-border bg-shell-sidebar-hover text-shell-sidebar-subtle hover:bg-shell-sidebar-hover"
+            }
+          >
+            {isLive ? "Live Data" : "Demo data"}
+          </Badge>
 
-        <Button
-          variant="ghost"
-          size="icon"
-          aria-label="Notifications"
-          className={TOPBAR_ICON_BUTTON}
-        >
-          <Bell className="size-5" aria-hidden="true" />
-        </Button>
+          <Button
+            variant="ghost"
+            size="icon"
+            aria-label="Notifications"
+            className={TOPBAR_ICON_BUTTON}
+          >
+            <Bell className="size-5" aria-hidden="true" />
+          </Button>
 
-        {/* Theme control moved to the sidebar footer (Medicore spec §4.5) —
-            single control, replacing the retired ThemeToggle dropdown. */}
+          {/* Theme control moved to the sidebar footer (Medicore spec §4.5) —
+              single control, replacing the retired ThemeToggle dropdown. */}
 
-        {/* User menu — session identity disclosure and sign-out (UI-001);
-            the full profile card stays scoped to UI-003. */}
-        <DropdownMenu>
-          <DropdownMenuTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              aria-label="User menu"
-              className={TOPBAR_ICON_BUTTON}
-            >
-              <span
-                aria-hidden="true"
-                className="flex size-7 items-center justify-center rounded-full bg-foreground/10 text-xs font-semibold text-shell-topbar-foreground"
+          {/* User menu — session identity disclosure and sign-out (UI-001);
+              the full profile card stays scoped to UI-003. */}
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                aria-label="User menu"
+                className={TOPBAR_ICON_BUTTON}
               >
-                {initial ?? "—"}
-              </span>
-            </Button>
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="end">
-            <DropdownMenuLabel className="flex flex-col gap-0.5">
-              <span className="font-medium">{username ?? "Signed in"}</span>
-              {session.data?.role && (
-                <span className="text-xs font-normal text-muted-foreground">
-                  {session.data.role}
+                <span
+                  aria-hidden="true"
+                  className="flex size-7 items-center justify-center rounded-full bg-foreground/10 text-xs font-semibold text-shell-topbar-foreground"
+                >
+                  {initial ?? "—"}
                 </span>
-              )}
-            </DropdownMenuLabel>
-            <DropdownMenuSeparator />
-            <DropdownMenuItem
-              aria-label="Sign out"
-              onSelect={() => void handleSignOut()}
-            >
-              <LogOut className="size-4" aria-hidden="true" />
-              Sign out
-            </DropdownMenuItem>
-          </DropdownMenuContent>
-        </DropdownMenu>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end">
+              <DropdownMenuLabel className="flex flex-col gap-0.5">
+                <span className="font-medium">{username ?? "Signed in"}</span>
+                {session.data?.role && (
+                  <span className="text-xs font-normal text-muted-foreground">
+                    {session.data.role}
+                  </span>
+                )}
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem
+                aria-label="Sign out"
+                onSelect={() => void handleSignOut()}
+              >
+                <LogOut className="size-4" aria-hidden="true" />
+                Sign out
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
+        </div>
       </div>
     </header>
   );
