@@ -123,9 +123,16 @@ export default function TokenDisplay() {
   // counted from errorUpdateCount — monotone per error event — with any
   // success clearing the tally. Guards make the double StrictMode effect
   // run a no-op, so the count cannot inflate.
+  // seenErrorsRef is seeded on first observation so a remount against a
+  // cached query with errorUpdateCount >= 2 but current success computes
+  // delta 0 and does not flash the offline banner.
   const [failedPolls, setFailedPolls] = useState(0);
-  const seenErrorsRef = useRef(0);
+  const seenErrorsRef = useRef<number | null>(null);
   useEffect(() => {
+    if (seenErrorsRef.current === null) {
+      seenErrorsRef.current = queueQuery.errorUpdateCount;
+      return;
+    }
     const newErrors = queueQuery.errorUpdateCount - seenErrorsRef.current;
     seenErrorsRef.current = queueQuery.errorUpdateCount;
     if (newErrors > 0) {

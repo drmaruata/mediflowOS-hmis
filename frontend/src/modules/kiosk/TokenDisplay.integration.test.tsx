@@ -324,4 +324,131 @@ describe("TokenDisplay (kiosk counter display, UI-003)", () => {
 
     expect(screen.getByText("M-042")).toBeInTheDocument();
   });
+
+  it("recovers from two failed polls: banner and footer clear on success, last good value replaced", async () => {
+    let queue = [queueToken("M", 42)];
+    let failCount = 0;
+    stubFetch((url) => {
+      if (url !== QUEUE_URL) return ok(departmentPayload());
+      if (failCount > 0) {
+        failCount -= 1;
+        return Promise.reject(new Error("network down"));
+      }
+      return ok(queue);
+    });
+
+    renderKiosk();
+    await flush();
+    expect(screen.getByText("M-042")).toBeInTheDocument();
+
+    // First failure
+    failCount = 1;
+    await advance(2_000);
+    await flush();
+    expect(screen.getByText(/Reconnecting automatically/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Connection lost/i)).not.toBeInTheDocument();
+
+    // Second failure — banner raised
+    failCount = 1;
+    await advance(2_000);
+    await flush();
+    expect(screen.getByText(/Connection lost/i)).toBeInTheDocument();
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(screen.getByText("M-042")).toBeInTheDocument(); // last good kept
+
+    // Recovery — success clears both banner and footer, new token shown
+    queue = [queueToken("M", 43)];
+    failCount = 0;
+    await advance(2_000);
+    await flush();
+    expect(screen.queryByText(/Connection lost/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Reconnecting automatically/i)).not.toBeInTheDocument();
+    expect(screen.getByText("M-043")).toBeInTheDocument(); // fresh value
+    expect(screen.getByText(/Updated/i)).toBeInTheDocument(); // footer shows updated time without reconnecting
+  });
+
+  it("shows footer only (no banner) on a single error after recovery", async () => {
+    let queue = [queueToken("M", 42)];
+    let failCount = 0;
+    stubFetch((url) => {
+      if (url !== QUEUE_URL) return ok(departmentPayload());
+      if (failCount > 0) {
+        failCount -= 1;
+        return Promise.reject(new Error("network down"));
+      }
+      return ok(queue);
+    });
+
+    renderKiosk();
+    await flush();
+    expect(screen.getByText("M-042")).toBeInTheDocument();
+
+    // Two failures to raise banner
+    failCount = 1;
+    await advance(2_000);
+    await flush();
+    failCount = 1;
+    await advance(2_000);
+    await flush();
+    expect(screen.getByText(/Connection lost/i)).toBeInTheDocument();
+
+    // Recovery
+    queue = [queueToken("M", 43)];
+    failCount = 0;
+    await advance(2_000);
+    await flush();
+    expect(screen.queryByText(/Connection lost/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Reconnecting automatically/i)).not.toBeInTheDocument();
+    expect(screen.getByText("M-043")).toBeInTheDocument();
+
+    // Single error after recovery — footer only, no banner
+    failCount = 1;
+    await advance(2_000);
+    await flush();
+    expect(screen.getByText(/Reconnecting automatically/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Connection lost/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByText("M-043")).toBeInTheDocument(); // value unchanged
+  });
+
+  it("remount against cached query with prior errors but current success shows no banner", async () => {
+    // First mount: two failures to dirty the cache
+    let failCount = 0;
+    stubFetch((url) => {
+      if (url !== QUEUE_URL) return ok(departmentPayload());
+      if (failCount > 0) {
+        failCount -= 1;
+        return Promise.reject(new Error("network down"));
+      }
+      return ok([queueToken("M", 42)]);
+    });
+
+    const { unmount } = renderKiosk();
+    await flush();
+    expect(screen.getByText("M-042")).toBeInTheDocument();
+
+    failCount = 1;
+    await advance(2_000);
+    await flush();
+    failCount = 1;
+    await advance(2_000);
+    await flush();
+    expect(screen.getByText(/Connection lost/i)).toBeInTheDocument();
+
+    // Unmount and remount — the cache still has errorUpdateCount >= 2
+    // but the current fetch succeeds immediately
+    unmount();
+    failCount = 0;
+    stubHappyQueue([queueToken("M", 43)]);
+
+    renderKiosk();
+    await flush();
+
+    // No banner flash — the fresh success wins
+    expect(screen.queryByText(/Connection lost/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Reconnecting automatically/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.getByText("M-043")).toBeInTheDocument();
+  });
 });

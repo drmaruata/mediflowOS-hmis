@@ -17,6 +17,15 @@
  * so the provisioned display survives browser restarts without
  * re-provisioning. The fetcher re-reads storage on every poll, so a
  * replaced token takes effect on the next poll without a reload.
+ *
+ * The kiosk role must be able to read the department
+ * (GET /api/v1/departments/{id}/): reads are authenticated and tenant-scoped
+ * (IsAuthenticated + MFA gate + TenantScopedQuerysetMixin). The department
+ * fetch has no additional permission claim — any valid token with the
+ * tenant/facility claims can read it. If the kiosk role cannot read the
+ * department, the header silently degrades to "Token display" / bare
+ * "COUNTER" by design (the display never crashes, it just loses the
+ * department name decoration).
  */
 
 export const KIOSK_TOKEN_STORAGE_KEY = "mediflow-kiosk";
