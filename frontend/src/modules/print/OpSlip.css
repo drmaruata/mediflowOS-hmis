@@ -1,0 +1,161 @@
+/**
+ * OpSlip component screen styles.
+ * Print styles are in src/styles/print.css (imported in OpSlip.tsx).
+ */
+
+.op-slip-page {
+  min-height: 100vh;
+  background: hsl(var(--background));
+  color: hsl(var(--foreground));
+  padding: 1rem;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.op-slip-print-button {
+  position: fixed;
+  top: 1rem;
+  right: 1rem;
+  z-index: 100;
+}
+
+.op-slip-sheet {
+  width: 100%;
+  max-width: 80mm;
+  background: white;
+  color: black;
+  padding: 12mm 8mm;
+  border-radius: 0;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  font-family: Inter, "Noto Sans Devanagari", ui-sans-serif, system-ui, sans-serif;
+}
+
+.op-slip-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 6mm;
+  padding-bottom: 4mm;
+  border-bottom: 2px solid hsl(var(--primary));
+}
+
+.op-slip-facility-name {
+  font-size: 14pt;
+  font-weight: 700;
+  margin: 0;
+  line-height: 1.2;
+  color: hsl(var(--primary));
+}
+
+.op-slip-facility-subtitle {
+  font-size: 9pt;
+  margin: 0;
+  color: hsl(var(--muted-foreground));
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.op-slip-qr {
+  width: 32mm;
+  height: 32mm;
+  flex-shrink: 0;
+}
+
+.op-slip-section {
+  margin-bottom: 5mm;
+}
+
+.op-slip-section-title {
+  font-size: 8pt;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin: 0 0 3mm;
+  color: hsl(var(--muted-foreground));
+  border-bottom: 1px solid hsl(var(--border));
+  padding-bottom: 1mm;
+}
+
+.op-slip-fields {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2mm 4mm;
+  margin: 0;
+  font-size: 10pt;
+}
+
+.op-slip-field dt {
+  font-weight: 600;
+  color: hsl(var(--muted-foreground));
+  white-space: nowrap;
+}
+
+.op-slip-field dd {
+  margin: 0;
+  color: hsl(var(--foreground));
+  word-break: break-word;
+}
+
+.op-slip-uhid {
+  font-family: monospace;
+  font-size: 13pt;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  color: hsl(var(--primary));
+}
+
+.op-slip-token {
+  font-family: monospace;
+  font-size: 13pt;
+  font-weight: 700;
+  color: hsl(var(--foreground));
+}
+
+.op-slip-footer {
+  margin-top: 6mm;
+  padding-top: 4mm;
+  border-top: 1px dashed hsl(var(--border));
+  font-size: 8pt;
+  color: hsl(var(--muted-foreground));
+  text-align: center;
+}
+
+.op-slip-loading {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 50vh;
+  color: hsl(var(--muted-foreground));
+}
+
+.op-slip-error {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 50vh;
+  padding: 1rem;
+}
+
+.op-slip-error-content {
+  max-width: 80mm;
+  text-align: center;
+  background: white;
+  color: black;
+  padding: 2rem;
+  border-radius: 0.5rem;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+}
+
+.op-slip-error-title {
+  font-size: 12pt;
+  font-weight: 700;
+  margin: 0 0 0.5rem;
+  color: hsl(var(--destructive));
+}
+
+.op-slip-error-message {
+  font-size: 10pt;
+  margin: 0;
+  color: hsl(var(--foreground));
+}

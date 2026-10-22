@@ -51,8 +51,10 @@ export interface IntakeToken {
   readonly number: number;
 }
 
-/** POST /patients/ answers the patient plus a response-level `token`. */
-export type RegistrationResult = Patient & { readonly token?: IntakeToken };
+/** POST /patients/ answers the patient plus a response-level `token`.
+ *  May include `visit_id` when an OPD encounter is created alongside registration.
+ */
+export type RegistrationResult = Patient & { readonly token?: IntakeToken; readonly visit_id?: string };
 
 /** REG-003 returns the minimum a clerk needs to recognise a match — no full PHI. */
 export interface DuplicateCandidate {

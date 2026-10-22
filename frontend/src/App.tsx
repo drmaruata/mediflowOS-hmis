@@ -39,6 +39,7 @@ import PatientRegistryRoutes, {
   PatientRegistration,
   VerificationQueue,
 } from "@/modules/patient_registry/__routes";
+import OpSlip from "@/modules/print/OpSlip";
 import {
   AdminAuditLog,
   AdminDepartmentsWardsBeds,
@@ -198,6 +199,23 @@ export function AppRoutes() {
             }
           >
             <KioskRoutes />
+          </Suspense>
+        }
+      />
+      {/* OP slip print view — no app chrome, direct URL access (UI-006, HW-001).
+          The API call requires auth and will 401 if unauthenticated, which is
+          correct: a patient printing their own slip must be signed in. */}
+      <Route
+        path="/print/op-slip/:visitId"
+        element={
+          <Suspense
+            fallback={
+              <div className="flex min-h-svh items-center justify-center text-muted-foreground">
+                <span>Loading…</span>
+              </div>
+            }
+          >
+            <OpSlip />
           </Suspense>
         }
       />

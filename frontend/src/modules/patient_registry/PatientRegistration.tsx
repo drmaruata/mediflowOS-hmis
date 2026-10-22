@@ -275,6 +275,11 @@ export default function PatientRegistration() {
           <Button asChild>
             <Link to={`/patients/${patient.id}`}>Open patient record</Link>
           </Button>
+          {patient.token !== undefined && patient.visit_id !== undefined && (
+            <Button asChild variant="outline">
+              <Link to={`/print/op-slip/${patient.visit_id}`}>Print OP slip</Link>
+            </Button>
+          )}
           <Button
             variant="outline"
             onClick={() => {
