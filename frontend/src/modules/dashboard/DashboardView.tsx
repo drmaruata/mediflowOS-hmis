@@ -69,11 +69,11 @@ function OpdHero({ isLive }: { isLive: boolean }) {
           <strong className="font-display text-3xl font-bold tracking-tight">
             {registrations.toLocaleString("en-IN")}
           </strong>
-          <span className="text-xs text-primary-foreground/80">
+          <span className="text-xs text-primary-foreground">
             OPD registrations today
           </span>
         </div>
-        <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-primary-foreground/80">
+        <p className="mt-1 flex flex-wrap items-center gap-2 text-xs text-primary-foreground">
           <span aria-hidden="true">▲</span>
           <span>8% vs yesterday</span>
           <span className="inline-flex items-center rounded-md bg-background/40 px-2 py-0.5 font-semibold">

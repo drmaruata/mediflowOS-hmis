@@ -299,6 +299,9 @@ export function AppSidebarDrawer({
             />
           ))}
         </nav>
+        {/* The theme control otherwise vanishes with the rail on md- and
+            inside the drawer (review I1). */}
+        <SidebarFooter />
       </div>
     </div>
   );
