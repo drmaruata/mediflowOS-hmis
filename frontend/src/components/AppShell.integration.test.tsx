@@ -254,11 +254,19 @@ describe("AppHeader", () => {
     expect(screen.getByText("Live Data")).toBeInTheDocument();
   });
 
-  it("exposes a theme control reflecting the current preference", () => {
+  it("shows the real connection state from the health probe (spec §4.6)", async () => {
+    // The mock's fake "Operational" chip becomes real: the dashboard band's
+    // health query moves into the topbar, so this test owns the AppShell
+    // stub pairing for /health/.
+    vi.stubGlobal("fetch", vi.fn(async () => okJson({ status: "ok" })));
     renderWithProviders(<AppHeader />);
-    const button = screen.getByRole("button", { name: /Theme:/ });
-    expect(button).toBeInTheDocument();
-    expect(button.getAttribute("aria-label")).toMatch(/Theme: (light|dark|system)/);
+    expect(await screen.findByText("Operational")).toBeInTheDocument();
+  });
+
+  it("names the unreachable state instead of leaving colour alone", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(null, { status: 503 })));
+    renderWithProviders(<AppHeader />);
+    expect(await screen.findByText(/API unreachable/i)).toBeInTheDocument();
   });
 
   it("keeps the resolved theme reflected on the document element", () => {
@@ -267,6 +275,14 @@ describe("AppHeader", () => {
     expect(document.documentElement.classList.contains("dark")).toBe(true);
   });
 });
+
+/** Shared 200-JSON fetch response for the header stubs. */
+function okJson(body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status: 200,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
 describe("route contract (UI_UX §4.3/§18.2)", () => {
   // MemoryRouter keeps the URL out of window.history; the probe makes the
