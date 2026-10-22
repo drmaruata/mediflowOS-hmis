@@ -95,8 +95,8 @@ function PrintButton({ onPrint }: { onPrint: () => void }) {
 
 function QrCode({ payload }: { payload: string }) {
   // Minimal QR code using a data URI for a pre-generated QR SVG.
-  // In production this could use a library, but for HW-001 the browser print
-  // pipeline is sufficient and we avoid a new dependency.
+  // KNOWN LIMITATION (HW-001): This renders a text placeholder, not a scannable QR code.
+  // A real QR library (e.g., qrcode.react) should replace this in a future task.
   // The payload is the UHID (QRCodeViewSet._encode_data format is HIP[-counter][-department_id]
   // but for a patient-facing slip we encode the UHID directly).
   const qrSvg = `data:image/svg+xml;base64,${btoa(

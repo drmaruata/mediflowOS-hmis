@@ -210,6 +210,7 @@ describe("PatientRegistration", () => {
           ...patient(),
           uhid: "UHID-202610-000042",
           token: { series: "A", number: 14 },
+          visit_id: "vvvvvvvv-vvvv-4vvv-8vvv-vvvvvvvvvvvv",
         });
       }
       return ok([]);
@@ -242,13 +243,11 @@ describe("PatientRegistration", () => {
     const success = await screen.findByRole("status");
     expect(within(success).getByText("UHID-202610-000042")).toBeInTheDocument();
     expect(within(success).getByText("A-14")).toBeInTheDocument();
-    // The print screen does not exist yet (Task 36) — an honest note, not a dead link.
+    // The print screen IS available (Task 36) — success panel links to it.
     expect(
-      within(success).getByText(/OP slip printing is not built yet/i),
+      within(success).getByText(/OP slip ready — click "Print OP slip" to open the print view\./i),
     ).toBeInTheDocument();
-    expect(
-      within(success).queryByRole("link", { name: /print/i }),
-    ).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /print op slip/i })).toBeInTheDocument();
   });
 
   it("warns about probable duplicates on blur and requires an explicit register-anyway confirm", async () => {

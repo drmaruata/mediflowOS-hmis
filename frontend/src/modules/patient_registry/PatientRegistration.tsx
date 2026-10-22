@@ -267,8 +267,7 @@ export default function PatientRegistration() {
             </p>
           )}
           <p className="mt-2 text-xs text-muted-foreground">
-            OP slip printing is not built yet — the print screen lands with the
-            next release task. The token above is live in the OPD queue.
+            OP slip ready — click "Print OP slip" to open the print view.
           </p>
         </div>
         <div className="mt-4 flex flex-wrap gap-3">
