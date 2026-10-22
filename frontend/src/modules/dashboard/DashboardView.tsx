@@ -121,7 +121,7 @@ function TotalPatientsChart() {
             );
             if (option) setRange(option.value);
           }}
-          className="h-8 rounded-md border border-border bg-background px-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
         >
           {OPD_RANGES.map((option) => (
             <option key={option.value} value={option.value}>
@@ -461,7 +461,7 @@ export default function DashboardView({
             <article
               key={mini.label}
               aria-label={mini.label}
-              className="rounded-xl border border-border bg-background p-4 text-center"
+              className="rounded-xl border border-border bg-card p-4 text-center"
             >
               <strong className="font-display text-2xl font-bold text-brand-accent-ink">
                 {mini.value}

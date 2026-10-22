@@ -69,7 +69,7 @@ function OfflineBanner({ hasLastUpdate }: { hasLastUpdate: boolean }) {
 
 function ConfigurationScreen({ children }: { children: React.ReactNode }) {
   return (
-    <div className="flex min-h-svh items-center justify-center bg-background p-4">
+    <div className="flex min-h-svh items-center justify-center bg-card p-4">
       <Card className="w-full max-w-xl">
         <CardHeader>
           <h1 className="text-xl font-bold tracking-tight text-card-foreground">
@@ -172,7 +172,7 @@ export default function TokenDisplay() {
   if (tokens === undefined) {
     if (offline) {
       return (
-        <div className="flex min-h-svh flex-col bg-background text-foreground">
+        <div className="flex min-h-svh flex-col bg-card text-card-foreground">
           <OfflineBanner hasLastUpdate={false} />
           <p className="flex flex-1 items-center justify-center text-3xl text-muted-foreground">
             Waiting for the network…
@@ -181,7 +181,7 @@ export default function TokenDisplay() {
       );
     }
     return (
-      <div className="flex min-h-svh items-center justify-center bg-background p-4">
+      <div className="flex min-h-svh items-center justify-center bg-card p-4">
         <p role="status" className="text-3xl text-muted-foreground">
           Connecting…
         </p>
@@ -190,7 +190,7 @@ export default function TokenDisplay() {
   }
 
   return (
-    <div className="flex min-h-svh flex-col bg-background text-foreground">
+    <div className="flex min-h-svh flex-col bg-card text-card-foreground">
       {offline && <OfflineBanner hasLastUpdate={tokens.length > 0} />}
       <header className="flex items-start justify-between p-8">
         <h1 className="text-4xl font-bold">{departmentName ?? "Token display"}</h1>

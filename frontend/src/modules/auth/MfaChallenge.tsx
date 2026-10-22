@@ -102,7 +102,7 @@ export default function MfaChallenge() {
   };
 
   return (
-    <div className="flex min-h-svh items-center justify-center bg-background p-4">
+    <div className="flex min-h-svh items-center justify-center bg-card p-4">
       <Card className="w-full max-w-[420px] border bg-card shadow-sm">
         <CardHeader className="pb-4 text-center">
           <h1 className="flex items-center justify-center gap-2 text-xl font-bold tracking-tight text-card-foreground">

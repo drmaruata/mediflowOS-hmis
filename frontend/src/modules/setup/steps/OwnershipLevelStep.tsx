@@ -88,7 +88,7 @@ export default function OwnershipLevelStep({
         <Label htmlFor="facility-level">Facility level</Label>
         <select
           id="facility-level"
-          className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-invalid:border-destructive"
+          className="flex h-10 w-full rounded-md border border-input bg-card px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-invalid:border-destructive"
           aria-invalid={errors.facility_level ? true : undefined}
           aria-describedby={errors.facility_level ? "facility-level-error" : undefined}
           {...register("facility_level")}

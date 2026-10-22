@@ -187,6 +187,18 @@ describe("shell palette contrast (WCAG 2.1 AA) — light chrome", () => {
     // the ink tier instead (spec §4.3).
     expect(contrast(token(lightTheme, "--brand-accent-ink"), WHITE)).toBeGreaterThanOrEqual(4.5);
   });
+
+  it("content text pairs with the card surface — inputs render bg-card (light)", () => {
+    // Regression net for the C1 review finding: .dark --background is the
+    // approved light canvas, so no text may sit on it. Inputs, minis and
+    // selects pair with --card; pin the pairs they rely on.
+    expect(
+      contrast(tripletToRgb(lightGlobals, "--foreground"), tripletToRgb(lightGlobals, "--card")),
+    ).toBeGreaterThanOrEqual(4.5);
+    expect(
+      contrast(tripletToRgb(lightGlobals, "--muted-foreground"), tripletToRgb(lightGlobals, "--card")),
+    ).toBeGreaterThanOrEqual(4.5);
+  });
 });
 
 describe("shell palette contrast — dark chrome", () => {
@@ -223,6 +235,17 @@ describe("shell palette contrast — dark chrome", () => {
   it("green text ink >= 4.5:1 on the dark card surface", () => {
     expect(
       contrast(token(darkTheme, "--brand-accent-ink"), tripletToRgb(darkGlobals, "--card")),
+    ).toBeGreaterThanOrEqual(4.5);
+  });
+
+  it("content text pairs with the card surface — inputs render bg-card (dark)", () => {
+    // Same net as light: --foreground/--muted-foreground carry text on
+    // --card, never on the light canvas --background (1.4:1 by design).
+    expect(
+      contrast(tripletToRgb(darkGlobals, "--foreground"), tripletToRgb(darkGlobals, "--card")),
+    ).toBeGreaterThanOrEqual(4.5);
+    expect(
+      contrast(tripletToRgb(darkGlobals, "--muted-foreground"), tripletToRgb(darkGlobals, "--card")),
     ).toBeGreaterThanOrEqual(4.5);
   });
 });
