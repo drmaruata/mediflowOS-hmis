@@ -32,6 +32,7 @@ import { useThemeStore } from "@/stores/themeStore";
 import { useSession } from "@/lib/session";
 import { AppHeader } from "@/components/AppHeader";
 import { AppSidebar, AppSidebarDrawer } from "@/components/AppSidebar";
+import { PageHeading } from "@/components/PageHeading";
 import LoginPage from "@/modules/auth/LoginPage";
 import PatientRegistryRoutes, {
   PatientDetail,
@@ -136,28 +137,44 @@ function AuthLayout() {
   }, [location.pathname]);
 
   return (
-    <div className="min-h-svh bg-canvas-dashboard text-foreground">
-      <AppHeader
-        isLive={false}
-        isCompact={false}
-        collapsed={collapsed}
-        onOpenNav={() => setDrawerOpen(true)}
-        onToggleCollapsed={() => setCollapsed((prev) => !prev)}
-      />
-      <div className="flex">
-        <AppSidebar collapsed={collapsed} />
-        <AppSidebarDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
-        <main className="min-w-0 flex-1 px-4 py-6 md:px-8">
-          <Suspense
-            fallback={
-              <div className="flex min-h-[60vh] items-center justify-center text-muted-foreground">
-                <span>Loading…</span>
-              </div>
-            }
-          >
-            <Outlet />
-          </Suspense>
-        </main>
+    <div className="min-h-svh bg-canvas-dashboard text-foreground lg:px-[clamp(0px,4vw,44px)] lg:py-[clamp(0px,2vw,22px)]">
+      {/*
+        Framed workspace (Medicore spec §4.10). Below `lg` the shell runs
+        full-bleed exactly as before — hospital wall screens are often small.
+        At `lg`+ a rounded, bordered, viewport-high frame floats on the
+        canvas; only the content column scrolls inside it. Frame height is
+        `100svh - 2 * py` so the two paddings always fit without clipping.
+      */}
+      <div className="lg:mx-auto lg:h-[calc(100svh-2*clamp(0px,2vw,22px))] lg:max-w-[1500px] lg:overflow-hidden lg:rounded-[20px] lg:border lg:border-border lg:bg-shell-sidebar lg:shadow-[var(--shadow-shell)]">
+        <AppHeader
+          isLive={false}
+          isCompact={false}
+          collapsed={collapsed}
+          onOpenNav={() => setDrawerOpen(true)}
+          onToggleCollapsed={() => setCollapsed((prev) => !prev)}
+        />
+        <div className="flex lg:h-[calc(100%-4rem)]">
+          {/* At lg the header is frame-static, so the rail's sticky offset
+              and fixed 100svh height would overflow the frame — h-full keeps
+              it exactly one frame row tall there. */}
+          <AppSidebar
+            collapsed={collapsed}
+            className="lg:sticky lg:top-0 lg:h-full"
+          />
+          <AppSidebarDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
+          <main className="min-w-0 flex-1 px-4 py-6 md:px-8 lg:overflow-y-auto lg:px-6 lg:py-5">
+            <PageHeading />
+            <Suspense
+              fallback={
+                <div className="flex min-h-[60vh] items-center justify-center text-muted-foreground">
+                  <span>Loading…</span>
+                </div>
+              }
+            >
+              <Outlet />
+            </Suspense>
+          </main>
+        </div>
       </div>
     </div>
   );

@@ -211,7 +211,11 @@ describe("authentication shell", () => {
       screen.getByRole("button", { name: /verify and continue/i }),
     );
 
-    expect(await screen.findByText(/Welcome back/)).toBeInTheDocument();
+    // Both the PageHeading h1 and the dashboard description line carry the
+    // greeting — at least one must exist.
+    expect(
+      (await screen.findAllByText(/Welcome back/)).length,
+    ).toBeGreaterThan(0);
     expect(useAuthStore.getState().accessToken).toBe("access-2");
     expect(useAuthStore.getState().refreshToken).toBe("refresh-2");
     expect(calls.find((call) => call.url.endsWith("/confirm/"))?.body).toBe(
@@ -259,7 +263,9 @@ describe("authentication shell", () => {
       screen.getByRole("button", { name: /verify and continue/i }),
     );
 
-    expect(await screen.findByText(/Welcome back/)).toBeInTheDocument();
+    expect(
+      (await screen.findAllByText(/Welcome back/)).length,
+    ).toBeGreaterThan(0);
     expect(useAuthStore.getState().accessToken).toBe("access-2");
     expect(useAuthStore.getState().refreshToken).toBe("refresh-2");
     expect(
