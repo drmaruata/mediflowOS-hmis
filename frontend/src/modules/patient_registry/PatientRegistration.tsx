@@ -1,23 +1,20 @@
 /**
  * PatientRegistration — the counter's new-patient form (REG-001, REG-003,
- * REG-005, REG-007; UI_UX §7 "Patient registry — search/register").
+ * REG-005, REG-007; UI_UX §7 "Patient registry — search/register"), laid
+ * out as the OPD design's single "Patient information" card with an
+ * orientation guide beside it.
  *
- * Three keyboard-first sections (UI-002): Enter submits the section in
- * focus, a failing section focuses its first invalid field (RHF's trigger
- * shouldFocus), and a valid section moves focus to the next one's first
- * field; the last section's Enter registers the patient.
- *
- * The UHID is minted by the server (REG-001) — no UHID field exists here
- * and only the create response's identifier is ever rendered. The duplicate
- * check (REG-003) runs on blur of the name/DOB/mobile fields and is
- * advisory: "register anyway" needs an explicit checkbox, and the create
- * itself is the server's to accept or refuse. An age-only candidate sends
- * no birth key — the check API matches on dob, and inventing a year from an
- * approximate age would silently narrow what the server compares.
+ * The age is derived from the entered date of birth (ageFromDob) and shown
+ * read-only — the approximate-age input the card once had is gone, so the
+ * mandatory DoB is the birth key REG-007 needs. ABHA capture stays optional
+ * under the contact row. The duplicate check (REG-003) runs on blur of the
+ * name/DoB/mobile/ABHA fields and is advisory: "register anyway" needs an
+ * explicit checkbox, and the create itself is the server's to accept or
+ * refuse. The UHID is minted by the server (REG-001) — no UHID field exists
+ * here and only the create response's identifier is ever rendered.
  */
 
 import { useEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
@@ -25,12 +22,20 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { z } from "zod";
 
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useSession } from "@/lib/session";
 import { extractServerErrors } from "@/lib/serverErrors";
 import { DuplicateWarning } from "./DuplicateWarning";
 import {
+  ageFromDob,
   buildRegistrationPayload,
   createPatient,
   duplicateCheck,
@@ -41,6 +46,12 @@ import type { DuplicateCheckInput } from "./patient.api";
 
 const GENDERS = ["male", "female", "other"] as const;
 
+const GUIDE_STEPS = [
+  { title: "Patient details", detail: "Verify identity and contact information." },
+  { title: "Department", detail: "Route the patient to the correct specialty." },
+  { title: "Queue token", detail: "Assigned to the department after registration." },
+] as const;
+
 const registrationSchema = z
   .object({
     name: z
@@ -50,27 +61,42 @@ const registrationSchema = z
       .max(200, "The name is too long (max 200 characters)."),
     gender: z.string().min(1, "Select a gender."),
     dob: z.string(),
-    age_years: z.string(),
+    address: z.string().trim().min(1, "Enter the patient's address."),
     mobile: z.string(),
     abha_number: z.string(),
     intake_department_id: z.string().min(1, "Select the OP intake department."),
   })
   .superRefine((values, ctx) => {
-    if (values.dob === "" && values.age_years === "") {
+    // The age is derived from the DoB, so a real, past date is the only
+    // birth key left (REG-007's dob-or-age passes through dob alone).
+    if (values.dob === "") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["dob"],
-        message: "Enter a date of birth or an approximate age.",
+        message: "Enter the patient's date of birth.",
       });
+    } else {
+      const born = new Date(`${values.dob}T00:00:00`);
+      if (
+        Number.isNaN(born.valueOf()) ||
+        born.valueOf() > new Date().valueOf()
+      ) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["dob"],
+          message: "Enter a real date of birth that is not in the future.",
+        });
+      }
     }
-    if (values.age_years !== "" && !/^\d{1,3}$/.test(values.age_years)) {
+    // The OPD design marks the contact number required; the server keeps
+    // accepting registrations without one, this screen just asks first.
+    if (values.mobile.trim() === "") {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        path: ["age_years"],
-        message: "Enter an age in years (digits only).",
+        path: ["mobile"],
+        message: "Enter the patient's contact number.",
       });
-    }
-    if (values.mobile.trim() !== "" && !isValidIndianMobile(values.mobile)) {
+    } else if (!isValidIndianMobile(values.mobile)) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["mobile"],
@@ -84,8 +110,8 @@ type RegistrationValues = z.infer<typeof registrationSchema>;
 const selectClass =
   "flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-invalid:border-destructive";
 
-const IDENTITY_FIELDS = ["name", "gender", "dob", "age_years"] as const;
-const CONTACT_FIELDS = ["mobile", "abha_number"] as const;
+const textareaClass =
+  "flex w-full rounded-md border border-input bg-background px-3 py-2 text-sm min-h-20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 aria-invalid:border-destructive";
 
 export default function PatientRegistration() {
   const queryClient = useQueryClient();
@@ -104,20 +130,22 @@ export default function PatientRegistration() {
       name: "",
       gender: "",
       dob: "",
-      age_years: "",
+      address: "",
       mobile: "",
       abha_number: "",
       intake_department_id: "",
     },
   });
-  const { register, handleSubmit, trigger, getValues, setError, reset } = form;
+  const { register, handleSubmit, getValues, setError, reset } = form;
   const errors = form.formState.errors;
+
+  // The age input is derived state: watch the DoB and compute, never store.
+  const dobValue = form.watch("dob");
+  const age = ageFromDob(dobValue);
 
   const [acknowledged, setAcknowledged] = useState(false);
   const [ackRequired, setAckRequired] = useState(false);
 
-  const mobileRef = useRef<HTMLInputElement | null>(null);
-  const departmentRef = useRef<HTMLSelectElement | null>(null);
   const successRef = useRef<HTMLDivElement | null>(null);
 
   const duplicates = useMutation({
@@ -180,7 +208,7 @@ export default function PatientRegistration() {
     create.isError && create.error !== null
       ? extractServerErrors(create.error)
       : null;
-  // demographics/contact refusals have no single form field: surface them
+  // contact/demographics refusals have no single form field: surface them
   // as the alert instead of dropping the server's message.
   const failureText =
     failure === null
@@ -199,20 +227,6 @@ export default function PatientRegistration() {
           .filter((part): part is string => part !== null)
           .join(" ") || null;
 
-  const submitIdentity = async (event: FormEvent) => {
-    event.preventDefault();
-    if (await trigger([...IDENTITY_FIELDS], { shouldFocus: true })) {
-      mobileRef.current?.focus();
-    }
-  };
-
-  const submitContact = async (event: FormEvent) => {
-    event.preventDefault();
-    if (await trigger([...CONTACT_FIELDS], { shouldFocus: true })) {
-      departmentRef.current?.focus();
-    }
-  };
-
   const submitRegistration = handleSubmit((values) => {
     const warning =
       duplicates.data !== undefined &&
@@ -226,9 +240,16 @@ export default function PatientRegistration() {
     create.mutate(values);
   });
 
+  const clearForm = () => {
+    reset();
+    duplicates.reset();
+    lastProbe.current = "";
+    setAcknowledged(false);
+    setAckRequired(false);
+  };
+
   const nameField = register("name", { onBlur: runDuplicateCheck });
   const dobField = register("dob", { onBlur: runDuplicateCheck });
-  const ageField = register("age_years", { onBlur: runDuplicateCheck });
   const mobileField = register("mobile", { onBlur: runDuplicateCheck });
   const abhaField = register("abha_number", { onBlur: runDuplicateCheck });
   const genderField = register("gender");
@@ -279,15 +300,7 @@ export default function PatientRegistration() {
               <Link to={`/print/op-slip/${patient.visit_id}`}>Print OP slip</Link>
             </Button>
           )}
-          <Button
-            variant="outline"
-            onClick={() => {
-              reset();
-              create.reset();
-              duplicates.reset();
-              lastProbe.current = "";
-            }}
-          >
+          <Button variant="outline" onClick={clearForm}>
             Register another patient
           </Button>
         </div>
@@ -296,237 +309,321 @@ export default function PatientRegistration() {
   }
 
   return (
-    <div>
-      <h2 className="text-xl font-bold tracking-tight text-card-foreground">
-        New patient
-      </h2>
-      <p className="mt-1 text-sm text-muted-foreground">
-        The registry issues the UHID when the patient is saved — this form
-        never asks for one (REG-001).
-      </p>
-
-      {failureText !== null && (
-        <p
-          role="alert"
-          className="mt-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-        >
-          {failureText}
-        </p>
-      )}
-
-      <section aria-label="Identity" className="mt-6">
-        <h2 className="text-base font-semibold text-card-foreground">Identity</h2>
-        <p className="text-xs text-muted-foreground">
-          Enter submits this section and moves to contact details.
-        </p>
-        <form onSubmit={submitIdentity} noValidate className="mt-3">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="grid gap-1.5">
-              <Label htmlFor="patient-name">Patient name</Label>
-              <Input
-                id="patient-name"
-                type="text"
-                autoComplete="off"
-                aria-invalid={errors.name ? true : undefined}
-                aria-describedby={errors.name ? "patient-name-error" : undefined}
-                {...nameField}
-              />
-              {errors.name && (
-                <p id="patient-name-error" className="text-sm text-destructive">
-                  {errors.name.message}
-                </p>
-              )}
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="patient-gender">Gender</Label>
-              <select
-                id="patient-gender"
-                className={selectClass}
-                aria-invalid={errors.gender ? true : undefined}
-                aria-describedby={errors.gender ? "patient-gender-error" : undefined}
-                {...genderField}
-              >
-                <option value="">Select gender…</option>
-                {GENDERS.map((gender) => (
-                  <option key={gender} value={gender}>
-                    {gender.charAt(0).toUpperCase() + gender.slice(1)}
-                  </option>
-                ))}
-              </select>
-              {errors.gender && (
-                <p id="patient-gender-error" className="text-sm text-destructive">
-                  {errors.gender.message}
-                </p>
-              )}
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="patient-dob">Date of birth</Label>
-              <Input
-                id="patient-dob"
-                type="date"
-                aria-invalid={errors.dob ? true : undefined}
-                aria-describedby={errors.dob ? "patient-dob-error" : undefined}
-                {...dobField}
-              />
-              {errors.dob && (
-                <p id="patient-dob-error" className="text-sm text-destructive">
-                  {errors.dob.message}
-                </p>
-              )}
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="patient-age">Approximate age (years)</Label>
-              <Input
-                id="patient-age"
-                type="text"
-                inputMode="numeric"
-                placeholder="If the date of birth is unknown"
-                aria-invalid={errors.age_years ? true : undefined}
-                aria-describedby={errors.age_years ? "patient-age-error" : undefined}
-                {...ageField}
-              />
-              {errors.age_years && (
-                <p id="patient-age-error" className="text-sm text-destructive">
-                  {errors.age_years.message}
-                </p>
-              )}
-            </div>
-          </div>
-        </form>
-      </section>
-
-      <section aria-label="Contact and ABHA" className="mt-6">
-        <h2 className="text-base font-semibold text-card-foreground">
-          Contact & ABHA
-        </h2>
-        <p className="text-xs text-muted-foreground">
-          Enter submits this section and moves to the OP intake department.
-        </p>
-        <form onSubmit={submitContact} noValidate className="mt-3">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div className="grid gap-1.5">
-              <Label htmlFor="patient-mobile">Mobile number</Label>
-              <Input
-                id="patient-mobile"
-                type="tel"
-                autoComplete="off"
-                aria-invalid={errors.mobile ? true : undefined}
-                aria-describedby={errors.mobile ? "patient-mobile-error" : undefined}
-                {...mobileField}
-                ref={(element) => {
-                  mobileField.ref(element);
-                  mobileRef.current = element;
-                }}
-              />
-              {errors.mobile && (
-                <p id="patient-mobile-error" className="text-sm text-destructive">
-                  {errors.mobile.message}
-                </p>
-              )}
-            </div>
-            <div className="grid gap-1.5">
-              <Label htmlFor="patient-abha">ABHA number (if known)</Label>
-              <Input
-                id="patient-abha"
-                type="text"
-                autoComplete="off"
-                aria-invalid={errors.abha_number ? true : undefined}
-                aria-describedby={
-                  errors.abha_number ? "patient-abha-error" : undefined
-                }
-                {...abhaField}
-              />
-              {errors.abha_number && (
-                <p id="patient-abha-error" className="text-sm text-destructive">
-                  {errors.abha_number.message}
-                </p>
-              )}
-            </div>
-          </div>
-        </form>
-      </section>
-
-      {duplicates.data !== undefined &&
-        duplicates.data.warn &&
-        duplicates.data.candidates.length > 0 && (
-          <DuplicateWarning
-            candidates={duplicates.data.candidates}
-            acknowledged={acknowledged}
-            onAcknowledgeChange={setAcknowledged}
-          />
-        )}
-      {duplicates.isError && (
-        <p
-          role="alert"
-          className="mt-4 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-        >
-          The duplicate check could not run. It is advisory — you can still
-          register, and the registry keeps its own record.
-        </p>
-      )}
-
-      <section aria-label="OP intake" className="mt-6">
-        <h2 className="text-base font-semibold text-card-foreground">
-          OP intake
-        </h2>
-        <p className="text-xs text-muted-foreground">
-          Enter registers the patient and issues the UHID and queue token.
-        </p>
-        <form onSubmit={submitRegistration} noValidate className="mt-3">
-          <div className="grid gap-1.5 sm:max-w-md">
-            <Label htmlFor="patient-department">OP intake department</Label>
-            <select
-              id="patient-department"
-              className={selectClass}
-              aria-invalid={errors.intake_department_id ? true : undefined}
-              aria-describedby={
-                errors.intake_department_id
-                  ? "patient-department-error"
-                  : undefined
-              }
-              {...departmentField}
-              ref={(element) => {
-                departmentField.ref(element);
-                departmentRef.current = element;
-              }}
-            >
-              <option value="">Select department…</option>
-              {(departments.data ?? []).map((department) => (
-                <option key={department.id} value={department.id}>
-                  {department.name}
-                </option>
-              ))}
-            </select>
-            {errors.intake_department_id && (
-              <p id="patient-department-error" className="text-sm text-destructive">
-                {errors.intake_department_id.message}
-              </p>
-            )}
-            {departments.isError && (
-              <p role="alert" className="text-sm text-destructive">
-                Could not load the OPD departments — retry or register without a
-                queue token later.
-              </p>
-            )}
-          </div>
-          {ackRequired && !acknowledged && (
-            <p
-              role="alert"
-              className="mt-3 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
-            >
-              Confirm the possible duplicates first — check the box to register
-              anyway, or open a candidate's record to compare.
+    <div className="grid items-start gap-6 xl:grid-cols-[minmax(0,1fr)_320px]">
+      <div>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div>
+            <p className="font-mono text-xs uppercase tracking-widest text-primary">
+              ● OPD registration
             </p>
-          )}
-          <Button
-            type="submit"
-            className="mt-3"
-            disabled={create.isPending}
-          >
-            {create.isPending ? "Registering…" : "Register patient"}
+            <h2 className="mt-1 text-2xl font-bold tracking-tight text-foreground">
+              Register a new patient
+            </h2>
+            <p className="mt-1 text-sm text-muted-foreground">
+              Create a patient profile before assigning a consultation token.
+            </p>
+          </div>
+          <Button asChild variant="outline">
+            <Link to="/patients">Back to patients</Link>
           </Button>
-        </form>
-      </section>
+        </div>
+
+        <Card className="mt-6">
+          <CardHeader>
+            <div className="flex items-start justify-between gap-3">
+              <div className="grid gap-1.5">
+                <CardTitle className="text-xl font-bold">
+                  Patient information
+                </CardTitle>
+                <CardDescription>
+                  Fields marked with an asterisk are required.
+                </CardDescription>
+              </div>
+              <span className="font-mono text-xs uppercase tracking-wide text-primary">
+                New record
+              </span>
+            </div>
+          </CardHeader>
+          <CardContent>
+            {failureText !== null && (
+              <p
+                role="alert"
+                className="mb-5 rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+              >
+                {failureText}
+              </p>
+            )}
+            <form
+              onSubmit={submitRegistration}
+              noValidate
+              className="flex flex-col gap-5"
+            >
+              <div className="grid gap-1.5">
+                <Label htmlFor="patient-name">Patient name *</Label>
+                <Input
+                  id="patient-name"
+                  type="text"
+                  autoComplete="off"
+                  placeholder="Enter patient's full name"
+                  aria-invalid={errors.name ? true : undefined}
+                  aria-describedby={
+                    errors.name ? "patient-name-error" : undefined
+                  }
+                  {...nameField}
+                />
+                {errors.name && (
+                  <p id="patient-name-error" className="text-sm text-destructive">
+                    {errors.name.message}
+                  </p>
+                )}
+              </div>
+
+              <div className="grid gap-5 sm:grid-cols-2">
+                <div className="grid gap-1.5">
+                  <Label htmlFor="patient-gender">Gender *</Label>
+                  <select
+                    id="patient-gender"
+                    className={selectClass}
+                    aria-invalid={errors.gender ? true : undefined}
+                    aria-describedby={
+                      errors.gender ? "patient-gender-error" : undefined
+                    }
+                    {...genderField}
+                  >
+                    <option value="">Select gender</option>
+                    {GENDERS.map((gender) => (
+                      <option key={gender} value={gender}>
+                        {gender.charAt(0).toUpperCase() + gender.slice(1)}
+                      </option>
+                    ))}
+                  </select>
+                  {errors.gender && (
+                    <p
+                      id="patient-gender-error"
+                      className="text-sm text-destructive"
+                    >
+                      {errors.gender.message}
+                    </p>
+                  )}
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="patient-dob">Date of birth *</Label>
+                  <Input
+                    id="patient-dob"
+                    type="date"
+                    aria-invalid={errors.dob ? true : undefined}
+                    aria-describedby={
+                      errors.dob ? "patient-dob-error" : undefined
+                    }
+                    {...dobField}
+                  />
+                  {errors.dob && (
+                    <p id="patient-dob-error" className="text-sm text-destructive">
+                      {errors.dob.message}
+                    </p>
+                  )}
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="patient-age">Age</Label>
+                  <Input
+                    id="patient-age"
+                    type="text"
+                    readOnly
+                    value={age === null ? "" : String(age)}
+                    placeholder="Calculated from date of birth"
+                  />
+                </div>
+                <div className="grid gap-1.5">
+                  <Label htmlFor="patient-contact">Contact number *</Label>
+                  <Input
+                    id="patient-contact"
+                    type="tel"
+                    autoComplete="off"
+                    placeholder="+91 98765 43210"
+                    aria-invalid={errors.mobile ? true : undefined}
+                    aria-describedby={
+                      errors.mobile ? "patient-mobile-error" : undefined
+                    }
+                    {...mobileField}
+                  />
+                  {errors.mobile && (
+                    <p
+                      id="patient-mobile-error"
+                      className="text-sm text-destructive"
+                    >
+                      {errors.mobile.message}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="grid gap-1.5">
+                <Label htmlFor="patient-address">Address *</Label>
+                <textarea
+                  id="patient-address"
+                  className={textareaClass}
+                  placeholder="House number, street, city, state and postal code"
+                  aria-invalid={errors.address ? true : undefined}
+                  aria-describedby={
+                    errors.address ? "patient-address-error" : undefined
+                  }
+                  {...register("address")}
+                />
+                {errors.address && (
+                  <p
+                    id="patient-address-error"
+                    className="text-sm text-destructive"
+                  >
+                    {errors.address.message}
+                  </p>
+                )}
+              </div>
+
+              <div className="grid gap-1.5 sm:max-w-md">
+                <Label htmlFor="patient-abha">ABHA number (if known)</Label>
+                <Input
+                  id="patient-abha"
+                  type="text"
+                  autoComplete="off"
+                  aria-invalid={errors.abha_number ? true : undefined}
+                  aria-describedby={
+                    errors.abha_number ? "patient-abha-error" : undefined
+                  }
+                  {...abhaField}
+                />
+                {errors.abha_number && (
+                  <p
+                    id="patient-abha-error"
+                    className="text-sm text-destructive"
+                  >
+                    {errors.abha_number.message}
+                  </p>
+                )}
+              </div>
+
+              <div className="grid gap-1.5">
+                <Label htmlFor="patient-department">Department *</Label>
+                <select
+                  id="patient-department"
+                  className={selectClass}
+                  aria-invalid={errors.intake_department_id ? true : undefined}
+                  aria-describedby={
+                    errors.intake_department_id
+                      ? "patient-department-error"
+                      : undefined
+                  }
+                  {...departmentField}
+                >
+                  <option value="">Select consulting department</option>
+                  {(departments.data ?? []).map((department) => (
+                    <option key={department.id} value={department.id}>
+                      {department.name}
+                    </option>
+                  ))}
+                </select>
+                {errors.intake_department_id && (
+                  <p
+                    id="patient-department-error"
+                    className="text-sm text-destructive"
+                  >
+                    {errors.intake_department_id.message}
+                  </p>
+                )}
+                {departments.isError && (
+                  <p role="alert" className="text-sm text-destructive">
+                    Could not load the OPD departments — retry or register
+                    without a queue token later.
+                  </p>
+                )}
+              </div>
+
+              {duplicates.data !== undefined &&
+                duplicates.data.warn &&
+                duplicates.data.candidates.length > 0 && (
+                  <DuplicateWarning
+                    candidates={duplicates.data.candidates}
+                    acknowledged={acknowledged}
+                    onAcknowledgeChange={setAcknowledged}
+                  />
+                )}
+              {duplicates.isError && (
+                <p
+                  role="alert"
+                  className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                >
+                  The duplicate check could not run. It is advisory — you can
+                  still register, and the registry keeps its own record.
+                </p>
+              )}
+              {ackRequired && !acknowledged && (
+                <p
+                  role="alert"
+                  className="rounded-md border border-destructive/50 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+                >
+                  Confirm the possible duplicates first — check the box to
+                  register anyway, or open a candidate's record to compare.
+                </p>
+              )}
+
+              <div className="flex flex-wrap justify-end gap-3">
+                <Button
+                  type="button"
+                  variant="outline"
+                  onClick={clearForm}
+                  disabled={create.isPending}
+                >
+                  Clear form
+                </Button>
+                <Button type="submit" disabled={create.isPending}>
+                  {create.isPending ? "Registering…" : "Register patient"}
+                </Button>
+              </div>
+            </form>
+          </CardContent>
+        </Card>
+      </div>
+
+      <aside className="grid gap-4">
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-lg">Registration guide</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <ol className="flex flex-col gap-4">
+              {GUIDE_STEPS.map((step, index) => (
+                <li key={step.title} className="flex gap-3">
+                  <span className="h-fit rounded border border-primary/40 px-1.5 font-mono text-xs text-primary">
+                    {`0${index + 1}`}
+                  </span>
+                  <div className="grid gap-0.5">
+                    <p className="text-sm font-semibold text-foreground">
+                      {step.title}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      {step.detail}
+                    </p>
+                  </div>
+                </li>
+              ))}
+            </ol>
+          </CardContent>
+        </Card>
+        <Card>
+          <CardHeader>
+            <CardDescription className="font-mono text-xs uppercase tracking-widest">
+              Secure record
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            <p className="text-xs text-muted-foreground">
+              Patient data is prepared for the EMR and available to authorized
+              clinical teams. The UHID is minted by the registry when the
+              patient is saved — this form never asks for one (REG-001), and
+              the duplicate check is advisory (REG-003).
+            </p>
+          </CardContent>
+        </Card>
+      </aside>
     </div>
   );
 }

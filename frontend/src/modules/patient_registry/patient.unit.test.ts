@@ -11,20 +11,22 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  ageFromDob,
   birthYearFromDemographics,
   buildRegistrationPayload,
   isValidIndianMobile,
+  localDateISO,
   sameTenant,
   verificationLabel,
 } from "./patient.api";
 
 describe("buildRegistrationPayload", () => {
-  it("sends the date of birth when one is entered", () => {
+  it("sends the name, gender, dob, address and mobile the clerk entered", () => {
     const payload = buildRegistrationPayload({
       name: "Asha Lakshmi",
       gender: "female",
       dob: "1984-03-12",
-      age_years: "",
+      address: " 12 MG Road, Mysuru ",
       mobile: "9876543210",
       abha_number: "",
       intake_department_id: "22222222-2222-4222-8222-222222222222",
@@ -34,24 +36,20 @@ describe("buildRegistrationPayload", () => {
       gender: "female",
       dob: "1984-03-12",
     });
+    expect(payload.address).toEqual({ full: "12 MG Road, Mysuru" });
     expect(payload.contact).toEqual({ mobile: "9876543210" });
     expect(payload.intake_channel).toBe("counter");
   });
 
-  it("falls back to approximate age only when no date of birth is given", () => {
+  it("omits the contact and ABHA keys when none was entered", () => {
     const payload = buildRegistrationPayload({
       name: "Ravi Kumar",
       gender: "male",
-      dob: "",
-      age_years: "42",
+      dob: "1980-01-02",
+      address: "4 Church Street, Chennai",
       mobile: "",
       abha_number: "",
       intake_department_id: "dept",
-    });
-    expect(payload.demographics).toEqual({
-      name: "Ravi Kumar",
-      gender: "male",
-      age_years: 42,
     });
     expect(payload.contact).toBeUndefined();
     expect(payload.abha_number).toBeUndefined();
@@ -62,7 +60,7 @@ describe("buildRegistrationPayload", () => {
       name: "Asha Lakshmi",
       gender: "female",
       dob: "1984-03-12",
-      age_years: "",
+      address: "12 MG Road, Mysuru",
       mobile: "9876543210",
       abha_number: "12-3456-7890-1234",
       intake_department_id: "dept",
@@ -70,6 +68,31 @@ describe("buildRegistrationPayload", () => {
     expect("uhid" in payload).toBe(false);
     expect("uhid" in payload.demographics).toBe(false);
     expect(payload.abha_number).toBe("12-3456-7890-1234");
+  });
+});
+
+describe("ageFromDob", () => {
+  const iso = (date: Date): string =>
+    `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  // A birth date exactly N years back (plus an optional day nudge) so the
+  // expectations hold on any day the suite runs.
+  const yearsAgo = (years: number, dayOffset = 0): Date => {
+    const date = new Date();
+    date.setFullYear(date.getFullYear() - years);
+    date.setDate(date.getDate() + dayOffset);
+    return date;
+  };
+
+  it("computes whole years with the birthday-today rule", () => {
+    expect(ageFromDob(iso(yearsAgo(40)))).toBe(40);
+    expect(ageFromDob(iso(yearsAgo(40, 1)))).toBe(39);
+    expect(ageFromDob(iso(yearsAgo(1)))).toBe(1);
+  });
+
+  it("returns null for an empty, unparseable or future date", () => {
+    expect(ageFromDob("")).toBeNull();
+    expect(ageFromDob("not-a-date")).toBeNull();
+    expect(ageFromDob(iso(yearsAgo(-1)))).toBeNull();
   });
 });
 
@@ -122,5 +145,13 @@ describe("verificationLabel", () => {
     expect(verificationLabel("verified")).toBe("Verified");
     expect(verificationLabel("ambiguous")).toBe("Ambiguous");
     expect(new Set(["pending", "verified", "ambiguous"]).size).toBe(3);
+  });
+});
+
+describe("localDateISO", () => {
+  it("formats the local calendar day, zero-padded — not the UTC day of toISOString", () => {
+    expect(localDateISO(new Date(2026, 0, 2))).toBe("2026-01-02");
+    expect(localDateISO(new Date(2026, 6, 14))).toBe("2026-07-14");
+    expect(localDateISO(new Date(2026, 11, 25))).toBe("2026-12-25");
   });
 });

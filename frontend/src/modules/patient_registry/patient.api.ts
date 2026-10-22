@@ -157,6 +157,26 @@ export async function fetchOpdDepartments(): Promise<DepartmentOption[]> {
   return rows;
 }
 
+/**
+ * The counter's default view at /patients: every patient registered on one
+ * calendar day, via the list action's `registered_on` filter. Pages are
+ * walked — the backend's fixed 50-row page must not silently truncate a
+ * busy outpatient day. The date parameter is the browser's local day;
+ * the server re-cuts it against its own TIME_ZONE.
+ */
+export async function fetchPatientsRegisteredOn(
+  dateISO: string,
+): Promise<Patient[]> {
+  const rows: Patient[] = [];
+  let next: string | null = `/api/v1/patients/?registered_on=${dateISO}`;
+  while (next !== null) {
+    const page: Page<Patient> = await apiClient<Page<Patient>>(stripOrigin(next));
+    rows.push(...page.results);
+    next = page.next;
+  }
+  return rows;
+}
+
 /** DRF's `next` is absolute while apiClient takes a path — strip the origin. */
 function stripOrigin(next: string): string {
   const { pathname, search } = new URL(next, window.location.origin);
@@ -201,6 +221,41 @@ export function isValidIndianMobile(value: string): boolean {
 }
 
 /**
+ * Full years between a `yyyy-mm-dd` birth date and today — the counter's
+ * auto-calculated age, rendered read-only. Null for an empty, unparseable
+ * or future date: the form schema explains the problem, this helper stays
+ * silent. Age is whole local-calendar years (a birthday reached today
+ * counts).
+ */
+export function ageFromDob(dob: string): number | null {
+  if (dob === "") return null;
+  const born = new Date(`${dob}T00:00:00`);
+  const now = new Date();
+  if (Number.isNaN(born.valueOf()) || born.valueOf() > now.valueOf()) {
+    return null;
+  }
+  let age = now.getFullYear() - born.getFullYear();
+  if (
+    now.getMonth() < born.getMonth() ||
+    (now.getMonth() === born.getMonth() && now.getDate() < born.getDate())
+  ) {
+    age -= 1;
+  }
+  return age;
+}
+
+/**
+ * The browser's local calendar day as YYYY-MM-DD — never `toISOString()`,
+ * whose UTC day differs from the local one near midnight (a counter
+ * registering in a night shift would fetch the wrong day). The server
+ * applies the hospital's own TIME_ZONE, which is the day a clerk means.
+ */
+export function localDateISO(now: Date = new Date()): string {
+  const pad = (value: number): string => String(value).padStart(2, "0");
+  return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`;
+}
+
+/**
  * Client-side tenant guard: the server scopes every query by the signed
  * token, but a row of another tenant must not render even if a broken or
  * misrouted response ever delivered one — refuse, never display (the
@@ -231,7 +286,7 @@ export interface RegistrationFormValues {
   readonly name: string;
   readonly gender: string;
   readonly dob: string;
-  readonly age_years: string;
+  readonly address: string;
   readonly mobile: string;
   readonly abha_number: string;
   readonly intake_department_id: string;
@@ -241,9 +296,10 @@ export interface RegistrationPayload {
   readonly demographics: {
     readonly name: string;
     readonly gender: string;
-    readonly dob?: string;
-    readonly age_years?: number;
+    readonly dob: string;
   };
+  /** The counter's single free-text address; `full` is its only key (REG-005). */
+  readonly address: { readonly full: string };
   readonly contact?: { readonly mobile: string };
   readonly abha_number?: string;
   readonly intake_department_id: string;
@@ -251,24 +307,18 @@ export interface RegistrationPayload {
 }
 
 /**
- * Form values → the wire shape. REG-007: a full name, a gender and one of
- * dob/age_years are what the server demands, and the birth key mirrors what
- * the clerk actually entered (REG-003 matches on the same key). No `uhid`
- * key can appear here — REG-001 mints it server-side.
+ * Form values → the wire shape. REG-007: a full name, a gender and a birth
+ * key are what the server demands — the counter's mandatory date of birth is
+ * that key (the on-screen age is derived, never sent), and it mirrors what
+ * the clerk entered (REG-003 matches on the same key). No `uhid` key can
+ * appear here — REG-001 mints it server-side.
  */
 export function buildRegistrationPayload(
   values: RegistrationFormValues,
 ): RegistrationPayload {
-  // The birth key mirrors what the clerk actually entered (REG-003 matches
-  // on the same key); a dob wins over an approximate age.
-  const birth =
-    values.dob !== ""
-      ? { dob: values.dob }
-      : values.age_years !== ""
-        ? { age_years: Number(values.age_years) }
-        : {};
   return {
-    demographics: { name: values.name, gender: values.gender, ...birth },
+    demographics: { name: values.name, gender: values.gender, dob: values.dob },
+    address: { full: values.address.trim() },
     // REG-005: this screen is the counter channel.
     intake_channel: "counter",
     intake_department_id: values.intake_department_id,

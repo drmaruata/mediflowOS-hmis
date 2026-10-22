@@ -17,7 +17,6 @@
  */
 
 import {
-  act,
   cleanup,
   fireEvent,
   render,
@@ -178,10 +177,16 @@ const rowOf = (cellText: string | RegExp) => {
 
 async function fillIdentity(name: string, gender: string, dob: string) {
   await userEvent.type(screen.getByLabelText(/patient name/i), name);
-  await userEvent.selectOptions(screen.getByLabelText(/^gender$/i), gender);
+  await userEvent.selectOptions(screen.getByLabelText(/gender/i), gender);
   fireEvent.change(screen.getByLabelText(/date of birth/i), {
     target: { value: dob },
   });
+}
+
+/** The OPD card's address and contact number are both required. */
+async function fillContact(address: string, mobile: string) {
+  await userEvent.type(screen.getByLabelText(/address/i), address);
+  await userEvent.type(screen.getByLabelText(/contact number/i), mobile);
 }
 
 beforeEach(() => {
@@ -220,10 +225,14 @@ describe("PatientRegistration", () => {
     await screen.findByRole("option", { name: "General Medicine" });
 
     await fillIdentity("Asha Lakshmi", "female", "1984-03-12");
+    // The age is derived from the DoB and shown read-only — it fills itself.
+    expect(
+      screen.getByLabelText<HTMLInputElement>(/age/i).value,
+    ).toMatch(/^\d{1,3}$/);
     fireEvent.blur(screen.getByLabelText(/date of birth/i));
-    await userEvent.type(screen.getByLabelText(/mobile number/i), "9876543210");
+    await fillContact("12 MG Road, Mysuru", "9876543210");
     await userEvent.selectOptions(
-      screen.getByLabelText(/intake department/i),
+      screen.getByLabelText(/department/i),
       DEPT_ID,
     );
     await userEvent.click(screen.getByRole("button", { name: /register patient/i }));
@@ -235,6 +244,7 @@ describe("PatientRegistration", () => {
     expect("uhid" in body).toBe(false);
     expect(body).toMatchObject({
       demographics: { name: "Asha Lakshmi", gender: "female", dob: "1984-03-12" },
+      address: { full: "12 MG Road, Mysuru" },
       contact: { mobile: "9876543210" },
       intake_department_id: DEPT_ID,
       intake_channel: "counter",
@@ -308,9 +318,9 @@ describe("PatientRegistration", () => {
     await screen.findByRole("alert", { name: "Possible duplicates" });
     expect(screen.getByText("UHID-202609-000017")).toBeInTheDocument();
 
-    await userEvent.type(screen.getByLabelText(/mobile number/i), "9876543210");
+    await fillContact("12 MG Road, Mysuru", "9876543210");
     await userEvent.selectOptions(
-      screen.getByLabelText(/intake department/i),
+      screen.getByLabelText(/department/i),
       DEPT_ID,
     );
 
@@ -328,39 +338,34 @@ describe("PatientRegistration", () => {
     expect(await screen.findByText("UHID-202610-000043")).toBeInTheDocument();
   });
 
-  it("Enter submits each section and moves focus to the next field", async () => {
-    stubFetch((url, method) => {
+  it("blocks an empty submit, shows the required errors and focuses the first invalid field", async () => {
+    const calls = stubFetch((url) => {
       if (url.endsWith("/api/v1/auth/me/")) return ok(SESSION);
       if (url.includes("/api/v1/departments/")) return ok(DEPARTMENT_PAGE);
-      if (url.endsWith("/api/v1/patients/duplicate-check/") && method === "POST") {
-        return ok({ warn: false, candidates: [] });
-      }
       return ok([]);
     });
 
     renderAt("/patients/register");
-    await fillIdentity("Ravi Kumar", "male", "1980-01-02");
+    await screen.findByRole("option", { name: "General Medicine" });
 
-    const name = screen.getByLabelText(/patient name/i);
-    const identityForm = name.closest("form");
-    if (identityForm === null) throw new Error("identity form not found");
-    // jsdom does not perform Enter's implicit submission; dispatching submit
-    // is the same path a browser takes.
-    await act(async () => {
-      fireEvent.submit(identityForm);
-    });
-    await waitFor(() =>
-      expect(screen.getByLabelText(/mobile number/i)).toHaveFocus(),
-    );
+    await userEvent.click(screen.getByRole("button", { name: /register patient/i }));
 
-    const mobile = screen.getByLabelText(/mobile number/i);
-    const contactForm = mobile.closest("form");
-    if (contactForm === null) throw new Error("contact form not found");
-    await act(async () => {
-      fireEvent.submit(contactForm);
-    });
+    // REG-007's required set is visible field-by-field, nothing posts, and
+    // RHF's default shouldFocusError puts the first invalid control in focus.
+    expect(screen.getByText(/enter the patient's full name\./i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/enter the patient's date of birth\./i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/enter the patient's address\./i)).toBeInTheDocument();
+    expect(
+      screen.getByText(/enter the patient's contact number\./i),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/select the OP intake department\./i),
+    ).toBeInTheDocument();
+    expect(findCreateCall(calls)).toBeUndefined();
     await waitFor(() =>
-      expect(screen.getByLabelText(/intake department/i)).toHaveFocus(),
+      expect(screen.getByLabelText(/patient name/i)).toHaveFocus(),
     );
   });
 
@@ -376,11 +381,11 @@ describe("PatientRegistration", () => {
 
     renderAt("/patients/register");
     await fillIdentity("Ravi Kumar", "male", "1980-01-02");
-    await userEvent.type(screen.getByLabelText(/mobile number/i), "9876543210");
+    await fillContact("4 Church Street, Chennai", "9876543210");
 
     await userEvent.click(screen.getByRole("button", { name: /register patient/i }));
     await waitFor(() =>
-      expect(screen.getByLabelText(/intake department/i)).toHaveFocus(),
+      expect(screen.getByLabelText(/department/i)).toHaveFocus(),
     );
     expect(findCreateCall(calls)).toBeUndefined();
   });
@@ -488,6 +493,9 @@ describe("PatientList", () => {
         const q = new URLSearchParams(url.split("?")[1] ?? "").get("q");
         return ok(q === "Asha" ? [patient()] : []);
       }
+      if (url.includes("/api/v1/patients/?registered_on=")) {
+        return ok({ count: 0, next: null, previous: null, results: [] });
+      }
       return ok([]);
     });
 
@@ -529,6 +537,9 @@ describe("PatientList", () => {
           }),
         ]);
       }
+      if (url.includes("/api/v1/patients/?registered_on=")) {
+        return ok({ count: 0, next: null, previous: null, results: [] });
+      }
       return ok([]);
     });
 
@@ -538,6 +549,113 @@ describe("PatientList", () => {
 
     expect(await screen.findByText(/no patients match/i)).toBeInTheDocument();
     expect(screen.queryByText("Other Hospital Om")).not.toBeInTheDocument();
+  });
+
+  it("lists the day's registrations by default, no search needed", async () => {
+    const calls = stubFetch((url) => {
+      if (url.endsWith("/api/v1/auth/me/")) return ok(SESSION);
+      if (url.includes("/api/v1/patients/?registered_on=")) {
+        return ok({ count: 1, next: null, previous: null, results: [patient()] });
+      }
+      return ok([]);
+    });
+
+    renderAt("/patients");
+    await screen.findByRole("heading", { name: "Patients" });
+
+    const rosterCall = await awaitCall(calls, "/api/v1/patients/", "GET");
+    expect(rosterCall.url).toContain("registered_on=");
+    // The local calendar day (YYYY-MM-DD) is what the backend filters on —
+    // never `toISOString()`, whose UTC day can differ near local midnight.
+    const day = rosterCall.url.split("registered_on=")[1]?.split("&")[0] ?? "";
+    expect(day).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+
+    expect(
+      await screen.findByRole("cell", { name: "UHID-202610-000001" }),
+    ).toBeInTheDocument();
+  });
+
+  it("walks every page so a busy day's roster is not truncated", async () => {
+    const overflow = patient({
+      id: "66666666-6666-4666-8666-666666666666",
+      uhid: "UHID-202610-000002",
+      demographics: { name: "Ravi Kumar", gender: "male", dob: "1980-01-02" },
+    });
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/auth/me/")) return ok(SESSION);
+      if (url.includes("/api/v1/patients/?registered_on=")) {
+        const page = new URLSearchParams(url.split("?")[1] ?? "").get("page");
+        return page === "2"
+          ? ok({ count: 2, next: null, previous: null, results: [overflow] })
+          : ok({
+              count: 2,
+              // DRF's `next` is absolute; the client strips the origin.
+              next: `${window.location.origin}${url}&page=2`,
+              previous: null,
+              results: [patient()],
+            });
+      }
+      return ok([]);
+    });
+
+    renderAt("/patients");
+    await screen.findByRole("heading", { name: "Patients" });
+
+    expect(
+      await screen.findByRole("cell", { name: "UHID-202610-000001" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("cell", { name: "UHID-202610-000002" }),
+    ).toBeInTheDocument();
+  });
+
+  it("never renders another tenant's day roster", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/auth/me/")) return ok(SESSION);
+      if (url.includes("/api/v1/patients/?registered_on=")) {
+        return ok({
+          count: 1,
+          next: null,
+          previous: null,
+          results: [
+            patient({
+              tenant_id: FOREIGN_TENANT,
+              demographics: {
+                name: "Other Hospital Om",
+                gender: "male",
+                dob: "1984-03-12",
+              },
+            }),
+          ],
+        });
+      }
+      return ok([]);
+    });
+
+    renderAt("/patients");
+    await screen.findByRole("heading", { name: "Patients" });
+
+    expect(
+      await screen.findByText(/no patients registered yet today/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Other Hospital Om")).not.toBeInTheDocument();
+  });
+
+  it("states when the day's roster cannot load", async () => {
+    stubFetch((url) => {
+      if (url.endsWith("/api/v1/auth/me/")) return ok(SESSION);
+      if (url.includes("/api/v1/patients/?registered_on=")) {
+        return jsonResponse(500, { detail: "boom" });
+      }
+      return ok([]);
+    });
+
+    renderAt("/patients");
+    await screen.findByRole("heading", { name: "Patients" });
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      /boom|could not be loaded/i,
+    );
   });
 });
 

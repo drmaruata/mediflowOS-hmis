@@ -6,7 +6,95 @@
 # reader: every callback log goes through ``ABHACallbackViewSet`` into
 # ``abdm.callback_log``. Nothing references this table, so removing the model
 # and its table leaves one table per concern.
+#
+# The delete is carried by SeparateDatabaseAndState with the DDL expressed in
+# this file's vendor-aware helper rather than a plain DeleteModel, because the
+# stock DeleteModel quotes through ``common.postgres`` — and
+# ``quote_qualified`` splits a dotted name only when it exactly matches a
+# *live* model's db_table. ``ABHACallbackLog`` is being deleted here, so it can
+# never be live again: the generated 'DROP TABLE "registry.abdm_callback_log"
+# CASCADE' answered UndefinedTable on every PostgreSQL environment that had
+# not already applied this migration while the model was still alive
+# (verified via sqlmigrate). The state side stays the original DeleteModel, so
+# Django's migration state and the autodetector still see the model removed;
+# only the DDL is spelled out. On SQLite the table exists under the literal
+# dotted single name (SQLite's quote_name does not split), so both spellings
+# are handled.
+#
+# The reverse re-creates the table with the same columns and the index names
+# observed on PostgreSQL, so ``migrate patient_registry 0011`` still rolls
+# back into a usable shape; on SQLite it is recreated under the literal name
+# 0001 created it with.
 from django.db import migrations
+
+FORWARD_BY_VENDOR = {
+    "postgresql": ['DROP TABLE IF EXISTS "registry"."abdm_callback_log" CASCADE;'],
+    # SQLite: the whole dotted string is the table's literal name (0001).
+    "sqlite": ['DROP TABLE IF EXISTS "registry.abdm_callback_log";'],
+}
+
+REVERSE_BY_VENDOR = {
+    "postgresql": """
+CREATE TABLE IF NOT EXISTS "registry"."abdm_callback_log" (
+    "id" uuid NOT NULL PRIMARY KEY,
+    "tenant_id" uuid NOT NULL,
+    "request_id" varchar(128) NOT NULL UNIQUE,
+    "facility_abdm_id" varchar(64) NOT NULL,
+    "ip" inet NULL,
+    "timestamp" timestamptz NOT NULL,
+    "profile" jsonb NULL,
+    "matched_patient_id" uuid NULL,
+    "token_issued" varchar(64) NULL,
+    "status" varchar(32) NOT NULL
+);
+CREATE INDEX "registry.abdm_callback_log_tenant_id_0103cba7"
+    ON "registry"."abdm_callback_log" ("tenant_id");
+CREATE INDEX "registry.abdm_callback_log_request_id_d209501a_like"
+    ON "registry"."abdm_callback_log" ("request_id" varchar_pattern_ops);
+CREATE INDEX "registry.abdm_callback_log_facility_abdm_id_0abb2f67"
+    ON "registry"."abdm_callback_log" ("facility_abdm_id");
+CREATE INDEX "registry.abdm_callback_log_facility_abdm_id_0abb2f67_like"
+    ON "registry"."abdm_callback_log" ("facility_abdm_id" varchar_pattern_ops);
+CREATE INDEX "registry.abdm_callback_log_timestamp_43a3fa45"
+    ON "registry"."abdm_callback_log" ("timestamp");
+CREATE INDEX "registry.ab_tenant__88a1cf_idx"
+    ON "registry"."abdm_callback_log" ("tenant_id", "request_id");
+""",  # noqa: E501
+    "sqlite": """
+CREATE TABLE IF NOT EXISTS "registry.abdm_callback_log" (
+    "id" char(32) NOT NULL PRIMARY KEY,
+    "tenant_id" char(32) NOT NULL,
+    "request_id" varchar(128) NOT NULL UNIQUE,
+    "facility_abdm_id" varchar(64) NOT NULL,
+    "ip" char(39) NULL,
+    "timestamp" datetime NOT NULL,
+    "profile" text NULL,
+    "matched_patient_id" char(32) NULL,
+    "token_issued" varchar(64) NULL,
+    "status" varchar(32) NOT NULL
+);
+CREATE INDEX "registry.abdm_callback_log_tenant_id_0103cba7"
+    ON "registry.abdm_callback_log" ("tenant_id");
+CREATE INDEX "registry.ab_tenant__88a1cf_idx"
+    ON "registry.abdm_callback_log" ("tenant_id", "request_id");
+""",
+}
+
+
+def drop_forward(apps, schema_editor):
+    for statement in FORWARD_BY_VENDOR.get(
+        schema_editor.connection.vendor, FORWARD_BY_VENDOR["sqlite"]
+    ):
+        schema_editor.execute(statement)
+
+
+def create_reverse(apps, schema_editor):
+    sql = REVERSE_BY_VENDOR.get(
+        schema_editor.connection.vendor, REVERSE_BY_VENDOR["sqlite"]
+    ).split(";")
+    for statement in sql:
+        if statement.strip():
+            schema_editor.execute(statement + ";")
 
 
 class Migration(migrations.Migration):
@@ -16,7 +104,10 @@ class Migration(migrations.Migration):
     ]
 
     operations = [
-        migrations.DeleteModel(
-            name='ABHACallbackLog',
+        migrations.SeparateDatabaseAndState(
+            database_operations=[migrations.RunPython(drop_forward, create_reverse)],
+            state_operations=[
+                migrations.DeleteModel(name='ABHACallbackLog'),
+            ],
         ),
     ]

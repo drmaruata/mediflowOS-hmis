@@ -14,6 +14,7 @@ field still answers 201 and looks green.
 """
 import re
 import uuid
+from datetime import timedelta
 
 import pytest
 from django.contrib.auth import get_user_model
@@ -622,3 +623,85 @@ class TestMobileCanonicalisationMigration:
         none.refresh_from_db()
         assert blank.contact == {"mobile": ""}
         assert none.contact is None
+
+
+class TestPatientListRegisteredOn:
+    """GET /patients/?registered_on=YYYY-MM-DD — the counter's day roster.
+
+    The counter lands on /patients and must see the day's registrations
+    without searching. The list action's date filter answers it: Django's
+    ``__date`` lookup converts each ``created_at`` to the current time zone
+    (the configured TIME_ZONE under USE_TZ), so the boundary is the
+    hospital's own calendar day rather than UTC's.
+    """
+
+    def setup_method(self):
+        self.tenant, self.facility, _ = _make_context()
+        self.client = _make_client(self.tenant, self.facility)
+
+    def _create(self, name):
+        response = self.client.post(
+            "/api/v1/patients/",
+            _payload(demographics={"name": name, "yearOfBirth": 1991, "gender": "F"}),
+            format="json",
+        )
+        assert response.status_code == 201, response.content
+        return response.json()["uhid"]
+
+    def test_lists_rows_created_that_day_and_no_others(self):
+        uhid_today = self._create("Today Row")
+        Patient.objects.create(
+            tenant_id=self.tenant.id, uhid="UHID-YESTERDAY",
+            demographics={"name": "Yesterday", "gender": "F", "yearOfBirth": 1991},
+        )
+        Patient.objects.filter(uhid="UHID-YESTERDAY").update(
+            created_at=timezone.now() - timedelta(days=1)
+        )
+
+        today = self.client.get(
+            f"/api/v1/patients/?registered_on={timezone.localdate()}"
+        )
+        yesterday = self.client.get(
+            f"/api/v1/patients/?registered_on={timezone.localdate() - timedelta(days=1)}"
+        )
+
+        assert today.status_code == 200, today.content
+        assert {row["uhid"] for row in today.json()["results"]} == {uhid_today}
+        assert {row["uhid"] for row in yesterday.json()["results"]} == {
+            "UHID-YESTERDAY"
+        }
+
+    def test_rows_come_back_newest_first(self):
+        """Latest registration first — the counter scans a growing day list."""
+        self._create("Earlier Walk-In")
+        self._create("Later Walk-In")
+
+        response = self.client.get(
+            f"/api/v1/patients/?registered_on={timezone.localdate()}"
+        )
+
+        names = [row["demographics"]["name"] for row in response.json()["results"]]
+        assert names == ["Later Walk-In", "Earlier Walk-In"]
+
+    def test_malformed_date_answers_400(self):
+        response = self.client.get("/api/v1/patients/?registered_on=22-10-2026")
+
+        assert response.status_code == 400, response.content
+        assert "registered_on" in response.json()
+
+    def test_day_roster_is_tenant_scoped(self):
+        self._create("Mine")
+        other_tenant, other_facility, _ = _make_context("Roster Other")
+        intruder = _make_client(other_tenant, other_facility, username="other-reception")
+        Patient.objects.create(
+            tenant_id=other_tenant.id, uhid="UHID-OTHER",
+            demographics={"name": "Other Row", "gender": "F", "yearOfBirth": 1991},
+        )
+
+        response = intruder.get(
+            f"/api/v1/patients/?registered_on={timezone.localdate()}"
+        )
+
+        assert response.status_code == 200, response.content
+        # The filtered list answers only the caller's own tenant, never another.
+        assert {row["uhid"] for row in response.json()["results"]} == {"UHID-OTHER"}

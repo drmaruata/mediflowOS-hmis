@@ -1,5 +1,6 @@
 """Patient registry views."""
 import logging
+from datetime import date
 
 import httpx
 from django.core.exceptions import ImproperlyConfigured
@@ -7,6 +8,7 @@ from django.db.models import Q
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
+    OpenApiParameter,
     OpenApiResponse,
     extend_schema,
     inline_serializer,
@@ -203,16 +205,49 @@ class PatientViewSet(TenantScopedQuerysetMixin, viewsets.ModelViewSet):
         audit_read(patient, request)
         return Response(self.get_serializer(patient).data)
 
+    @extend_schema(
+        parameters=[
+            OpenApiParameter(
+                name="registered_on",
+                type=OpenApiTypes.DATE,
+                location=OpenApiParameter.QUERY,
+                description=(
+                    "YYYY-MM-DD local-day filter: only patients whose "
+                    "registration timestamp falls on that hospital day "
+                    "(the configured TIME_ZONE), newest first."
+                ),
+                required=False,
+            ),
+        ],
+    )
     def list(self, request, *args, **kwargs):
         """Bulk patient list — every returned row is a PHI read (AUD-001).
 
         The default paginated response shape is untouched: this is the
         standard list with one read event per returned row added before
         serialisation.
+
+        ``?registered_on=YYYY-MM-DD`` narrows the collection to one local
+        calendar day — the counter's default "registered today" view — and
+        orders the result newest first so a paginated walk is stable. The
+        ``__date`` lookup converts each timestamp to the current time zone
+        under USE_TZ (Django 5.2 docs, field-lookup ``date``), so the day
+        boundary is the hospital's own TIME_ZONE, not UTC's.
         """
         from apps.audit.services import audit_read
 
         queryset = self.filter_queryset(self.get_queryset())
+
+        registered_on = (request.query_params.get("registered_on") or "").strip()
+        if registered_on:
+            try:
+                day = date.fromisoformat(registered_on)
+            except ValueError:
+                raise ValidationError(
+                    {"registered_on": "Expected an ISO date (YYYY-MM-DD)."}
+                )
+            queryset = queryset.filter(created_at__date=day).order_by("-created_at")
+
         page = self.paginate_queryset(queryset)
         rows = list(page) if page is not None else list(queryset)
         # Volume bounded by the page size, mirroring ``search``.
