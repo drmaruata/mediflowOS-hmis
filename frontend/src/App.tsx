@@ -139,13 +139,15 @@ function AuthLayout() {
   return (
     <div className="min-h-svh bg-canvas-dashboard text-foreground lg:px-[clamp(0px,4vw,44px)] lg:py-[clamp(0px,2vw,22px)]">
       {/*
-        Framed workspace (Medicore spec §4.10). Below `lg` the shell runs
-        full-bleed exactly as before — hospital wall screens are often small.
-        At `lg`+ a rounded, bordered, viewport-high frame floats on the
-        canvas; only the content column scrolls inside it. Frame height is
-        `100svh - 2 * py` so the two paddings always fit without clipping.
+        Framed workspace (spec §4.10; modelled on the mock's .app-frame).
+        Below `lg` the shell runs full-bleed exactly as before — hospital
+        wall screens are often small. At `lg`+ a rounded, bordered frame
+        floats on the canvas with a MINIMUM height (100svh - 2 * py) and
+        grows with the route's content: the page is the shell's only scroll
+        context (rail and content column are plain flow children), matching
+        the mock and keeping nested scroll wrappers out.
       */}
-      <div className="lg:mx-auto lg:h-[calc(100svh-2*clamp(0px,2vw,22px))] lg:max-w-[1500px] lg:overflow-hidden lg:rounded-[20px] lg:border lg:border-border lg:bg-shell-sidebar lg:shadow-[var(--shadow-shell)]">
+      <div className="lg:mx-auto lg:flex lg:min-h-[calc(100svh-2*clamp(0px,2vw,22px))] lg:flex-col lg:max-w-[1500px] lg:overflow-hidden lg:rounded-[20px] lg:border lg:border-border lg:bg-shell-sidebar lg:shadow-[var(--shadow-shell)]">
         <AppHeader
           isLive={false}
           isCompact={false}
@@ -153,16 +155,18 @@ function AuthLayout() {
           onOpenNav={() => setDrawerOpen(true)}
           onToggleCollapsed={() => setCollapsed((prev) => !prev)}
         />
-        <div className="flex lg:h-[calc(100%-4rem)]">
-          {/* At lg the header is frame-static, so the rail's sticky offset
-              and fixed 100svh height would overflow the frame — h-full keeps
-              it exactly one frame row tall there. */}
+        {/* flex-1 stretches the row down to the frame's minimum height on
+            short pages, so rail and content reach the frame's bottom edge. */}
+        <div className="flex lg:flex-1">
           <AppSidebar
             collapsed={collapsed}
-            className="lg:sticky lg:top-0 lg:h-full"
+            /* At lg the rail is an in-flow stretch child (scrolls with the
+               page, like the mock); the root's sticky viewport cap stays
+               for the full-bleed md range. */
+            className="lg:static lg:h-auto"
           />
           <AppSidebarDrawer open={drawerOpen} onClose={() => setDrawerOpen(false)} />
-          <main className="min-w-0 flex-1 px-4 py-6 md:px-8 lg:overflow-y-auto lg:px-6 lg:py-5">
+          <main className="min-w-0 flex-1 px-4 py-6 md:px-8 lg:px-6 lg:py-5">
             <PageHeading />
             <Suspense
               fallback={
