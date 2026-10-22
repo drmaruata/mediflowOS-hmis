@@ -67,7 +67,9 @@
   --color-shell-sidebar-hover: var(--shell-sidebar-hover);
   --color-shell-sidebar-border: var(--shell-sidebar-border);
   --color-shell-topbar: var(--shell-topbar);
+  --color-shell-topbar-foreground: var(--shell-topbar-foreground);
   --color-shell-active: var(--shell-active);
+  --color-shell-active-foreground: var(--shell-active-foreground);
   --color-canvas-dashboard: hsl(var(--canvas-dashboard));
   --color-surface: hsl(var(--surface));
   --color-surface-subtle: hsl(var(--surface-subtle));
@@ -85,6 +87,15 @@
   --color-chart-fill-4: hsl(var(--chart-fill-4));
   --color-chart-fill-5: var(--chart-fill-5);
 
+  /*
+   * Medicore accent family. Values are hex/rgba already (not bare triplets),
+   * so like --chart-fill-5 they are referenced unwrapped.
+   */
+  --color-brand-accent: var(--brand-accent);
+  --color-brand-accent-strong: var(--brand-accent-strong);
+  --color-brand-accent-soft: var(--brand-accent-soft);
+  --color-brand-accent-ink: var(--brand-accent-ink);
+
   --radius-sm: calc(var(--radius) * 0.6);
   --radius-md: calc(var(--radius) * 0.8);
   --radius-lg: var(--radius);
@@ -92,70 +103,88 @@
   --radius-2xl: calc(var(--radius) * 1.8);
 }
 
+/*
+ * Web fonts (Medicore, spec §4.13). Literal values in a plain `@theme` block:
+ * the --font-* namespace generates the `font-display` / `font-mono`
+ * utilities. Inter stays the body face via the existing html rule below;
+ * the faces arrive through index.html's single Google Fonts link.
+ */
+@theme {
+  --font-display: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "DM Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
 @layer base {
   :root {
     --radius: 0.5rem;
 
-    /* design.md §2.2 — brand teal #0f766e is the fixed Architecture primary */
-    --background: 210 40% 98%;
-    --foreground: 222 47% 11%;
+    /*
+     * Medicore palette (spec: docs/superpowers/specs/2026-10-22-medicore-restyle-design.md).
+     * Brand primary is now the Medicore green #18c58d (160 77% 43%); the
+     * button label rides on the dark-green ink #073c2f (166 85% 13%)
+     * because white-on-green fails AA (CI pins the pair at 4.5:1+).
+     * The chrome tokens themselves live in theme.css.
+     */
+    --background: 197 29% 89%;
+    --foreground: 210 28% 13%;
     --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
+    --card-foreground: 210 28% 13%;
     --popover: 0 0% 100%;
-    --popover-foreground: 222 47% 11%;
-    --primary: 174 83% 25%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 210 40% 96%;
-    --secondary-foreground: 222 47% 11%;
-    --muted: 210 40% 96%;
-    --muted-foreground: 215 16% 35%;
-    --accent: 210 40% 96%;
-    --accent-foreground: 222 47% 11%;
+    --popover-foreground: 210 28% 13%;
+    --primary: 160 77% 43%;
+    --primary-foreground: 166 85% 13%;
+    --secondary: 180 27% 96%;
+    --secondary-foreground: 210 28% 13%;
+    --muted: 180 27% 96%;
+    --muted-foreground: 200 11% 42%;
+    --accent: 180 27% 96%;
+    --accent-foreground: 210 28% 13%;
     --destructive: 0 74% 42%;
     --destructive-foreground: 0 0% 100%;
-    --border: 214 20% 86%;
-    --input: 214 20% 86%;
-    --ring: 174 83% 25%;
+    --border: 189 27% 91%;
+    --input: 189 27% 91%;
+    --ring: 160 77% 43%;
 
-    --sidebar: 210 40% 98%;
-    --sidebar-foreground: 222 47% 11%;
-    --sidebar-primary: 174 83% 25%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 210 40% 94%;
-    --sidebar-accent-foreground: 222 47% 11%;
-    --sidebar-border: 214 20% 86%;
-    --sidebar-ring: 174 83% 25%;
+    --sidebar: 180 30% 99%;
+    --sidebar-foreground: 210 28% 13%;
+    --sidebar-primary: 160 77% 43%;
+    --sidebar-primary-foreground: 166 85% 13%;
+    --sidebar-accent: 195 31% 95%;
+    --sidebar-accent-foreground: 210 28% 13%;
+    --sidebar-border: 189 27% 91%;
+    --sidebar-ring: 160 77% 43%;
   }
 
   .dark {
-    --background: 222 22% 10%;
-    --foreground: 210 40% 98%;
-    --card: 222 22% 13%;
-    --card-foreground: 210 40% 98%;
-    --popover: 222 22% 13%;
-    --popover-foreground: 210 40% 98%;
-    --primary: 174 65% 42%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 217 32% 18%;
-    --secondary-foreground: 210 40% 98%;
-    --muted: 217 32% 18%;
-    --muted-foreground: 215 20% 72%;
-    --accent: 217 32% 18%;
-    --accent-foreground: 210 40% 98%;
+    /* Medicore dark: navy canvas + raised surfaces, same green primary. */
+    --background: 196 13% 82%;
+    --foreground: 210 30% 97%;
+    --card: 218 23% 25%;
+    --card-foreground: 210 30% 97%;
+    --popover: 218 23% 25%;
+    --popover-foreground: 210 30% 97%;
+    --primary: 160 77% 43%;
+    --primary-foreground: 166 85% 13%;
+    --secondary: 218 25% 30%;
+    --secondary-foreground: 210 30% 97%;
+    --muted: 218 35% 22%;
+    --muted-foreground: 211 18% 74%;
+    --accent: 218 35% 22%;
+    --accent-foreground: 210 30% 97%;
     --destructive: 0 62% 45%;
     --destructive-foreground: 0 0% 100%;
-    --border: 217 20% 28%;
-    --input: 217 20% 28%;
-    --ring: 174 65% 42%;
+    --border: 218 30% 29%;
+    --input: 218 30% 29%;
+    --ring: 160 62% 51%;
 
-    --sidebar: 213 43% 13%;
-    --sidebar-foreground: 210 40% 96%;
-    --sidebar-primary: 174 65% 42%;
-    --sidebar-primary-foreground: 0 0% 100%;
-    --sidebar-accent: 213 38% 18%;
-    --sidebar-accent-foreground: 210 40% 96%;
-    --sidebar-border: 213 30% 20%;
-    --sidebar-ring: 174 65% 42%;
+    --sidebar: 218 39% 18%;
+    --sidebar-foreground: 210 30% 97%;
+    --sidebar-primary: 160 77% 43%;
+    --sidebar-primary-foreground: 166 85% 13%;
+    --sidebar-accent: 218 35% 22%;
+    --sidebar-accent-foreground: 210 30% 97%;
+    --sidebar-border: 218 30% 29%;
+    --sidebar-ring: 160 62% 51%;
   }
 }
 

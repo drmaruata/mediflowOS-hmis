@@ -37,6 +37,8 @@ The application is built around the following principles:
 - TypeScript
 - Vite 6
 - **Shadcn UI** on Tailwind CSS v4 (components vendored into `src/components/ui/`)
+- Fonts: Inter (body), DM Sans (display), DM Mono (codes) via a single Google
+  Fonts stylesheet link (runtime asset, not an npm dependency)
 - Radix UI primitives (unstyled accessible bases)
 - `lucide-react` (icons)
 - React Router 7

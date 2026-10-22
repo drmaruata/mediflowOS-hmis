@@ -1,88 +1,105 @@
 /*
- * theme.css — shell chrome, dashboard surfaces and chart palette.
+ * theme.css — shell chrome, dashboard surfaces, chart palette and the
+ * Medicore brand accent family.
  *
- * Two distinct kinds of token live here, and mixing them up is what broke the
- * dark theme: a token whose surface is fixed must be theme-independent, and a
- * token used on a theme-scoped surface must follow the theme.
+ * Every token here is THEME-SCOPED: light values live in `:root`, dark
+ * values in `.dark`. The Medicore restyle (2026-10-22, spec §4.2) replaced
+ * the previous "chrome is fixed dark navy in BOTH themes" invariant, so the
+ * chrome flips with the theme and its foreground pairs are asserted per
+ * theme in styles.unit.test.ts (the old fixed-navy guard was inverted, not
+ * deleted).
  *
- *   1. Theme-INDEPENDENT — the application shell chrome. design.md §2.3A
- *      fixes the rail and top bar as dark navy in BOTH themes, so their
- *      foregrounds must not be derived from `--sidebar-foreground`/`--card`
- *      or light mode paints dark text on a dark rail.
- *   2. Theme-SCOPED — dashboard canvas, surfaces, text and chart series.
- *      These were single fixed light hexes in one `:root` block with no
- *      `.dark` counterpart, so dark mode left a white canvas behind dark
- *      cards.
- *
- * Values are bare HSL triplets so they compose with alpha variants; the
- * `hsl()` wrapper lives in the `@theme inline` block in globals.css.
+ * Two kinds of value live here:
+ *   - shell chrome + brand accent: hex/rgba, consumed bare.
+ *   - dashboard surfaces/text/chart/tone: bare HSL triplets so they compose
+ *     with alpha variants; the `hsl()` wrapper lives in globals.css
+ *     `@theme inline`.
  */
 
-/* ── 1. Shell chrome — fixed in both themes (design.md §2.3A) ─────────── */
 :root {
-  --shell-sidebar: #132134;
-  --shell-topbar: #153047;
-  /*
-   * design.md §2.3A specifies #0B75E5, but white on it measures 4.48:1 —
-   * below the 4.5:1 normal-text floor, and UI_UX_design §5.2 requires CI to
-   * fail any normal-text pair under 4.5:1. Darkened by two points to
-   * #0B6BD4 (white = 5.21:1); visually the same operational blue.
-   * Asserted in styles.unit.test.ts so it cannot silently regress.
-   */
-  --shell-active: #0B6BD4;
+  /* Shell chrome — light (Medicore): near-white rail, white topbar. */
+  --shell-sidebar: #fbfdfd;
+  --shell-topbar: #ffffff;
+  --shell-sidebar-foreground: #17212b;
+  --shell-topbar-foreground: #17212b;
+  --shell-sidebar-subtle: #617078;
+  --shell-sidebar-hover: #eef4f6;
+  --shell-sidebar-border: #e2ebec;
+  /* Active entry: accent-soft fill with the dark-green button ink. */
+  --shell-active: #dff8ef;
+  --shell-active-foreground: #073c2f;
+
+  /* Dashboard canvas + surfaces — light. */
+  --canvas-dashboard: 197 29% 89%; /* #dbe5e8 */
+  --surface: 0 0% 100%;
+  --surface-subtle: 180 27% 96%; /* #f4f8f8 */
+  --text-primary: 210 28% 13%; /* #17212b */
+  --text-secondary: 200 11% 42%; /* #617078 */
 
   /*
-   * Rail foregrounds, deliberately not theme-scoped.
-   * Contrast on #132134: #E2E8F0 = 13.2:1, #94A8C0 = 6.7:1.
+   * Trend tones. Arrow + text always accompany these (design.md §8.3).
+   * Light green is the ink tier (#067a54 = ≥4.5:1 on white); the fill
+   * greens #18c58d/#0eac77 never carry text.
    */
-  --shell-sidebar-foreground: #E2E8F0;
-  --shell-sidebar-subtle: #94A8C0;
-  --shell-sidebar-hover: #1D3350;
-  --shell-sidebar-border: #24384F;
-
-  --donut-stroke: 16;
-}
-
-/* ── 2a. Dashboard surfaces and text — LIGHT ──────────────────────────── */
-:root {
-  --canvas-dashboard: 210 50% 98%; /* #F5F9FD */
-  --surface: 0 0% 100%; /* #FFFFFF */
-  --surface-subtle: 210 40% 98%; /* #F8FBFD */
-  --text-primary: 222 47% 11%; /* #0F172A */
-  --text-secondary: 215 16% 35%; /* #475569 */
-
-  /* Trend tones. Arrow + text always accompany these (design.md §8.3). */
-  --tone-positive: 174 83% 30%;
+  --tone-positive: 160 90% 25%;
   --tone-negative: 0 84% 60%;
   --tone-neutral: 215 16% 45%;
 
-  --chart-fill-1: 174 83% 30%;
-  --chart-fill-2: 174 60% 50%;
+  --chart-fill-1: 160 77% 43%; /* #18c58d */
+  --chart-fill-2: 160 45% 71%; /* 42% tint of the accent */
   --chart-fill-3: 200 70% 55%;
   --chart-fill-4: 40 90% 55%;
   --chart-fill-5: hsl(var(--muted-foreground));
+
+  /* Medicore accent family — decorative-ish fills vs a text-safe ink. */
+  --brand-accent: #18c58d;
+  --brand-accent-strong: #0eac77;
+  --brand-accent-soft: #dff8ef;
+  --brand-accent-ink: #067a54;
+
+  /* Framed workspace (App.tsx lg+). */
+  --shadow-shell: 0 20px 60px rgba(45, 72, 82, 0.12);
 }
 
-/* ── 2b. Dashboard surfaces and text — DARK ───────────────────────────── */
 .dark {
-  /* Sits a touch above `--background` so cards (`--card`) read as raised. */
-  --canvas-dashboard: 222 22% 10%;
-  --surface: 222 22% 13%;
-  --surface-subtle: 222 24% 16%;
-  --text-primary: 210 40% 98%;
-  --text-secondary: 215 20% 72%;
+  /* Shell chrome — dark (Medicore). */
+  --shell-sidebar: #1c2940;
+  --shell-topbar: #283a56;
+  --shell-sidebar-foreground: #f4f7fa;
+  --shell-topbar-foreground: #f4f7fa;
+  --shell-sidebar-subtle: #aebbc9;
+  --shell-sidebar-hover: #24334c;
+  --shell-sidebar-border: #334761;
+  --shell-active: #1b3c49;
+  --shell-active-foreground: #f4f7fa;
+
+  /* Dashboard canvas + surfaces — dark. Sits a touch above --background so
+     cards read as raised. */
+  --canvas-dashboard: 196 13% 82%; /* #cbd7da */
+  --surface: 218 23% 25%; /* #2a3a55 */
+  --surface-subtle: 218 35% 22%; /* #24334c */
+  --text-primary: 210 30% 97%;
+  --text-secondary: 211 18% 74%;
 
   /*
-   * Tones are lightened for dark surfaces: the light values (30% L) measure
-   * ~2:1 against a 13% card, well under the 3:1 non-text floor.
+   * Tones are lightened for dark surfaces: the light values (25% L) measure
+   * ~2:1 against a 25% card, well under the 3:1 non-text floor.
    */
-  --tone-positive: 158 64% 52%;
+  --tone-positive: 158 63% 51%;
   --tone-negative: 0 91% 71%;
   --tone-neutral: 215 20% 65%;
 
-  --chart-fill-1: 174 65% 45%;
-  --chart-fill-2: 174 55% 60%;
+  --chart-fill-1: 160 62% 51%;
+  --chart-fill-2: 160 45% 66%;
   --chart-fill-3: 199 80% 62%;
   --chart-fill-4: 40 95% 60%;
   --chart-fill-5: hsl(var(--muted-foreground));
+
+  /* The soft fill composites onto whatever surface it lands on. */
+  --brand-accent: #18c58d;
+  --brand-accent-strong: #28d79d;
+  --brand-accent-soft: rgba(24, 197, 141, 0.12);
+  --brand-accent-ink: #28d79d;
+
+  --shadow-shell: 0 20px 60px rgba(24, 39, 57, 0.22);
 }
