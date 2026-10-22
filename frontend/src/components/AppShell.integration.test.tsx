@@ -8,10 +8,10 @@
  * implementation internals (AGENTS.md §6).
  */
 
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
-import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { fireEvent, render, screen } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { AppRoutes } from "@/App";
 import { AppHeader } from "./AppHeader";
@@ -39,12 +39,18 @@ afterEach(() => {
 });
 
 describe("AppSidebar", () => {
+  // The theme store is module-scoped: reset to System so a previous test's
+  // Dark choice cannot bleed into the aria-pressed assertions below.
+  beforeEach(() => {
+    useThemeStore.getState().setPreference("system");
+  });
+
   it("renders the grouped navigation with its section headings", () => {
     renderWithProviders(<AppSidebar />);
     expect(
       screen.getByRole("navigation", { name: "Primary" }),
     ).toBeInTheDocument();
-    for (const label of ["Main Menu", "Settings"]) {
+    for (const label of ["Main Menu", "Configuration & setups"]) {
       expect(screen.getByRole("heading", { name: label })).toBeInTheDocument();
     }
   });
@@ -92,18 +98,31 @@ describe("AppSidebar", () => {
     }
   });
 
-  it("does not colour the rail with theme-scoped sidebar tokens", () => {
-    // Regression guard: `--sidebar-*` follows the theme, but the rail surface
-    // is fixed navy in both themes. Using the theme-scoped pair made labels
-    // render dark-navy-on-navy in light mode.
+  it("renders the Medicore brand block and a chip for the rail codes", () => {
+    renderWithProviders(<AppSidebar />);
+    expect(screen.getByText("Mediflow")).toBeInTheDocument();
+    expect(screen.getByText("Hospital Information System")).toBeInTheDocument();
+    // Chips replace icons (Medicore spec §2.3/§4.9). They are decorative
+    // duplication of the label — aria-hidden — so each link's accessible
+    // name stays exactly its label for screen readers.
+    for (const code of ["DB", "PR", "OP", "IP", "EM", "ER", "IC", "OT"]) {
+      expect(screen.getByText(code)).toHaveAttribute("aria-hidden", "true");
+    }
+  });
+
+  it("paints the rail from chrome tokens — no white utilities", () => {
+    // Inverse of the old fixed-navy guard: the Medicore chrome is
+    // theme-scoped (styles.unit.test asserts both blocks), so the remaining
+    // component-level failure mode is an invisible white-on-light-rail
+    // control left over from the navy rail.
     const { container } = renderWithProviders(<AppSidebar />);
     const rail = container.querySelector("aside");
     expect(rail).not.toBeNull();
     const html = rail?.outerHTML ?? "";
     expect(html).toContain("bg-shell-sidebar");
     expect(html).toMatch(/text-shell-sidebar-/);
-    expect(html).not.toMatch(/text-sidebar-foreground/);
-    expect(html).not.toMatch(/bg-sidebar-accent/);
+    expect(html).not.toMatch(/text-white/);
+    expect(html).not.toMatch(/bg-white/);
   });
 
   it("exposes the rail as a named complementary landmark", () => {
@@ -140,6 +159,39 @@ describe("AppSidebar", () => {
     // Icon-only rail: the link text is still the accessible name.
     expect(screen.getByRole("link", { name: "Dashboard" })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "Main Menu" })).toBeNull();
+    // The chip stands in for the icon on the 72px rail.
+    expect(screen.getByText("DB")).not.toHaveClass("sr-only");
+  });
+
+  it("offers Light, Dark and System in the footer switcher", () => {
+    renderWithProviders(<AppSidebar />);
+    expect(
+      screen.getByRole("group", { name: "Theme selection" }),
+    ).toBeInTheDocument();
+    for (const label of ["Light", "Dark", "System"]) {
+      const button = screen.getByRole("button", { name: label });
+      expect(button).toHaveAttribute(
+        "aria-pressed",
+        String(
+          useThemeStore.getState().preference === label.toLowerCase(),
+        ),
+      );
+    }
+  });
+
+  it("switching to Dark persists an explicit preference", () => {
+    renderWithProviders(<AppSidebar />);
+    fireEvent.click(screen.getByRole("button", { name: "Dark" }));
+    expect(useThemeStore.getState().preference).toBe("dark");
+    // The store applies the resolved theme to the document element.
+    expect(document.documentElement.classList.contains("dark")).toBe(true);
+  });
+
+  it("renders the real stack as the version line, not fake release data", () => {
+    renderWithProviders(<AppSidebar />);
+    expect(
+      screen.getByText("Mediflow OS · React 18 · Django 5.2"),
+    ).toBeInTheDocument();
   });
 });
 
