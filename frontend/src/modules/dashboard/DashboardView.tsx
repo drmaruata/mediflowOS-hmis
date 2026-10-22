@@ -146,13 +146,15 @@ function TotalPatientsChart() {
           Returning
         </span>
       </p>
-      <div className="mt-3 flex h-[150px] items-end gap-2 border-b border-border">
+      {/* Columns stretch to the plot height; each bar's % height resolves
+          against the flex-1 plot box (a content-sized parent gives 0). */}
+      <div className="mt-3 flex h-[150px] gap-2 border-b border-border">
         {rows.map((row) => (
-          <div key={row.day} className="flex flex-1 flex-col items-center">
+          <div key={row.day} className="flex flex-1 flex-col">
             <div
               role="img"
               aria-label={`${row.day}: ${row.a} new, ${row.b} returning`}
-              className="flex h-full w-full items-end justify-center gap-1"
+              className="flex w-full flex-1 items-end justify-center gap-1"
             >
               <span
                 className="w-2.5 rounded-t bg-brand-accent"
