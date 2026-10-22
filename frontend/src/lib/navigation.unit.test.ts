@@ -27,7 +27,10 @@ import {
 describe("navigation groups", () => {
   it("splits into a main menu and a settings group", () => {
     expect(NAV_GROUPS.map((g) => g.id)).toEqual(["main", "settings"]);
-    expect(NAV_GROUPS.map((g) => g.label)).toEqual(["Main Menu", "Settings"]);
+    expect(NAV_GROUPS.map((g) => g.label)).toEqual([
+      "Main Menu",
+      "Configuration & setups",
+    ]);
   });
 
   it("has no duplicate ids across groups", () => {
@@ -38,6 +41,12 @@ describe("navigation groups", () => {
   it("has no duplicate paths across groups", () => {
     const paths = NAV_ITEMS.map((i) => i.path);
     expect(new Set(paths).size).toBe(paths.length);
+  });
+
+  it("gives every nav item a unique two-letter code (Medicore rail chips)", () => {
+    const codes = NAV_ITEMS.map((i) => i.code);
+    expect(codes).toHaveLength(new Set(codes).size);
+    for (const code of codes) expect(code).toMatch(/^[A-Z]{2}$/);
   });
 
   it("gives every item a label and an icon for the non-colour encoding", () => {
@@ -240,6 +249,7 @@ describe("isNavItemActive", () => {
   const mk = (path: string | null): NavItem => ({
     id: "x",
     label: "X",
+    code: "XX",
     path,
     icon: NAV_ITEMS[0].icon,
     release: "R1",

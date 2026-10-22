@@ -2,7 +2,8 @@
  * navigation — application-shell navigation model.
  *
  * Spec: design.md §5.3 (240px rail / 72px collapsed, grouped navigation),
- * §2.3A (dark navy rail, blue active state), §8.0/§8.1,
+ * §8.0/§8.1, the Medicore restyle spec (2026-10-22, §2.3 — the rail renders
+ * each entry's `code` chip instead of its icon), and
  * AGENTS.md §5 ("a nav entry with no matching <Route> renders a blank
  * content area — mark it `disabled` until its module exists").
  *
@@ -64,6 +65,13 @@ export type Release = "R1" | "R2" | "R3" | "R4" | "R5" | "R6" | "R7";
 export interface NavItem {
   id: string;
   label: string;
+  /**
+   * Two-letter chip code shown on the rail instead of an icon (Medicore
+   * restyle, spec §2.3/§4.9). Must be unique across all 36 entries — pinned
+   * by navigation.unit — because the chip doubles as the entry's
+   * at-a-glance identity in the collapsed rail.
+   */
+  code: string;
   /** Path relative to the shell; null when no route exists yet. */
   path: string | null;
   icon: LucideIcon;
@@ -133,6 +141,7 @@ function resolveAvailability(
 function item(
   id: string,
   label: string,
+  code: string,
   path: string,
   icon: LucideIcon,
   release: Release,
@@ -141,6 +150,7 @@ function item(
   return {
     id,
     label,
+    code,
     path,
     icon,
     release,
@@ -154,57 +164,60 @@ function item(
  * user needs on arrival. Ordered roughly by daily touch frequency.
  */
 const MAIN_ITEMS: NavItem[] = [
-  item("dashboard", "Dashboard", "/dashboard", LayoutDashboard, "R1", "dashboard"),
+  item("dashboard", "Dashboard", "DB", "/dashboard", LayoutDashboard, "R1", "dashboard"),
   item(
     "patients",
     "Patient Registration",
+    "PR",
     "/patients",
     UserRoundSearch,
     "R1",
     "patient_registry",
   ),
-  item("opd", "OPD", "/opd", Stethoscope, "R2", "opd"),
-  item("ipd", "IPD", "/ipd", BedDouble, "R2", "ipd"),
-  item("emr", "EMR", "/emr", ClipboardList, "R2", "emr"),
-  item("emergency", "Emergency", "/emergency", AlertTriangle, "R5", "emergency"),
-  item("icu", "ICU & Live Vitals", "/icu", Activity, "R5", "icu"),
-  item("ot", "Operation Theatre", "/ot", ClipboardCheck, "R5", "ot"),
-  item("lis", "Laboratory (LIS)", "/lis", FlaskConical, "R4", "lis"),
-  item("ris", "Radiology (RIS)", "/ris", TestTube2, "R4", "ris"),
-  item("pharmacy", "Pharmacy & Store", "/pharmacy", Package, "R4", "pharmacy"),
-  item("blood-bank", "Blood Bank", "/blood-bank", Syringe, "R4", "blood_bank"),
-  item("insurance", "Insurance", "/billing/insurance", Receipt, "R6", "billing_insurance"),
+  item("opd", "OPD", "OP", "/opd", Stethoscope, "R2", "opd"),
+  item("ipd", "IPD", "IP", "/ipd", BedDouble, "R2", "ipd"),
+  item("emr", "EMR", "EM", "/emr", ClipboardList, "R2", "emr"),
+  item("emergency", "Emergency", "ER", "/emergency", AlertTriangle, "R5", "emergency"),
+  item("icu", "ICU & Live Vitals", "IC", "/icu", Activity, "R5", "icu"),
+  item("ot", "Operation Theatre", "OT", "/ot", ClipboardCheck, "R5", "ot"),
+  item("lis", "Laboratory (LIS)", "LB", "/lis", FlaskConical, "R4", "lis"),
+  item("ris", "Radiology (RIS)", "RD", "/ris", TestTube2, "R4", "ris"),
+  item("pharmacy", "Pharmacy & Store", "RX", "/pharmacy", Package, "R4", "pharmacy"),
+  item("blood-bank", "Blood Bank", "BB", "/blood-bank", Syringe, "R4", "blood_bank"),
+  item("insurance", "Insurance", "IN", "/billing/insurance", Receipt, "R6", "billing_insurance"),
 ];
 
 const SETTINGS_ITEMS: NavItem[] = [
   // Finance administration
-  item("billing", "Billing", "/billing", BadgeIndianRupee, "R2", "billing_insurance"),
-  item("tariffs", "Tariffs", "/billing/tariffs", CreditCard, "R2", "billing_insurance"),
-  item("claims", "Claims & TPA", "/billing/claims", ScrollText, "R6", "billing_insurance"),
+  item("billing", "Billing", "BI", "/billing", BadgeIndianRupee, "R2", "billing_insurance"),
+  item("tariffs", "Tariffs", "TF", "/billing/tariffs", CreditCard, "R2", "billing_insurance"),
+  item("claims", "Claims & TPA", "CL", "/billing/claims", ScrollText, "R6", "billing_insurance"),
 
   // Quality & compliance
-  item("quality-os", "Quality OS", "/quality", ShieldCheck, "R3", "quality_os"),
-  item("capa", "CAPA", "/quality/capa", Wand2, "R3", "quality_os"),
-  item("data-quality", "Data Quality", "/quality/data-quality", Microscope, "R3", "quality_os"),
-  item("alerts", "Alerts", "/quality/alerts", Bell, "R3", "quality_os"),
+  item("quality-os", "Quality OS", "QO", "/quality", ShieldCheck, "R3", "quality_os"),
+  item("capa", "CAPA", "CA", "/quality/capa", Wand2, "R3", "quality_os"),
+  item("data-quality", "Data Quality", "DQ", "/quality/data-quality", Microscope, "R3", "quality_os"),
+  item("alerts", "Alerts", "AL", "/quality/alerts", Bell, "R3", "quality_os"),
   item(
     "assessments",
     "Assessments (NQAS/NABH)",
+    "AS",
     "/quality/assessments",
     ClipboardCheck,
     "R7",
     "quality_os",
   ),
-  item("reports", "Reports & Exports", "/quality/reports", FileSpreadsheet, "R3", "quality_os"),
+  item("reports", "Reports & Exports", "RE", "/quality/reports", FileSpreadsheet, "R3", "quality_os"),
 
   // Facility configuration
-  item("users", "Users & Roles", "/admin/users", Users, "R1", "admin"),
-  item("departments", "Departments", "/admin/departments", Building2, "R1", "admin"),
-  item("wards-beds", "Wards & Beds", "/admin/wards-beds", BedDouble, "R1", "admin"),
-  item("facility-setup", "Facility Setup", "/admin/setup", Settings2, "R1", "admin"),
+  item("users", "Users & Roles", "UR", "/admin/users", Users, "R1", "admin"),
+  item("departments", "Departments", "DE", "/admin/departments", Building2, "R1", "admin"),
+  item("wards-beds", "Wards & Beds", "WB", "/admin/wards-beds", BedDouble, "R1", "admin"),
+  item("facility-setup", "Facility Setup", "FS", "/admin/setup", Settings2, "R1", "admin"),
   item(
     "config-history",
     "Configuration History",
+    "CH",
     "/admin/configuration/history",
     SlidersHorizontal,
     "R1",
@@ -213,6 +226,7 @@ const SETTINGS_ITEMS: NavItem[] = [
   item(
     "registration-config",
     "Registration Config",
+    "RC",
     "/admin/registration-config",
     UserRoundSearch,
     "R1",
@@ -221,24 +235,25 @@ const SETTINGS_ITEMS: NavItem[] = [
   item(
     "quality-profile",
     "Quality Profile",
+    "QP",
     "/admin/quality-profile",
     ShieldCheck,
     "R3",
     "quality_os",
   ),
-  item("abdm-qr", "ABDM / QR", "/admin/abdm/qr", QrCode, "R1", "abdm"),
-  item("audit", "Audit", "/admin/audit", ScrollText, "R1", "audit"),
+  item("abdm-qr", "ABDM / QR", "AQ", "/admin/abdm/qr", QrCode, "R1", "abdm"),
+  item("audit", "Audit", "AU", "/admin/audit", ScrollText, "R1", "audit"),
 
   // Platform & integration
-  item("notifications", "Notifications", "/notifications", Bell, "R1", "platform"),
-  item("abdm-exchange", "ABDM Exchange", "/abdm/exchange", ScanLine, "R6", "abdm"),
-  item("integrations", "Integrations", "/admin/integrations", Plug, "R1", "integration"),
-  item("tenants", "Platform Tenants", "/platform/tenants", UsersRound, "R1", "platform"),
+  item("notifications", "Notifications", "NO", "/notifications", Bell, "R1", "platform"),
+  item("abdm-exchange", "ABDM Exchange", "AB", "/abdm/exchange", ScanLine, "R6", "abdm"),
+  item("integrations", "Integrations", "IG", "/admin/integrations", Plug, "R1", "integration"),
+  item("tenants", "Platform Tenants", "PT", "/platform/tenants", UsersRound, "R1", "platform"),
 ];
 
 export const NAV_GROUPS: readonly NavGroup[] = [
   { id: "main", label: "Main Menu", items: MAIN_ITEMS },
-  { id: "settings", label: "Settings", items: SETTINGS_ITEMS },
+  { id: "settings", label: "Configuration & setups", items: SETTINGS_ITEMS },
 ] as const;
 
 /** Every nav entry across all groups. */
